@@ -1,0 +1,165 @@
+asyncapi: 3.0.0
+info:
+  title: IntelliJ MkDocs Plugin Navigation Events
+  version: 0.1.0
+  description: Event contracts for docs selection and preview navigation flows.
+x-contract-validation:
+  validatedOn: "2026-02-08"
+  validatedAgainst:
+    - "modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/DocsFileSelectionPublisher.kt"
+    - "modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/NavigationCoordinator.kt"
+    - "modules/mkdocs-runtime-adapter/src/main/kotlin/com/authord/mkdocs/runtime/BaseUrlDetector.kt"
+  notes:
+    - "File selection payload fields align with docs selection event publisher."
+    - "Preview navigation requested/applied/failed payloads align with navigation result states."
+    - "Runtime base URL detected payload aligns with base URL detection behavior."
+channels:
+  docs.file.selected:
+    address: docs.file.selected
+    messages:
+      fileSelection:
+        $ref: '#/components/messages/DocsFileSelected'
+  preview.navigation.requested:
+    address: preview.navigation.requested
+    messages:
+      navigationRequested:
+        $ref: '#/components/messages/PreviewNavigationRequested'
+  preview.navigation.applied:
+    address: preview.navigation.applied
+    messages:
+      navigationApplied:
+        $ref: '#/components/messages/PreviewNavigationApplied'
+  preview.navigation.failed:
+    address: preview.navigation.failed
+    messages:
+      navigationFailed:
+        $ref: '#/components/messages/PreviewNavigationFailed'
+  runtime.base-url.detected:
+    address: runtime.base-url.detected
+    messages:
+      baseUrlDetected:
+        $ref: '#/components/messages/RuntimeBaseUrlDetected'
+operations:
+  publishDocsSelection:
+    action: send
+    channel:
+      $ref: '#/channels/docs.file.selected'
+    messages:
+      - $ref: '#/channels/docs.file.selected/messages/fileSelection'
+  publishNavigationRequested:
+    action: send
+    channel:
+      $ref: '#/channels/preview.navigation.requested'
+    messages:
+      - $ref: '#/channels/preview.navigation.requested/messages/navigationRequested'
+  publishNavigationApplied:
+    action: send
+    channel:
+      $ref: '#/channels/preview.navigation.applied'
+    messages:
+      - $ref: '#/channels/preview.navigation.applied/messages/navigationApplied'
+  publishNavigationFailed:
+    action: send
+    channel:
+      $ref: '#/channels/preview.navigation.failed'
+    messages:
+      - $ref: '#/channels/preview.navigation.failed/messages/navigationFailed'
+  publishBaseUrlDetected:
+    action: send
+    channel:
+      $ref: '#/channels/runtime.base-url.detected'
+    messages:
+      - $ref: '#/channels/runtime.base-url.detected/messages/baseUrlDetected'
+components:
+  messages:
+    DocsFileSelected:
+      name: DocsFileSelected
+      payload:
+        $ref: '#/components/schemas/DocsFileSelectedPayload'
+    PreviewNavigationRequested:
+      name: PreviewNavigationRequested
+      payload:
+        $ref: '#/components/schemas/PreviewNavigationRequestedPayload'
+    PreviewNavigationApplied:
+      name: PreviewNavigationApplied
+      payload:
+        $ref: '#/components/schemas/PreviewNavigationAppliedPayload'
+    PreviewNavigationFailed:
+      name: PreviewNavigationFailed
+      payload:
+        $ref: '#/components/schemas/PreviewNavigationFailedPayload'
+    RuntimeBaseUrlDetected:
+      name: RuntimeBaseUrlDetected
+      payload:
+        $ref: '#/components/schemas/RuntimeBaseUrlDetectedPayload'
+  schemas:
+    DocsFileSelectedPayload:
+      type: object
+      required: [eventId, projectId, selectedPath, occurredAt]
+      properties:
+        eventId:
+          type: string
+        projectId:
+          type: string
+        selectedPath:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+    PreviewNavigationRequestedPayload:
+      type: object
+      required: [eventId, projectId, selectedPath, requestedRoute, occurredAt]
+      properties:
+        eventId:
+          type: string
+        projectId:
+          type: string
+        selectedPath:
+          type: string
+        requestedRoute:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+    PreviewNavigationAppliedPayload:
+      type: object
+      required: [eventId, projectId, route, occurredAt]
+      properties:
+        eventId:
+          type: string
+        projectId:
+          type: string
+        route:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+    PreviewNavigationFailedPayload:
+      type: object
+      required: [eventId, projectId, route, reason, occurredAt]
+      properties:
+        eventId:
+          type: string
+        projectId:
+          type: string
+        route:
+          type: string
+        reason:
+          type: string
+        occurredAt:
+          type: string
+          format: date-time
+    RuntimeBaseUrlDetectedPayload:
+      type: object
+      required: [eventId, projectId, baseUrl, occurredAt]
+      properties:
+        eventId:
+          type: string
+        projectId:
+          type: string
+        baseUrl:
+          type: string
+          format: uri
+        occurredAt:
+          type: string
+          format: date-time

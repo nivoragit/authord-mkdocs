@@ -1,0 +1,34 @@
+# Kotlin / Gradle
+.gradle/
+.gradle-user/
+.kotlin/
+build/
+out/
+*.class
+*.jar
+*.iml
+local.properties
+
+# IDE
+.idea/
+.vscode/
+.codex/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs / env
+*.log
+.env*
+
+# Temp
+*.tmp
+*.swp
+
+# Test / coverage
+coverage/
+
+# Project generated
+tests/integration/.gitkeep
+tests/contract/.gitkeep

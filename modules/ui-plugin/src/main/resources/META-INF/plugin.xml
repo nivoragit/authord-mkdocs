@@ -1,0 +1,6 @@
+<idea-plugin>
+    <id>com.authord.mkdocs.plugin</id>
+    <name>Authord MkDocs Plugin</name>
+    <vendor>Authord</vendor>
+    <description>IntelliJ MkDocs MVP with extension-ready seams.</description>
+</idea-plugin>
