@@ -6,6 +6,9 @@ import com.authord.mkdocs.runtime.MkdocsProcessManager
 import com.authord.mkdocs.runtime.RuntimeServerConfig
 import com.authord.mkdocs.runtime.UvBootstrapService
 
+/**
+ * Result returned by plugin activation flow.
+ */
 data class ActivationResult(
     val success: Boolean,
     val reason: ActivationFailureReason? = null,
@@ -13,6 +16,9 @@ data class ActivationResult(
     val previewUrl: String = "",
 )
 
+/**
+ * Orchestrates first activation bootstrap, runtime startup, and preview opening.
+ */
 class PluginActivationService(
     private val bootstrapService: UvBootstrapService,
     private val processManager: MkdocsProcessManager,
@@ -20,6 +26,14 @@ class PluginActivationService(
     private val previewPaneCoordinator: PreviewPaneCoordinator,
     private val errorPresenter: ActivationErrorPresenter,
 ) {
+    /**
+     * Activates plugin runtime for a project.
+     *
+     * @param projectId stable project key.
+     * @param projectPath project root path.
+     * @param startupOutput runtime startup stdout used for base URL detection.
+     * @param featureFlags effective feature-flag policy.
+     */
     fun activate(
         projectId: String,
         projectPath: String,

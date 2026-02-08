@@ -1,5 +1,8 @@
 package com.authord.mkdocs.ui
 
+/**
+ * Preview session state per project.
+ */
 data class PreviewPaneState(
     val projectId: String,
     val baseUrl: String,
@@ -7,9 +10,13 @@ data class PreviewPaneState(
     val isOpen: Boolean,
 )
 
+/**
+ * Tracks and updates preview pane routing state for each project.
+ */
 class PreviewPaneCoordinator {
     private val sessions = mutableMapOf<String, PreviewPaneState>()
 
+    /** Opens preview state for a project with a detected base URL. */
     fun open(projectId: String, baseUrl: String): PreviewPaneState {
         val state = PreviewPaneState(
             projectId = projectId,
@@ -21,6 +28,7 @@ class PreviewPaneCoordinator {
         return state
     }
 
+    /** Navigates existing preview session to a route. */
     fun navigate(projectId: String, route: String): PreviewPaneState? {
         val existing = sessions[projectId] ?: return null
         val normalized = normalizeRoute(route)
@@ -29,11 +37,13 @@ class PreviewPaneCoordinator {
         return updated
     }
 
+    /** Returns currently resolved absolute preview URL for a project. */
     fun currentUrl(projectId: String): String? {
         val state = sessions[projectId] ?: return null
         return if (state.currentRoute == "/") state.baseUrl else "${state.baseUrl.trimEnd('/')}${state.currentRoute}"
     }
 
+    /** Returns current session state for a project. */
     fun currentState(projectId: String): PreviewPaneState? = sessions[projectId]
 
     private fun normalizeRoute(route: String): String {

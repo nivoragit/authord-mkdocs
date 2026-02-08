@@ -8,7 +8,7 @@ Maps MVP functional requirements from `spec.md` to implemented unit, integration
 |----------------|---------------------|-----------|-----------------------------|
 | FR-001 | Create plugin-managed runtime on first activation | Unit + Integration | `UvBootstrapServiceTest`, `ActivationToPreviewIT` |
 | FR-002 | Install documentation tooling during first activation | Unit + Integration | `UvBootstrapServiceTest`, `ActivationToPreviewIT` |
-| FR-003 | Start preview serving with default bind/port and incremental refresh | Unit + Integration | `MkdocsProcessManagerTest`, `ActivationToPreviewIT` |
+| FR-003 | Start preview serving with runtime defaults and no hardcoded host/port | Unit + Integration | `MkdocsProcessManagerTest`, `ActivationToPreviewIT` |
 | FR-004 | Detect base URL from startup output | Unit + Integration | `BaseUrlDetectorTest`, `ActivationToPreviewIT` |
 | FR-005 | Open side-by-side preview after URL detection | Unit + Integration | `PreviewPaneCoordinatorTest`, `ActivationToPreviewIT` |
 | FR-006 | Provide dedicated docs explorer | Unit + Integration | `DocsExplorerServiceTest`, `ExplorerSelectionToPreviewIT` |
@@ -18,7 +18,7 @@ Maps MVP functional requirements from `spec.md` to implemented unit, integration
 | FR-010 | Map `docs/<segment>.md` to `/<segment>/` | Unit | `RouteMappingServiceTest` |
 | FR-011 | Apply route mapping to nested paths | Unit | `RouteMappingServiceTest` |
 | FR-012 | Track scroll delta excluding comment PSI ranges | Unit | `ScrollSemanticServiceTest` |
-| FR-013 | Implement TopicTreeService command API seam | Unit + Contract | `TopicTreeAggregateTest`, `TopicTreePortContractTest` |
+| FR-013 | Implement TopicTreeService command API seam (`add/move/remove/rename/reparent/reorder/validate`) | Unit + Contract | `TopicTreeAggregateTest`, `TopicTreePortContractTest` |
 | FR-014 | Implement PluginCommandBus + CommandRegistry seams | Unit + Contract | `InMemoryCommandRegistryTest`, `PluginCommandBusContractTest`, `TopicTreePortContractTest` |
 | FR-015 | Implement VectorStorePort seam | Unit + Contract | `NoOpAdaptersTest`, `TopicTreePortContractTest` |
 | FR-016 | Implement PreviewSyncPort seam | Unit + Contract | `NoOpAdaptersTest`, `TopicTreePortContractTest` |

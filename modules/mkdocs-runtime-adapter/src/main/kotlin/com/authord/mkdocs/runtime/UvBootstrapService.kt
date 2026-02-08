@@ -1,17 +1,38 @@
 package com.authord.mkdocs.runtime
 
-import java.io.File
+import java.nio.file.Path
 
+/** API version for runtime command-runner seam. */
+const val COMMAND_RUNNER_API_VERSION: String = "1.0.0"
+
+/**
+ * Command runner contract used by runtime bootstrap orchestration.
+ *
+ * API Version: [COMMAND_RUNNER_API_VERSION]
+ */
+fun interface CommandRunner {
+    /**
+     * Runs a process command in the given working directory path.
+     *
+     * @param command tokenized command list.
+     * @param workingDir absolute or project-relative working directory string.
+     * @return process execution details.
+     */
+    fun run(command: List<String>, workingDir: String): CommandResult
+}
+
+/**
+ * Process command execution result envelope.
+ */
 data class CommandResult(
     val exitCode: Int,
     val stdout: String = "",
     val stderr: String = "",
 )
 
-fun interface CommandRunner {
-    fun run(command: List<String>, workingDir: String): CommandResult
-}
-
+/**
+ * Runtime bootstrap result envelope.
+ */
 data class BootstrapResult(
     val success: Boolean,
     val runtimePath: String,
@@ -20,13 +41,26 @@ data class BootstrapResult(
     val errorMessage: String = "",
 )
 
+/**
+ * Bootstraps a plugin-managed runtime using `uv` and installs `mkdocs`.
+ *
+ * Usage:
+ * - Call once per activation attempt.
+ * - Repeated calls for same project path skip duplicate setup.
+ */
 class UvBootstrapService(
     private val commandRunner: CommandRunner,
 ) {
     private val bootstrappedProjects = mutableSetOf<String>()
 
+    /**
+     * Ensures project runtime exists and required packages are installed.
+     *
+     * @param projectPath root project path.
+     * @return bootstrap status, executed commands, and error details on failure.
+     */
     fun bootstrap(projectPath: String): BootstrapResult {
-        val runtimePath = File(projectPath, ".mkdocs-plugin-venv").path
+        val runtimePath = Path.of(projectPath).resolve(".mkdocs-plugin-venv").toString()
 
         if (bootstrappedProjects.contains(projectPath)) {
             return BootstrapResult(

@@ -1,5 +1,6 @@
 package com.authord.mkdocs.runtime
 
+import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -15,12 +16,13 @@ class UvBootstrapServiceTest {
         }
 
         val result = service.bootstrap("/tmp/project")
+        val expectedRuntimePath = Path.of("/tmp/project").resolve(".mkdocs-plugin-venv").toString()
 
         assertTrue(result.success)
         assertFalse(result.skipped)
-        assertEquals(listOf("uv", "venv", "/tmp/project/.mkdocs-plugin-venv"), commands[0])
+        assertEquals(listOf("uv", "venv", expectedRuntimePath), commands[0])
         assertEquals(listOf("uv", "pip", "install", "mkdocs"), commands[1])
-        assertEquals("/tmp/project/.mkdocs-plugin-venv", result.runtimePath)
+        assertEquals(expectedRuntimePath, result.runtimePath)
     }
 
     @Test

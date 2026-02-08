@@ -6,6 +6,7 @@ import com.authord.mkdocs.defaults.preview.NoOpPreviewSyncAdapter
 import com.authord.mkdocs.defaults.vector.NoOpVectorStoreAdapter
 import com.authord.mkdocs.ports.command.DefaultPluginCommandBus
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
+import com.authord.mkdocs.ports.topic.RenameTopicNodeCommand
 import com.authord.mkdocs.ports.topic.TopicTreeCommandStatus
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -17,6 +18,7 @@ class TopicTreePortContractTest {
         val topicTreeService = TopicTreeMutationService()
         val registry = InMemoryCommandRegistry().apply {
             register("ADD") { topicTreeService.execute(it) }
+            register("RENAME") { topicTreeService.execute(it) }
         }
         val bus = DefaultPluginCommandBus(registry)
         val previewSync = NoOpPreviewSyncAdapter()
@@ -35,8 +37,17 @@ class TopicTreePortContractTest {
 
         previewSync.onEditorScrollSemanticDelta("project-1", "docs/index.md", 10)
         vectorStore.upsert("doc-1", "content")
+        val renamed = bus.dispatch(
+            RenameTopicNodeCommand(
+                commandId = "cmd-2",
+                treeId = "tree-1",
+                nodeId = "child-1",
+                newTitle = "Renamed",
+            )
+        )
 
         assertEquals(TopicTreeCommandStatus.SUCCESS, result.status)
+        assertEquals(TopicTreeCommandStatus.SUCCESS, renamed.status)
         assertEquals(listOf(10), previewSync.receivedDeltas)
         assertTrue(vectorStore.search("query", 5).isEmpty())
     }

@@ -8,7 +8,8 @@ description: "Task list template for feature implementation"
 **Input**: Design documents from `/specs/[###-feature-name]/`
 **Prerequisites**: plan.md (required), spec.md (required for user stories), research.md, data-model.md, contracts/
 
-**Tests**: The examples below include test tasks. Tests are OPTIONAL - only include them if explicitly requested in the feature specification.
+**Tests**: Unit tests and coverage-gate tasks are REQUIRED for in-scope production code.
+Integration and contract tests are included when required by specification/constitution.
 
 **Organization**: Tasks are grouped by user story to enable independent implementation and testing of each story.
 
@@ -68,6 +69,9 @@ Examples of foundational tasks (adjust based on your project):
 - [ ] T007 Create base models/entities that all stories depend on
 - [ ] T008 Configure error handling and logging infrastructure
 - [ ] T009 Setup environment configuration management
+- [ ] T010 Define public interface versioning and backward-compatibility policy
+- [ ] T011 Configure CI to fail when scoped unit coverage is below threshold
+- [ ] T012 Define KDoc/comment compliance checks for public APIs and non-obvious logic
 
 **Checkpoint**: Foundation ready - user story implementation can now begin in parallel
 
@@ -150,10 +154,17 @@ Examples of foundational tasks (adjust based on your project):
 
 **Purpose**: Improvements that affect multiple user stories
 
-- [ ] TXXX [P] Documentation updates in docs/
+- [ ] TXXX [P] Update feature spec for delivered behavior in specs/[###-feature-name]/spec.md
+- [ ] TXXX [P] Update technical design notes in docs/implementation/technical-design-notes.md
+- [ ] TXXX [P] Update operational runbook in docs/implementation/operational-runbook.md
+- [ ] TXXX [P] Update test plan + requirements-to-tests traceability matrix
+- [ ] TXXX [P] Update changelog and migration notes (if compatibility changed)
+- [ ] TXXX [P] Add/verify KDoc for all new/changed public classes, interfaces, methods, and functions
+- [ ] TXXX [P] Add meaningful comments for invariants/edge cases and remove redundant comments
 - [ ] TXXX Code cleanup and refactoring
 - [ ] TXXX Performance optimization across all stories
-- [ ] TXXX [P] Additional unit tests (if requested) in tests/unit/
+- [ ] TXXX [P] Enforce and verify scoped unit coverage gate in CI/build configuration
+- [ ] TXXX [P] Additional integration/contract tests (if required) in tests/integration/ and tests/contract/
 - [ ] TXXX Security hardening
 - [ ] TXXX Run quickstart.md validation
 
@@ -176,6 +187,11 @@ Examples of foundational tasks (adjust based on your project):
 - **User Story 2 (P2)**: Can start after Foundational (Phase 2) - May integrate with US1 but should be independently testable
 - **User Story 3 (P3)**: Can start after Foundational (Phase 2) - May integrate with US1/US2 but should be independently testable
 
+### Cycle Completion Gate
+
+- The cycle remains **INCOMPLETE** until all required documentation artifacts are updated,
+  scoped unit coverage gate passes in CI, and traceability from requirements to tests is verified.
+
 ### Within Each User Story
 
 - Tests (if included) MUST be written and FAIL before implementation
@@ -183,6 +199,7 @@ Examples of foundational tasks (adjust based on your project):
 - Services before endpoints
 - Core implementation before integration
 - Story complete before moving to next priority
+- Public interface versioning tasks before publishing interface changes
 
 ### Parallel Opportunities
 
@@ -246,6 +263,10 @@ With multiple developers:
 - [Story] label maps task to specific user story for traceability
 - Each user story should be independently completable and testable
 - Verify tests fail before implementing
+- Every implementation task should reference requirement IDs
+- Every requirement ID should map to one or more unit tests
+- Include explicit documentation tasks for feature spec, technical notes, runbook, traceability, and changelog
+- Include explicit tasks for interface contracts/versioning and KDoc/comment compliance
 - Commit after each task or logical group
 - Stop at any checkpoint to validate story independently
 - Avoid: vague tasks, same file conflicts, cross-story dependencies that break independence

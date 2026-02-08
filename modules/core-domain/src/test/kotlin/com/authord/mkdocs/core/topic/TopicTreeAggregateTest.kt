@@ -3,7 +3,9 @@ package com.authord.mkdocs.core.topic
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
 import com.authord.mkdocs.ports.topic.MoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
+import com.authord.mkdocs.ports.topic.RenameTopicNodeCommand
 import com.authord.mkdocs.ports.topic.ReorderTopicNodesCommand
+import com.authord.mkdocs.ports.topic.ReparentTopicNodeCommand
 import com.authord.mkdocs.ports.topic.TopicTreeCommandStatus
 import com.authord.mkdocs.ports.topic.ValidateTopicTreeCommand
 import kotlin.test.Test
@@ -199,6 +201,63 @@ class TopicTreeAggregateTest {
 
         assertEquals(TopicTreeCommandStatus.REJECTED, result.status)
         assertTrue(result.violations.any { it.code == "NODE_MISSING" })
+    }
+
+    @Test
+    fun `rename updates title and rejects blank`() {
+        val aggregate = TopicTreeAggregate("tree-1")
+        aggregate.apply(AddTopicNodeCommand("add-1", "tree-1", "root", "n1", "Old", 0))
+
+        val renamed = aggregate.apply(RenameTopicNodeCommand("rename-1", "tree-1", "n1", "New"))
+        val invalid = aggregate.apply(RenameTopicNodeCommand("rename-2", "tree-1", "n1", " "))
+
+        assertEquals(TopicTreeCommandStatus.SUCCESS, renamed.status)
+        assertEquals("New", aggregate.snapshot().first { it.nodeId == "n1" }.title)
+        assertEquals(TopicTreeCommandStatus.REJECTED, invalid.status)
+        assertTrue(invalid.violations.any { it.code == "INVALID_INPUT" })
+    }
+
+    @Test
+    fun `rename rejects missing node`() {
+        val aggregate = TopicTreeAggregate("tree-1")
+
+        val result = aggregate.apply(RenameTopicNodeCommand("rename-1", "tree-1", "missing", "New"))
+
+        assertEquals(TopicTreeCommandStatus.REJECTED, result.status)
+        assertTrue(result.violations.any { it.code == "NODE_MISSING" })
+    }
+
+    @Test
+    fun `reparent updates parent and rejects invalid states`() {
+        val aggregate = TopicTreeAggregate("tree-1")
+        aggregate.apply(AddTopicNodeCommand("add-1", "tree-1", "root", "a", "A", 0))
+        aggregate.apply(AddTopicNodeCommand("add-2", "tree-1", "a", "b", "B", 0))
+        aggregate.apply(AddTopicNodeCommand("add-3", "tree-1", "root", "c", "C", 1))
+
+        val success = aggregate.apply(ReparentTopicNodeCommand("reparent-1", "tree-1", "c", "a"))
+        val cycle = aggregate.apply(ReparentTopicNodeCommand("reparent-2", "tree-1", "a", "b"))
+        val root = aggregate.apply(ReparentTopicNodeCommand("reparent-3", "tree-1", "root", "a"))
+        val missing = aggregate.apply(ReparentTopicNodeCommand("reparent-4", "tree-1", "missing", "a"))
+
+        assertEquals(TopicTreeCommandStatus.SUCCESS, success.status)
+        assertEquals("a", aggregate.snapshot().first { it.nodeId == "c" }.parentNodeId)
+        assertEquals(TopicTreeCommandStatus.REJECTED, cycle.status)
+        assertTrue(cycle.violations.any { it.code == "CYCLE" })
+        assertEquals(TopicTreeCommandStatus.REJECTED, root.status)
+        assertTrue(root.violations.any { it.code == "ROOT_REPARENT" })
+        assertEquals(TopicTreeCommandStatus.REJECTED, missing.status)
+        assertTrue(missing.violations.any { it.code == "NODE_MISSING" })
+    }
+
+    @Test
+    fun `reparent rejects missing parent`() {
+        val aggregate = TopicTreeAggregate("tree-1")
+        aggregate.apply(AddTopicNodeCommand("add-1", "tree-1", "root", "child", "Child", 0))
+
+        val result = aggregate.apply(ReparentTopicNodeCommand("reparent-missing-parent", "tree-1", "child", "missing-parent"))
+
+        assertEquals(TopicTreeCommandStatus.REJECTED, result.status)
+        assertTrue(result.violations.any { it.code == "PARENT_MISSING" })
     }
 
     @Test

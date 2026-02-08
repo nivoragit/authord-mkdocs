@@ -182,7 +182,7 @@ components:
           type: string
         commandType:
           type: string
-          enum: [ADD, MOVE, REMOVE, REORDER, VALIDATE]
+          enum: [ADD, MOVE, REMOVE, RENAME, REPARENT, REORDER, VALIDATE]
         treeId:
           type: string
         payload:
@@ -190,6 +190,8 @@ components:
             - $ref: '#/components/schemas/AddNodePayload'
             - $ref: '#/components/schemas/MoveNodePayload'
             - $ref: '#/components/schemas/RemoveNodePayload'
+            - $ref: '#/components/schemas/RenameNodePayload'
+            - $ref: '#/components/schemas/ReparentNodePayload'
             - $ref: '#/components/schemas/ReorderNodePayload'
             - $ref: '#/components/schemas/ValidateTreePayload'
     AddNodePayload:
@@ -222,6 +224,23 @@ components:
       required: [nodeId]
       properties:
         nodeId:
+          type: string
+    RenameNodePayload:
+      type: object
+      required: [nodeId, newTitle]
+      properties:
+        nodeId:
+          type: string
+        newTitle:
+          type: string
+          minLength: 1
+    ReparentNodePayload:
+      type: object
+      required: [nodeId, newParentNodeId]
+      properties:
+        nodeId:
+          type: string
+        newParentNodeId:
           type: string
     ReorderNodePayload:
       type: object

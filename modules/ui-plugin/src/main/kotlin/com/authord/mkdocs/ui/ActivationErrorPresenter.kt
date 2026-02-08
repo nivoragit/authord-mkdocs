@@ -1,5 +1,8 @@
 package com.authord.mkdocs.ui
 
+/**
+ * Activation failure categories surfaced to callers.
+ */
 enum class ActivationFailureReason {
     MVP_DISABLED,
     BOOTSTRAP_FAILED,
@@ -7,7 +10,13 @@ enum class ActivationFailureReason {
     BASE_URL_NOT_FOUND,
 }
 
+/**
+ * Formats user-facing activation failure messages.
+ */
 class ActivationErrorPresenter {
+    /**
+     * Builds a message for a failure reason and optional detail text.
+     */
     fun present(reason: ActivationFailureReason, details: String = ""): String {
         val base = when (reason) {
             ActivationFailureReason.MVP_DISABLED -> "MVP activation is disabled by feature flags."

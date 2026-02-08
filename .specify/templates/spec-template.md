@@ -75,6 +75,17 @@
 - What happens when [boundary condition]?
 - How does system handle [error scenario]?
 
+## Out of Scope *(mandatory)*
+
+<!--
+  ACTION REQUIRED: Explicitly list what this cycle will NOT implement.
+  These exclusions must stay disabled in delivery unless constitution-approved.
+-->
+
+- [Out-of-scope capability 1]
+- [Out-of-scope capability 2]
+- [Out-of-scope capability 3]
+
 ## Requirements *(mandatory)*
 
 <!--
@@ -94,6 +105,30 @@
 
 - **FR-006**: System MUST authenticate users via [NEEDS CLARIFICATION: auth method not specified - email/password, SSO, OAuth?]
 - **FR-007**: System MUST retain user data for [NEEDS CLARIFICATION: retention period not specified]
+
+### Public Interfaces & Versioning *(mandatory when public interfaces change)*
+
+<!--
+  ACTION REQUIRED: For each new/changed public service/interface, define versioning
+  and compatibility expectations.
+-->
+
+- **PI-001**: Public interface [name] MUST be versioned as [version].
+- **PI-002**: Changes to [name] MUST preserve backward compatibility for [supported scope] or provide migration notes.
+- **PI-003**: Usage contract for [name] MUST define inputs, outputs, constraints, and failure modes.
+
+### Documentation Deliverables *(mandatory)*
+
+<!--
+  ACTION REQUIRED: Confirm the documentation bundle required for cycle completion.
+-->
+
+- **DOC-001**: Feature spec is updated for the delivered scope.
+- **DOC-002**: Technical design notes are updated for architecture and contracts.
+- **DOC-003**: Operational runbook is updated for runtime and failure handling.
+- **DOC-004**: Test plan and requirements-to-tests traceability matrix are updated.
+- **DOC-005**: Changelog is updated; migration notes are included when compatibility is impacted.
+- **DOC-006**: Each new/changed public function/service includes usage guidance (purpose, inputs, outputs, errors, and relevant examples).
 
 ### Key Entities *(include if feature involves data)*
 

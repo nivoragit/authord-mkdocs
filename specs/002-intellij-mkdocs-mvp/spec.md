@@ -51,7 +51,7 @@ A product team needs MVP to capture editor scroll delta (excluding comment PSI r
 **Acceptance Scenarios**:
 
 1. **Given** a docs markdown editor view, **When** the author scrolls content, **Then** scroll delta is captured only from non-comment PSI ranges.
-2. **Given** TopicTreeService command API, PluginCommandBus + CommandRegistry, VectorStorePort, and PreviewSyncPort seams are present, **When** invoked in MVP mode, **Then** they return minimal/default behavior only.
+2. **Given** TopicTreeService command API (`add`, `move`, `remove`, `rename`, `reparent`, `reorder`, `validate`), PluginCommandBus + CommandRegistry, VectorStorePort, and PreviewSyncPort seams are present, **When** invoked in MVP mode, **Then** they return minimal/default behavior only.
 3. **Given** staged feature flags, **When** plugin features initialize, **Then** only in-scope capabilities are enabled by default.
 
 ### Edge Cases
@@ -70,7 +70,7 @@ A product team needs MVP to capture editor scroll delta (excluding comment PSI r
 
 - **FR-001**: System MUST create a plugin-managed runtime on first activation when one does not already exist.
 - **FR-002**: System MUST install required documentation tooling into the plugin-managed runtime during first activation.
-- **FR-003**: System MUST start documentation preview serving during activation with default bind and port settings and incremental refresh behavior.
+- **FR-003**: System MUST start documentation preview serving during activation using runtime defaults without hardcoded host/port values.
 - **FR-004**: System MUST detect preview base URL from startup output before opening preview.
 - **FR-005**: System MUST open a side-by-side preview pane after successful base URL detection.
 - **FR-006**: System MUST provide a dedicated docs explorer for markdown content navigation.
@@ -80,7 +80,7 @@ A product team needs MVP to capture editor scroll delta (excluding comment PSI r
 - **FR-010**: System MUST map `docs/<segment>.md` to `/<segment>/`.
 - **FR-011**: System MUST apply the same mapping behavior to nested paths under `docs/`.
 - **FR-012**: System MUST track editor scroll delta for docs content and exclude comment PSI ranges from the captured delta.
-- **FR-013**: System MUST implement TopicTreeService command API seam with add, move, remove, reorder, and validate commands using minimal/default MVP behavior.
+- **FR-013**: System MUST implement TopicTreeService command API seam with add, move, remove, rename, reparent, reorder, and validate commands using minimal/default MVP behavior.
 - **FR-014**: System MUST implement PluginCommandBus and CommandRegistry seams with minimal/default MVP behavior.
 - **FR-015**: System MUST implement VectorStorePort seam with minimal/default MVP behavior.
 - **FR-016**: System MUST implement PreviewSyncPort seam with minimal/default MVP behavior.

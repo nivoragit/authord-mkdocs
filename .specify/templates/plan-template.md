@@ -3,7 +3,7 @@
 **Branch**: `[###-feature-name]` | **Date**: [DATE] | **Spec**: [link]
 **Input**: Feature specification from `/specs/[###-feature-name]/spec.md`
 
-**Note**: This template is filled in by the `/speckit.plan` command. See `.specify/templates/commands/plan.md` for the execution workflow.
+**Note**: This template is filled in by the `/speckit.plan` command.
 
 ## Summary
 
@@ -31,7 +31,16 @@
 
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+| Gate | Description | Status |
+|------|-------------|--------|
+| I. OS-Neutral Execution | Uses `uv`, avoids shell activation scripts and hardcoded Python paths, and uses Path APIs for filesystem operations | [PASS/FAIL] |
+| II. Runtime Decoupling | Avoids hardcoded host/port and routes preview using base URL detected from runtime stdout | [PASS/FAIL] |
+| III. Delivery Completeness | Plans all required docs: feature spec, technical design notes, operational runbook, test plan + traceability matrix, changelog, migration notes (if needed) | [PASS/FAIL] |
+| IV. Test Gate | Enforces 100% unit coverage for scoped code and CI failure below threshold | [PASS/FAIL] |
+| V. MVP-First, Extension-Ready | Limits implementation to MVP behavior and defines stable interfaces with default/no-op adapters for future features | [PASS/FAIL] |
+| VI. Topic-Tree Parity Runway | Keeps topic-tree domain vendor-independent and defines command-based mutation + validation runway | [PASS/FAIL] |
+| VII. Backward Compatibility | Defines interface versioning and confirms MVP workflows remain compatible | [PASS/FAIL] |
+| VIII. Code Documentation Standard | Plans KDoc for all public APIs and meaningful comments for non-obvious logic/invariants | [PASS/FAIL] |
 
 ## Project Structure
 

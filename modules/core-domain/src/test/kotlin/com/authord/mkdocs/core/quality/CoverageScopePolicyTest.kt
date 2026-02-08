@@ -10,11 +10,14 @@ class CoverageScopePolicyTest {
     fun `coverage verification requires 100 percent line coverage`() {
         val root = findRepoRoot()
         val buildFile = root.resolve("build.gradle.kts")
+        val ciWorkflow = root.resolve(".github/workflows/ci.yml")
 
-        val content = Files.readString(buildFile)
+        val buildContent = Files.readString(buildFile)
+        val ciContent = Files.readString(ciWorkflow)
 
-        assertTrue(content.contains("jacocoTestCoverageVerification"), "Coverage verification task must be configured")
-        assertTrue(content.contains("minimum = BigDecimal(\"1.0\")"), "Coverage minimum must be 100%")
+        assertTrue(buildContent.contains("jacocoTestCoverageVerification"), "Coverage verification task must be configured")
+        assertTrue(buildContent.contains("minimum = BigDecimal(\"1.0\")"), "Coverage minimum must be 100%")
+        assertTrue(ciContent.contains("jacocoTestCoverageVerification"), "CI must run the coverage verification task")
     }
 
     private fun findRepoRoot(): Path {

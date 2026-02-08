@@ -4,18 +4,26 @@ import com.authord.mkdocs.ports.TopicTreePort
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
 import com.authord.mkdocs.ports.topic.MoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
+import com.authord.mkdocs.ports.topic.RenameTopicNodeCommand
 import com.authord.mkdocs.ports.topic.ReorderTopicNodesCommand
+import com.authord.mkdocs.ports.topic.ReparentTopicNodeCommand
 import com.authord.mkdocs.ports.topic.TopicTreeCommand
 import com.authord.mkdocs.ports.topic.TopicTreeCommandResult
 import com.authord.mkdocs.ports.topic.TopicTreeCommandStatus
 import com.authord.mkdocs.ports.topic.TopicTreeViolation
 import com.authord.mkdocs.ports.topic.ValidateTopicTreeCommand
 
+/**
+ * Lifecycle state for a topic node inside the aggregate.
+ */
 enum class TopicNodeStatus {
     ACTIVE,
     REMOVED
 }
 
+/**
+ * Aggregate node model used by the MVP mutation engine.
+ */
 data class TopicNode(
     val nodeId: String,
     val parentNodeId: String?,
@@ -24,6 +32,14 @@ data class TopicNode(
     val status: TopicNodeStatus = TopicNodeStatus.ACTIVE,
 )
 
+/**
+ * In-memory topic-tree aggregate enforcing command-based mutations.
+ *
+ * Usage:
+ * - Construct per tree ID.
+ * - Apply commands through [apply].
+ * - Read immutable snapshots through [snapshot].
+ */
 class TopicTreeAggregate(
     val treeId: String,
     private val rootNodeId: String = "root",
@@ -35,13 +51,21 @@ class TopicTreeAggregate(
     var version: Int = 0
         private set
 
+    /**
+     * Returns a point-in-time node snapshot.
+     */
     fun snapshot(): List<TopicNode> = nodes.values.toList()
 
+    /**
+     * Executes one mutation/validation command and returns the result envelope.
+     */
     fun apply(command: TopicTreeCommand): TopicTreeCommandResult {
         return when (command) {
             is AddTopicNodeCommand -> add(command)
             is MoveTopicNodeCommand -> move(command)
             is RemoveTopicNodeCommand -> remove(command)
+            is RenameTopicNodeCommand -> rename(command)
+            is ReparentTopicNodeCommand -> reparent(command)
             is ReorderTopicNodesCommand -> reorder(command)
             is ValidateTopicTreeCommand -> validate(command.commandId)
         }
@@ -95,11 +119,37 @@ class TopicTreeAggregate(
         return success(command.commandId)
     }
 
+    private fun rename(command: RenameTopicNodeCommand): TopicTreeCommandResult {
+        val existing = nodes[command.nodeId] ?: return rejected(command.commandId, "NODE_MISSING", "Node does not exist")
+        if (command.newTitle.isBlank()) {
+            return rejected(command.commandId, "INVALID_INPUT", "Title must not be blank")
+        }
+        nodes[command.nodeId] = existing.copy(title = command.newTitle)
+        return success(command.commandId)
+    }
+
+    private fun reparent(command: ReparentTopicNodeCommand): TopicTreeCommandResult {
+        if (command.nodeId == rootNodeId) {
+            return rejected(command.commandId, "ROOT_REPARENT", "Root node cannot be reparented")
+        }
+        val existing = nodes[command.nodeId] ?: return rejected(command.commandId, "NODE_MISSING", "Node does not exist")
+        if (!nodes.containsKey(command.newParentNodeId)) {
+            return rejected(command.commandId, "PARENT_MISSING", "New parent does not exist")
+        }
+        if (wouldCreateCycle(command.nodeId, command.newParentNodeId)) {
+            return rejected(command.commandId, "CYCLE", "Reparent would create cycle")
+        }
+
+        nodes[command.nodeId] = existing.copy(parentNodeId = command.newParentNodeId)
+        return success(command.commandId)
+    }
+
     private fun reorder(command: ReorderTopicNodesCommand): TopicTreeCommandResult {
         if (!nodes.containsKey(command.parentNodeId)) {
             return rejected(command.commandId, "PARENT_MISSING", "Parent does not exist")
         }
 
+        // Reorder command must describe an exact permutation of active siblings to avoid silent drops/dupes.
         val siblingIds = nodes.values
             .filter { it.parentNodeId == command.parentNodeId && it.status == TopicNodeStatus.ACTIVE }
             .map { it.nodeId }
@@ -167,6 +217,7 @@ class TopicTreeAggregate(
     }
 
     private fun wouldCreateCycle(nodeId: String, newParentId: String): Boolean {
+        // Walk parent chain upward; encountering nodeId means reparent/move introduces an ancestor cycle.
         var current: String? = newParentId
         while (current != null) {
             if (current == nodeId) {
@@ -178,9 +229,15 @@ class TopicTreeAggregate(
     }
 }
 
+/**
+ * Default in-memory [TopicTreePort] implementation backed by per-tree aggregates.
+ */
 class TopicTreeMutationService(
     private val aggregateByTreeId: MutableMap<String, TopicTreeAggregate> = mutableMapOf(),
 ) : TopicTreePort {
+    /**
+     * Executes command against a tree aggregate, creating aggregate state on first access.
+     */
     override fun execute(command: TopicTreeCommand): TopicTreeCommandResult {
         val aggregate = aggregateByTreeId.getOrPut(command.treeId) { TopicTreeAggregate(command.treeId) }
         return aggregate.apply(command)

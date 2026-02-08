@@ -72,10 +72,10 @@ class MkdocsProcessManagerTest {
     }
 
     @Test
-    fun `restart without existing process falls back to start default working dir`() {
+    fun `restart without existing process falls back to defaults and current dir`() {
         val manager = MkdocsProcessManager(ProcessLauncher { command, workingDir ->
             assertEquals(".", workingDir)
-            assertTrue(command.contains("--dirtyreload"))
+            assertEquals(listOf("mkdocs", "serve"), command)
             FakeHandle("process-default")
         })
 
@@ -86,19 +86,19 @@ class MkdocsProcessManagerTest {
     }
 
     @Test
-    fun `start supports non-dirty mode`() {
+    fun `start appends caller supplied extra args`() {
         val manager = MkdocsProcessManager(ProcessLauncher { command, _ ->
-            assertTrue(!command.contains("--dirtyreload"))
-            FakeHandle("process-nondirty")
+            assertEquals(listOf("mkdocs", "serve", "--dirtyreload"), command)
+            FakeHandle("process-extra")
         })
 
         val start = manager.start(
             projectId = "project-4",
             workingDir = "/tmp/project",
-            config = RuntimeServerConfig(dirtyReload = false),
+            config = RuntimeServerConfig(extraArgs = listOf("--dirtyreload")),
         )
 
-        assertEquals("process-nondirty", start.processId)
-        assertTrue(start.command.none { it == "--dirtyreload" })
+        assertEquals("process-extra", start.processId)
+        assertEquals(listOf("mkdocs", "serve", "--dirtyreload"), start.command)
     }
 }
