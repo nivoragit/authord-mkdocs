@@ -1,91 +1,90 @@
-# Phase 0 Research: IntelliJ MkDocs Plugin MVP
+# Phase 0 Research: IntelliJ Plugin Shell Cycle
 
 ## Scope
 
-Research tasks were derived from:
-- MVP architecture goals (extension-ready seams + minimal defaults)
-- Runtime lifecycle constraints (single server per project, reliable start/stop/restart, dispose-safe cleanup)
-- Contract needs (topic-tree command DTO/results, explorer and preview events)
-- Quality gates (SDD artifacts and 100% unit coverage for in-scope code)
+Research tasks were derived from plugin-shell workstreams:
+- Build/plugin setup and `runIde` availability
+- Plugin descriptor registration for tool window and action
+- UI action wiring to existing runtime/domain services
+- Runtime integration preserving lifecycle and single-instance behavior
+- Verification and DocOps quality gates
 
-All technical-context unknowns are resolved in this document.
+All technical-context clarifications required for planning are resolved below.
 
 ## Decisions
 
-### 1) Module Boundary Strategy
+### 1) IntelliJ plugin build strategy
 
-- Decision: Use a five-module architecture exactly matching requested boundaries: `core-domain`, `mkdocs-runtime-adapter`, `ui-plugin`, `extension-ports`, `infra-defaults`.
-- Rationale: Keeps domain invariants independent from IDE UI and runtime process control, while making extension seams explicit and contract-testable.
-- Alternatives considered: Single-module plugin package. Rejected because seam contracts and no-op adapters would be tightly coupled and harder to validate independently.
+- Decision: Use IntelliJ Platform Gradle plugin configuration in the root build so plugin metadata, IDE target, and sandbox run tasks (including `runIde`) are explicit and repeatable.
+- Rationale: This provides a standard plugin-shell development workflow and aligns local and CI behavior.
+- Alternatives considered:
+  - Keep only generic Kotlin/JVM build tasks and skip plugin-specific configuration.
+  - Rejected because plugin shell cannot be launched reliably without explicit plugin tooling/task configuration.
 
-### 2) Topic Tree Ownership
+### 2) IDE target and compatibility baseline
 
-- Decision: Keep `TopicTree` aggregate, node invariants, and mutation rules exclusively in `core-domain`, exposed outward through `TopicTreePort` commands.
-- Rationale: Ensures deterministic mutation behavior and avoids UI/runtime layers bypassing invariants.
-- Alternatives considered: UI-owned tree state with ad-hoc validation. Rejected because it increases integrity risk and weakens command contract clarity.
+- Decision: Keep the IDE target baseline aligned with the current project’s Kotlin/JVM and plugin metadata constraints, and document it in runbook/quickstart.
+- Rationale: The cycle goal is shell operability, so compatibility must be explicit and testable.
+- Alternatives considered:
+  - Leave IDE target implicit.
+  - Rejected because incompatible target drift can cause plugin load failures in `runIde`.
 
-### 3) Route Mapping Policy
+### 3) Plugin descriptor registration model
 
-- Decision: Implement a deterministic `RouteMappingService` in `core-domain` with explicit rules:
-  - `docs/index.md -> /`
-  - `docs/<segment>/index.md -> /<segment>/`
-  - `docs/<segment>.md -> /<segment>/`
-  - Nested paths follow the same pattern recursively.
-- Rationale: Keeps routing testable and stable independent of UI selection mechanics.
-- Alternatives considered: Mapping logic inside UI coordinator. Rejected because it is harder to unit-test and easier to regress with UI changes.
+- Decision: Register three descriptor concerns in `META-INF/plugin.xml`: platform dependency, MkDocs tool window, and Start MkDocs Preview action.
+- Rationale: This is the minimal shell contract needed for visible UI entry points without introducing new feature scope.
+- Alternatives considered:
+  - Programmatic registration only.
+  - Rejected because declarative descriptor registration is the canonical plugin-shell entry model and improves load-time transparency.
 
-### 4) Semantic Scroll Policy
+### 4) Tool window shell design
 
-- Decision: `ScrollSemanticService` computes scroll delta only from non-comment PSI ranges and returns semantic delta samples for downstream preview synchronization seams.
-- Rationale: Satisfies MVP behavior while preserving a clean seam for future bidirectional sync.
-- Alternatives considered: Raw editor offset tracking. Rejected because it includes comment-only movement and violates MVP semantics.
+- Decision: Implement a minimal `ToolWindowFactory` that creates a lightweight MkDocs panel with shell status content only.
+- Rationale: Satisfies cycle objective (visible plugin shell) while keeping feature scope bounded.
+- Alternatives considered:
+  - Implement full preview UI parity now.
+  - Rejected as out-of-scope for this cycle.
 
-### 5) Runtime Bootstrap and Install Path
+### 5) Action wiring contract
 
-- Decision: `mkdocs-runtime-adapter` performs first-run runtime provisioning with `uv`, installs `mkdocs`, and records runtime readiness per project.
-- Rationale: Meets first-activation zero-manual-setup requirement and isolates external tool execution in one module.
-- Alternatives considered: Use project-global Python environment. Rejected due to dependency drift and lower reproducibility.
+- Decision: Implement `StartMkdocsAction` with strict `update` and `actionPerformed` responsibilities and delegate business behavior to existing services.
+- Rationale: Preserves separation of concerns and avoids duplicate runtime logic.
+- Alternatives considered:
+  - Embed runtime orchestration logic directly in action class.
+  - Rejected because it couples IDE action plumbing to runtime domain behavior and increases regression risk.
 
-### 6) Runtime Lifecycle Management
+### 6) Runtime integration adapter pattern
 
-- Decision: Enforce single mkdocs server process per project with a lifecycle state machine (`Uninitialized -> Bootstrapping -> Ready -> Serving -> Stopping/Restarting -> Stopped/Failed -> Disposed`).
-- Rationale: Provides predictable behavior for activation, re-activation, and IDE shutdown.
-- Alternatives considered: Fire-and-forget process launch per activation action. Rejected due to duplicate-process risk and unreliable cleanup.
+- Decision: Introduce/extend a project-scoped adapter/facade in `ui-plugin` that bridges action/tool window to existing activation/runtime services.
+- Rationale: Provides plugin-service access that preserves current lifecycle behavior and single-instance guarantees.
+- Alternatives considered:
+  - Reimplement lifecycle logic in plugin shell classes.
+  - Rejected because it risks violating single-instance and runtime-decoupling guarantees.
 
-### 7) Base URL Detection Contract
+### 7) Lifecycle/single-instance guard preservation
 
-- Decision: Parse mkdocs stdout using a strict URL extraction contract and publish `RuntimeBaseUrlDetected` only after validation.
-- Rationale: Prevents opening invalid preview sessions and supports deterministic error handling when output is malformed.
-- Alternatives considered: Fixed hardcoded URL assumption. Rejected because mkdocs bind/port can vary in practice.
+- Decision: Treat existing process manager semantics as source of truth and validate them through adapter-focused unit tests.
+- Rationale: The cycle explicitly requires runtime handoff reuse with no feature rewrite.
+- Alternatives considered:
+  - Add second layer of process tracking in action class.
+  - Rejected because duplicated state risks divergence and duplicate runtime instances.
 
-### 8) Command and Event Contracts
+### 8) Verification strategy
 
-- Decision: Model command interactions via an OpenAPI contract (`plugin-control.openapi.yaml`) and event streams via AsyncAPI (`navigation-events.asyncapi.yaml`).
-- Rationale: Gives explicit typed DTO/result schemas for topic-tree mutations and navigation events, and supports contract tests against defaults.
-- Alternatives considered: Informal Kotlin interfaces only. Rejected because cross-module contract drift is harder to detect.
+- Decision: Add unit tests for action visibility/enabled state, action->service delegation, tool window factory content creation, and lifecycle guard adapter behavior; add smoke verification steps for `runIde`, plugin load, tool window presence, and action invocability.
+- Rationale: Covers both deterministic logic and minimum real-shell operability.
+- Alternatives considered:
+  - Rely on manual IDE checks only.
+  - Rejected because it weakens repeatability and traceability.
 
-### 9) Default Adapter Behavior
+### 9) DocOps package for this cycle
 
-- Decision: Ship no-op `PreviewSyncPort`, no-op `VectorStorePort`, and in-memory `CommandRegistry` in `infra-defaults`.
-- Rationale: Enables extension seams now without enabling out-of-scope features.
-- Alternatives considered: Omit adapters until future cycle. Rejected because seam integration and contract testing are MVP requirements.
-
-### 10) Testing and Quality Gate Enforcement
-
-- Decision: Use three test layers:
-  - Unit: routing, index handling, URL parsing, semantic scroll offsets, topic invariants
-  - Integration: runtime lifecycle, explorer-to-preview updates
-  - Contract: default adapters for extension ports
-  and enforce CI gate of 100% unit coverage on scoped code.
-- Rationale: Directly matches requested quality strategy and isolates failures by concern.
-- Alternatives considered: Integration-heavy testing only. Rejected due to weaker localization and insufficient guarantee for coverage gate.
-
-### 11) DocOps Artifacts
-
-- Decision: Produce four ADRs (TopicTreePort, CommandBus, PreviewSyncPort, VectorStorePort), a runtime diagnostics runbook, and a requirements-to-tests traceability matrix as first-class planning artifacts.
-- Rationale: Satisfies SDD cycle expectations and improves implementation accountability.
-- Alternatives considered: Keep design decisions embedded only in plan text. Rejected because later audits and onboarding become harder.
+- Decision: Deliver and maintain: feature spec, technical design notes, operational runbook, test plan + requirements traceability matrix, changelog, and migration notes (if compatibility impact is introduced).
+- Rationale: Required by constitution and cycle completion gates.
+- Alternatives considered:
+  - Partial docs update.
+  - Rejected because cycle completeness would fail constitution gates.
 
 ## Resolved Clarifications
 
-- No unresolved `NEEDS CLARIFICATION` items remain.
+- No unresolved `NEEDS CLARIFICATION` items remain for Phase 1 design.

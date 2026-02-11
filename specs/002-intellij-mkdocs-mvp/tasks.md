@@ -1,176 +1,160 @@
-# Tasks: IntelliJ MkDocs Plugin MVP
+# Tasks: IntelliJ Plugin Shell Cycle
 
 **Input**: Design documents from `/Users/madushika/projects/authord-mkdocs-plugin/specs/002-intellij-mkdocs-mvp/`  
-**Prerequisites**: `plan.md` (required), `spec.md` (required), `research.md`, `data-model.md`, `contracts/`
+**Prerequisites**: `plan.md` (required), `spec.md` (required), `research.md`, `data-model.md`, `contracts/`, `quickstart.md`
 
-**Tests**: Tests are required by specification (`FR-019`) and this cycle enforces unit, integration, and contract coverage.
+**Tests**: Unit tests and coverage-gate tasks are REQUIRED for in-scope production code. Integration smoke validation is REQUIRED for plugin-shell operability.
 
-**Organization**: Tasks are grouped by user story to enable independent implementation and testing.
+**Organization**: Tasks are grouped by user story, with explicit workstream alignment:
+- A) Build/descriptor enablement
+- B) Plugin UI shell (tool window + action)
+- C) Runtime integration wiring
+- D) Testing + coverage gate
+- E) DocOps artifacts
 
 ## Format: `[ID] [P?] [Story] Description`
 
-- **[P]**: Can run in parallel (different files, no unresolved dependencies)
-- **[Story]**: User story label (`[US1]`, `[US2]`, `[US3]`)
-- Every implementation task references requirement IDs.
+- **[P]**: Parallelizable task (different files, no unresolved dependency)
+- **[Story]**: User story label (`[US1]`, `[US2]`, `[US3]`) for story-phase tasks only
+- Every implementation task references one or more requirement IDs (`R-01..R-06`)
+
+## Requirement IDs (Cycle Scope)
+
+- **R-01** Build/plugin setup (`runIde`-capable IntelliJ plugin configuration)
+- **R-02** Plugin descriptor registration (platform dependency, tool window, start-preview action)
+- **R-03** Tool window shell implementation
+- **R-04** Start MkDocs Preview action wiring and action-system behavior
+- **R-05** Runtime handoff integration to existing services with lifecycle/single-instance preservation
+- **R-06** Run-in-IDE workflow validation (plugin loads, tool window visible, action visible/invokable)
 
 ## Phase 1: Setup (Shared Infrastructure)
 
-**Purpose**: Initialize module layout, shared build config, and baseline quality scaffolding.
+**Purpose**: Prepare plugin-shell source/test scaffolding and build workflow entry points.
 
-- [X] T001 Create multi-module Gradle settings and module includes in `./settings.gradle.kts` (Req: FR-001, FR-006, FR-013, FR-019)
-- [X] T002 Configure root build plugins, dependency versions, and shared test settings in `./build.gradle.kts` (Req: FR-019)
-- [X] T003 [P] Add module build scripts for `core-domain`, `mkdocs-runtime-adapter`, `ui-plugin`, `extension-ports`, and `infra-defaults` in `modules/*/build.gradle.kts` (Req: FR-001, FR-006, FR-013, FR-019)
-- [X] T004 [P] Create baseline module package structure with placeholder sources in `modules/core-domain/src/main/kotlin/com/authord/mkdocs/core/.gitkeep` (Req: FR-001, FR-012, FR-013)
-- [X] T005 [P] Create plugin descriptor and UI module resource scaffold in `modules/ui-plugin/src/main/resources/META-INF/plugin.xml` (Req: FR-005, FR-006)
-- [X] T006 [P] Create shared test directory scaffolding in `tests/integration/.gitkeep` and `tests/contract/.gitkeep` (Req: FR-019)
+- [X] T001 [P] Configure IntelliJ plugin build baseline and metadata properties in `build.gradle.kts` and `gradle.properties` (Req: R-01)
+- [X] T002 [P] Ensure module build wiring supports IntelliJ shell classes in `modules/ui-plugin/build.gradle.kts` (Req: R-01)
+- [X] T003 [P] Create IntelliJ shell package scaffold in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/intellij/.gitkeep` (Req: R-03, R-04, R-05)
+- [X] T004 [P] Create plugin-shell integration test scaffold in `tests/integration/plugin-shell/.gitkeep` (Req: R-06)
 
 ---
 
 ## Phase 2: Foundational (Blocking Prerequisites)
 
-**Purpose**: Core contracts and infrastructure that block all user stories.
+**Purpose**: Establish descriptor and shared adapter contracts required by all user stories.
 
-**⚠️ CRITICAL**: No user story implementation starts until this phase is complete.
+**⚠️ CRITICAL**: User story work starts only after this phase.
 
-- [X] T007 Define runtime lifecycle state model in `modules/core-domain/src/main/kotlin/com/authord/mkdocs/core/runtime/RuntimeLifecycleState.kt` (Req: FR-003)
-- [X] T008 Define feature-flag policy model and defaults in `modules/core-domain/src/main/kotlin/com/authord/mkdocs/core/flags/FeatureFlagPolicy.kt` (Req: FR-017, FR-020, FR-021, FR-022, FR-023)
-- [X] T009 [P] Define extension seam interfaces in `modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/TopicTreePort.kt` (Req: FR-013, FR-014, FR-015, FR-016)
-- [X] T010 [P] Implement in-memory command registry default adapter in `modules/infra-defaults/src/main/kotlin/com/authord/mkdocs/defaults/command/InMemoryCommandRegistry.kt` (Req: FR-014)
-- [X] T011 [P] Implement no-op preview sync default adapter in `modules/infra-defaults/src/main/kotlin/com/authord/mkdocs/defaults/preview/NoOpPreviewSyncAdapter.kt` (Req: FR-016)
-- [X] T012 [P] Implement no-op vector store default adapter in `modules/infra-defaults/src/main/kotlin/com/authord/mkdocs/defaults/vector/NoOpVectorStoreAdapter.kt` (Req: FR-015, FR-022)
-- [X] T013 Add foundational unit tests for flags and default seam behavior in `modules/core-domain/src/test/kotlin/com/authord/mkdocs/core/flags/FeatureFlagPolicyTest.kt` (Req: FR-017, FR-020, FR-021, FR-022, FR-023)
-- [X] T014 [P] Add foundational unit tests for in-memory command registry in `modules/infra-defaults/src/test/kotlin/com/authord/mkdocs/defaults/command/InMemoryCommandRegistryTest.kt` (Req: FR-014)
-- [X] T015 [P] Add foundational unit tests for no-op adapters in `modules/infra-defaults/src/test/kotlin/com/authord/mkdocs/defaults/ports/NoOpAdaptersTest.kt` (Req: FR-015, FR-016)
+- [X] T005 Update platform dependency declaration and core plugin metadata in `modules/ui-plugin/src/main/resources/META-INF/plugin.xml` (Req: R-02)
+- [X] T006 Register MkDocs tool window extension metadata in `modules/ui-plugin/src/main/resources/META-INF/plugin.xml` (Req: R-02, R-03)
+- [X] T007 Register Start MkDocs Preview action metadata in `modules/ui-plugin/src/main/resources/META-INF/plugin.xml` (Req: R-02, R-04)
+- [X] T008 [P] Add shared IntelliJ test fixtures for project/action context mocking in `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/intellij/IntellijTestFixtures.kt` (Req: R-03, R-04, R-05)
+- [X] T009 [P] Align plugin-shell control/event contracts with planned adapter flow in `specs/002-intellij-mkdocs-mvp/contracts/plugin-control.openapi.yaml` and `specs/002-intellij-mkdocs-mvp/contracts/navigation-events.asyncapi.yaml` (Req: R-04, R-05, R-06)
 
-**Checkpoint**: Foundation complete. User stories can proceed in priority order or in parallel if staffed.
+**Checkpoint**: Foundation complete; user stories can proceed.
 
 ---
 
-## Phase 3: User Story 1 - Activate and Preview Docs (Priority: P1) 🎯 MVP
+## Phase 3: User Story 1 - A) Build/Descriptor Enablement (Priority: P1) 🎯 MVP
 
-**Goal**: First activation prepares runtime, starts mkdocs, detects URL, and opens side-by-side preview.
+**Goal**: Plugin shell can be built/launched in development IDE with valid descriptor registrations.
 
-**Independent Test**: In a valid docs project with no existing runtime, activate plugin and verify live preview opens automatically.
+**Independent Test**: Build plugin, execute `runIde`, and confirm plugin loads without descriptor/build compatibility errors.
 
 ### Tests for User Story 1
 
-- [X] T016 [P] [US1] Add unit tests for first-run runtime bootstrap and install flow in `modules/mkdocs-runtime-adapter/src/test/kotlin/com/authord/mkdocs/runtime/UvBootstrapServiceTest.kt` (Req: FR-001, FR-002)
-- [X] T017 [P] [US1] Add unit tests for single-instance process lifecycle and restart safety in `modules/mkdocs-runtime-adapter/src/test/kotlin/com/authord/mkdocs/runtime/MkdocsProcessManagerTest.kt` (Req: FR-003)
-- [X] T018 [P] [US1] Add unit tests for stdout base URL detection parser in `modules/mkdocs-runtime-adapter/src/test/kotlin/com/authord/mkdocs/runtime/BaseUrlDetectorTest.kt` (Req: FR-004)
-- [X] T019 [P] [US1] Add unit tests for preview pane opening coordinator in `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/PreviewPaneCoordinatorTest.kt` (Req: FR-005)
-- [X] T020 [US1] Add integration test for activation-to-preview journey in `tests/integration/runtime-lifecycle/ActivationToPreviewIT.kt` (Req: FR-001, FR-002, FR-003, FR-004, FR-005)
+- [X] T010 [P] [US1] Add plugin build policy unit test for IntelliJ/runIde configuration in `modules/core-domain/src/test/kotlin/com/authord/mkdocs/core/quality/PluginBuildPolicyTest.kt` (Req: R-01)
+- [X] T011 [P] [US1] Add descriptor registration unit test for dependency/tool-window/action entries in `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/intellij/PluginDescriptorRegistrationTest.kt` (Req: R-02)
 
 ### Implementation for User Story 1
 
-- [X] T021 [US1] Implement uv bootstrap and mkdocs install service in `modules/mkdocs-runtime-adapter/src/main/kotlin/com/authord/mkdocs/runtime/UvBootstrapService.kt` (Req: FR-001, FR-002)
-- [X] T022 [US1] Implement mkdocs process manager with start/stop/restart and per-project singleton enforcement in `modules/mkdocs-runtime-adapter/src/main/kotlin/com/authord/mkdocs/runtime/MkdocsProcessManager.kt` (Req: FR-003)
-- [X] T023 [US1] Implement stdout base URL detector in `modules/mkdocs-runtime-adapter/src/main/kotlin/com/authord/mkdocs/runtime/BaseUrlDetector.kt` (Req: FR-004)
-- [X] T024 [US1] Implement side-by-side preview pane coordinator in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/PreviewPaneCoordinator.kt` (Req: FR-005)
-- [X] T025 [US1] Implement activation orchestrator and runtime start wiring in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/PluginActivationService.kt` (Req: FR-001, FR-002, FR-003, FR-004, FR-005, FR-017)
-- [X] T026 [US1] Implement activation failure presenter for setup/startup errors in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/ActivationErrorPresenter.kt` (Req: FR-001, FR-002, FR-003, FR-004, FR-005)
+- [X] T012 [US1] Implement IntelliJ Platform Gradle plugin and IDE target configuration in `build.gradle.kts` (Req: R-01)
+- [X] T013 [US1] Implement runIde-ready plugin metadata and compatibility properties in `gradle.properties` (Req: R-01)
+- [X] T014 [US1] Implement descriptor entries for platform/tool-window/action in `modules/ui-plugin/src/main/resources/META-INF/plugin.xml` (Req: R-02)
+- [X] T015 [US1] Document local runIde usage and expected plugin-load checks in `specs/002-intellij-mkdocs-mvp/quickstart.md` (Req: R-01, R-06)
 
-**Checkpoint**: User Story 1 is independently functional and demoable as MVP.
+**Checkpoint**: Build/descriptor shell path is independently verifiable.
 
 ---
 
-## Phase 4: User Story 2 - Explorer-Based Route Navigation (Priority: P2)
+## Phase 4: User Story 2 - B) Plugin UI Shell (Tool Window + Action) (Priority: P1)
 
-**Goal**: Docs explorer selections deterministically update preview routes.
+**Goal**: Minimal MkDocs tool window and start-preview action are visible and callable in IDE shell.
 
-**Independent Test**: Select docs files and verify route mappings for root, segment index, segment file, and nested paths.
+**Independent Test**: In development IDE, verify tool window content creation and action presentation/invocation behavior.
 
 ### Tests for User Story 2
 
-- [X] T027 [P] [US2] Add unit tests for docs explorer discovery and markdown filtering in `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/DocsExplorerServiceTest.kt` (Req: FR-006)
-- [X] T028 [P] [US2] Add unit tests for route mapping root/index/file/nested rules in `modules/core-domain/src/test/kotlin/com/authord/mkdocs/core/navigation/RouteMappingServiceTest.kt` (Req: FR-008, FR-009, FR-010, FR-011)
-- [X] T029 [P] [US2] Add unit tests for explorer-selection to preview-route coordination in `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/NavigationCoordinatorTest.kt` (Req: FR-007)
-- [X] T030 [US2] Add integration test for explorer-to-preview update path in `tests/integration/explorer-preview-navigation/ExplorerSelectionToPreviewIT.kt` (Req: FR-006, FR-007, FR-008, FR-009, FR-010, FR-011)
+- [X] T016 [P] [US2] Add tool-window factory content-path unit tests in `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/intellij/MkdocsToolWindowFactoryTest.kt` (Req: R-03)
+- [X] T017 [P] [US2] Add start-action visibility/enabled update logic unit tests in `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/intellij/StartMkdocsActionPresentationTest.kt` (Req: R-04)
 
 ### Implementation for User Story 2
 
-- [X] T031 [US2] Implement docs explorer service and tree model in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/DocsExplorerService.kt` (Req: FR-006)
-- [X] T032 [US2] Implement deterministic route mapping service in `modules/core-domain/src/main/kotlin/com/authord/mkdocs/core/navigation/RouteMappingService.kt` (Req: FR-008, FR-009, FR-010, FR-011)
-- [X] T033 [US2] Implement docs file selection event publisher in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/DocsFileSelectionPublisher.kt` (Req: FR-007)
-- [X] T034 [US2] Implement navigation coordinator to apply mapped routes in preview in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/NavigationCoordinator.kt` (Req: FR-007, FR-008, FR-009, FR-010, FR-011)
-- [X] T035 [US2] Implement invalid-selection handling and route fallback behavior in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/PreviewNavigationFailureHandler.kt` (Req: FR-007, FR-011)
+- [X] T018 [US2] Implement minimal tool-window factory and shell panel in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/intellij/MkdocsToolWindowFactory.kt` (Req: R-03)
+- [X] T019 [US2] Implement start-preview action `update`/`actionPerformed` shell behavior in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/intellij/StartMkdocsAction.kt` (Req: R-04)
+- [X] T020 [US2] Wire tool-window/action instantiation path through composition wiring in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/PluginCompositionRoot.kt` (Req: R-03, R-04)
 
-**Checkpoint**: User Story 2 is independently functional and testable alongside US1.
+**Checkpoint**: UI shell entry points are independently testable.
 
 ---
 
-## Phase 5: User Story 3 - Scroll Semantics and Extension Seams (Priority: P3)
+## Phase 5: User Story 3 - C) Runtime Integration Wiring (Priority: P2)
 
-**Goal**: Deliver semantic scroll delta logic and extension-ready seam contracts with default adapters only.
+**Goal**: Action/tool-window delegate to existing runtime services while preserving lifecycle and single-instance guarantees.
 
-**Independent Test**: Verify comment-excluding scroll semantics and seam contracts/default adapters without enabling out-of-scope capabilities.
+**Independent Test**: Invoke start-preview through action with mocked and real adapter states; verify delegation contract and single-instance guard behavior.
 
 ### Tests for User Story 3
 
-- [X] T036 [P] [US3] Add unit tests for topic tree invariants and mutation outcomes in `modules/core-domain/src/test/kotlin/com/authord/mkdocs/core/topic/TopicTreeAggregateTest.kt` (Req: FR-013)
-- [X] T037 [P] [US3] Add unit tests for command bus and registry dispatch behavior in `modules/extension-ports/src/test/kotlin/com/authord/mkdocs/ports/PluginCommandBusContractTest.kt` (Req: FR-014)
-- [X] T038 [P] [US3] Add unit tests for semantic scroll excluding comment PSI ranges in `modules/core-domain/src/test/kotlin/com/authord/mkdocs/core/scroll/ScrollSemanticServiceTest.kt` (Req: FR-012)
-- [X] T039 [P] [US3] Add unit tests for out-of-scope guardrails (no sync, no AI commands, no vector DB behavior, no WriterSide parity mode) in `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/OutOfScopeGuardrailsTest.kt` (Req: FR-020, FR-021, FR-022, FR-023)
-- [X] T040 [US3] Add contract tests for extension seam defaults in `tests/contract/topic-tree-command-port/TopicTreePortContractTest.kt` (Req: FR-013, FR-014, FR-015, FR-016)
+- [X] T021 [P] [US3] Add action-to-service delegation contract unit tests with mocked adapter in `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/intellij/StartMkdocsActionInvocationTest.kt` (Req: R-04, R-05)
+- [X] T022 [P] [US3] Add runtime integration lifecycle guard unit tests in `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/intellij/PluginRuntimeIntegrationServiceTest.kt` (Req: R-05)
 
 ### Implementation for User Story 3
 
-- [X] T041 [US3] Implement topic tree aggregate and mutation service in `modules/core-domain/src/main/kotlin/com/authord/mkdocs/core/topic/TopicTreeAggregate.kt` (Req: FR-013)
-- [X] T042 [US3] Implement topic-tree command DTO/result models in `modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/topic/TopicTreeCommandDtos.kt` (Req: FR-013)
-- [X] T043 [US3] Implement plugin command bus and dispatch service in `modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/command/DefaultPluginCommandBus.kt` (Req: FR-014)
-- [X] T044 [US3] Implement preview sync and vector store port interfaces in `modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/preview/PreviewSyncPort.kt` (Req: FR-015, FR-016)
-- [X] T045 [US3] Implement semantic scroll service with comment PSI exclusion in `modules/core-domain/src/main/kotlin/com/authord/mkdocs/core/scroll/ScrollSemanticService.kt` (Req: FR-012)
-- [X] T046 [US3] Implement feature-flag policy service for staged seam enablement in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/FeatureFlagPolicyService.kt` (Req: FR-017, FR-020, FR-021, FR-022, FR-023)
-- [X] T047 [US3] Wire no-op adapters and command registry defaults in plugin composition root in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/PluginCompositionRoot.kt` (Req: FR-014, FR-015, FR-016, FR-017)
+- [X] T023 [US3] Implement project-scoped runtime integration adapter delegating to existing services in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/intellij/PluginRuntimeIntegrationService.kt` (Req: R-05)
+- [X] T024 [US3] Connect StartMkdocsAction to runtime integration adapter without runtime logic duplication in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/intellij/StartMkdocsAction.kt` (Req: R-04, R-05)
+- [X] T025 [US3] Preserve activation/runtime single-instance and base-URL handoff behavior through existing service reuse in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/PluginActivationService.kt` (Req: R-05)
 
-**Checkpoint**: User Story 3 is independently testable and extension seams are present with minimal/default behavior only.
+**Checkpoint**: Runtime handoff wiring is independently testable and extension seams remain intact.
 
 ---
 
-## Phase 6: Polish & Cross-Cutting (Testing, Coverage Gate, DocOps)
+## Phase 6: D) Testing + Coverage Gate (Cross-Cutting)
 
-**Purpose**: Complete mandatory quality gates and artifact deliverables for this cycle.
+**Purpose**: Validate plugin shell in IDE workflow and enforce 100% scoped unit coverage in CI.
 
-- [X] T048 [P] Add unit test asserting required SDD artifact presence in `modules/core-domain/src/test/kotlin/com/authord/mkdocs/core/quality/DocumentationArtifactsPolicyTest.kt` (Req: FR-018)
-- [X] T049 [P] Add unit test asserting scoped coverage configuration integrity in `modules/core-domain/src/test/kotlin/com/authord/mkdocs/core/quality/CoverageScopePolicyTest.kt` (Req: FR-019)
-- [X] T050 [P] Configure CI to enforce 100% scoped unit coverage in `.github/workflows/ci.yml` (Req: FR-019)
-- [X] T051 [P] Configure Gradle coverage verification rules in `./build.gradle.kts` (Req: FR-019)
-- [X] T052 [P] Finalize requirements-to-tests traceability matrix with actual test classes in `specs/002-intellij-mkdocs-mvp/traceability-matrix.md` (Req: FR-018, FR-019)
-- [X] T053 [P] Finalize ADR for TopicTreePort with implementation outcomes in `specs/002-intellij-mkdocs-mvp/adrs/ADR-001-topic-tree-port.md` (Req: FR-018)
-- [X] T054 [P] Finalize ADR for CommandBus with implementation outcomes in `specs/002-intellij-mkdocs-mvp/adrs/ADR-002-plugin-command-bus.md` (Req: FR-018)
-- [X] T055 [P] Finalize ADR for PreviewSyncPort with implementation outcomes in `specs/002-intellij-mkdocs-mvp/adrs/ADR-003-preview-sync-port.md` (Req: FR-018)
-- [X] T056 [P] Finalize ADR for VectorStorePort with implementation outcomes in `specs/002-intellij-mkdocs-mvp/adrs/ADR-004-vector-store-port.md` (Req: FR-018)
-- [X] T057 [P] Update runtime diagnostics runbook with validated failure signatures and recovery steps in `specs/002-intellij-mkdocs-mvp/runtime-diagnostics-runbook.md` (Req: FR-018)
-- [X] T058 Validate OpenAPI and AsyncAPI contracts against implementation in `specs/002-intellij-mkdocs-mvp/contracts/plugin-control.openapi.yaml` (Req: FR-013, FR-014, FR-015, FR-016)
-- [X] T059 Run quickstart validation and annotate completion criteria in `specs/002-intellij-mkdocs-mvp/quickstart.md` (Req: FR-018, FR-019)
-- [X] T060 Enforce cycle gate checklist and keep cycle INCOMPLETE until docs, tests, and coverage pass in `specs/002-intellij-mkdocs-mvp/checklists/release-gate.md` (Req: FR-018, FR-019)
+- [X] T026 [P] Add plugin-shell smoke scenario definition for runIde launch/plugin-load/tool-window/action checks in `tests/integration/plugin-shell/RunIdeSmokeValidation.md` (Req: R-06)
+- [X] T027 Execute runIde smoke validation and record evidence/outcome in `specs/002-intellij-mkdocs-mvp/checklists/release-gate.md` (Req: R-06)
+- [X] T028 [P] Update requirements-to-tests traceability matrix for R-01..R-06 in `specs/002-intellij-mkdocs-mvp/traceability-matrix.md` (Req: R-01, R-02, R-03, R-04, R-05, R-06)
+- [X] T029 [P] Enforce CI scoped unit coverage gate execution in `.github/workflows/ci.yml` (Req: R-06)
+- [X] T030 [P] Enforce scoped 100% coverage verification rules in `build.gradle.kts` (Req: R-06)
+- [X] T031 Run full test + coverage verification and record pass/fail in `specs/002-intellij-mkdocs-mvp/checklists/release-gate.md` (Req: R-06)
 
 ---
 
-## Requirement-to-Unit-Test Mapping
+## Phase 7: E) DocOps Artifacts (Cross-Cutting)
 
-- FR-001 -> T016 (`UvBootstrapServiceTest.kt`)
-- FR-002 -> T016 (`UvBootstrapServiceTest.kt`)
-- FR-003 -> T017 (`MkdocsProcessManagerTest.kt`)
-- FR-004 -> T018 (`BaseUrlDetectorTest.kt`)
-- FR-005 -> T019 (`PreviewPaneCoordinatorTest.kt`)
-- FR-006 -> T027 (`DocsExplorerServiceTest.kt`)
-- FR-007 -> T029 (`NavigationCoordinatorTest.kt`)
-- FR-008 -> T028 (`RouteMappingServiceTest.kt`)
-- FR-009 -> T028 (`RouteMappingServiceTest.kt`)
-- FR-010 -> T028 (`RouteMappingServiceTest.kt`)
-- FR-011 -> T028 (`RouteMappingServiceTest.kt`)
-- FR-012 -> T038 (`ScrollSemanticServiceTest.kt`)
-- FR-013 -> T036 (`TopicTreeAggregateTest.kt`)
-- FR-014 -> T037 (`PluginCommandBusContractTest.kt`)
-- FR-015 -> T015 (`NoOpAdaptersTest.kt`)
-- FR-016 -> T015 (`NoOpAdaptersTest.kt`)
-- FR-017 -> T013 (`FeatureFlagPolicyTest.kt`)
-- FR-018 -> T048 (`DocumentationArtifactsPolicyTest.kt`)
-- FR-019 -> T049 (`CoverageScopePolicyTest.kt`)
-- FR-020 -> T039 (`OutOfScopeGuardrailsTest.kt`)
-- FR-021 -> T039 (`OutOfScopeGuardrailsTest.kt`)
-- FR-022 -> T039 (`OutOfScopeGuardrailsTest.kt`)
-- FR-023 -> T039 (`OutOfScopeGuardrailsTest.kt`)
+**Purpose**: Complete constitution-required docs package and API usage documentation.
+
+- [X] T032 [P] Update feature spec for plugin-shell cycle scope and R-01..R-06 alignment in `specs/002-intellij-mkdocs-mvp/spec.md` (Req: R-01, R-02, R-03, R-04, R-05, R-06)
+- [X] T033 [P] Update technical design notes with plugin entry architecture and function-level usage docs in `docs/implementation/technical-design-notes.md` (Req: R-03, R-04, R-05)
+- [X] T034 [P] Update operational runbook for local runIde workflow and troubleshooting in `docs/implementation/operational-runbook.md` (Req: R-01, R-06)
+- [X] T035 [P] Update test plan + requirements→tests traceability matrix documentation in `docs/implementation/test-plan-traceability.md` (Req: R-01, R-02, R-03, R-04, R-05, R-06)
+- [X] T036 [P] Update changelog and migration notes for plugin-shell cycle changes in `CHANGELOG.md` and `docs/implementation/migration-notes.md` (Req: R-06)
+- [X] T037 [P] Add public API usage docs (purpose/inputs/outputs/errors/examples) for new/changed plugin-shell functions in `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/intellij/*.kt` (Req: R-03, R-04, R-05)
+- [X] T038 Mark cycle completion gate as blocked until docs/tests/coverage are green in `specs/002-intellij-mkdocs-mvp/checklists/release-gate.md` (Req: R-06)
+
+---
+
+## Requirement-to-Test Traceability Matrix (R-01..R-06)
+
+| Requirement | Unit Tests | Integration / Smoke Validation |
+|-------------|------------|--------------------------------|
+| R-01 | T010 (`PluginBuildPolicyTest.kt`) | T027 (`RunIdeSmokeValidation.md` + release-gate evidence) |
+| R-02 | T011 (`PluginDescriptorRegistrationTest.kt`) | T027 (`RunIdeSmokeValidation.md` + release-gate evidence) |
+| R-03 | T016 (`MkdocsToolWindowFactoryTest.kt`) | T027 (`RunIdeSmokeValidation.md` + release-gate evidence) |
+| R-04 | T017 (`StartMkdocsActionPresentationTest.kt`), T021 (`StartMkdocsActionInvocationTest.kt`) | T027 (`RunIdeSmokeValidation.md` + release-gate evidence) |
+| R-05 | T022 (`PluginRuntimeIntegrationServiceTest.kt`), T021 (`StartMkdocsActionInvocationTest.kt`) | T027 (`RunIdeSmokeValidation.md` + release-gate evidence) |
+| R-06 | T026/T027 smoke workflow checks | T027 + T031 recorded gate run |
 
 ---
 
@@ -178,82 +162,72 @@
 
 ### Phase Dependencies
 
-- Phase 1 (Setup): no dependencies.
-- Phase 2 (Foundational): depends on Phase 1; blocks all user stories.
-- Phase 3 (US1): depends on Phase 2.
-- Phase 4 (US2): depends on Phase 2; can run parallel with US1 after foundation.
-- Phase 5 (US3): depends on Phase 2; can run parallel with US1/US2 after foundation.
-- Phase 6 (Polish): depends on completion of selected user stories and mandatory quality/doc tasks.
+- **Phase 1 (Setup)**: no dependencies.
+- **Phase 2 (Foundational)**: depends on Phase 1 and blocks all user stories.
+- **Phase 3 (US1 / A)**: depends on Phase 2.
+- **Phase 4 (US2 / B)**: depends on Phase 2; can run in parallel with US1 when staffed.
+- **Phase 5 (US3 / C)**: depends on Phase 2 and US2 action shell implementation.
+- **Phase 6 (D)**: depends on completion of US1-US3 implementation and tests.
+- **Phase 7 (E)**: can begin during implementation but must complete before cycle closure.
 
 ### User Story Dependencies
 
-- US1 (P1): independent after foundational phase; target MVP.
-- US2 (P2): independent after foundational phase; integrates with US1 preview.
-- US3 (P3): independent after foundational phase; must not expand beyond seam/default behavior.
+- **US1 (P1)**: Independent after foundational setup.
+- **US2 (P1)**: Independent after foundational setup; provides visible shell entry points.
+- **US3 (P2)**: Depends on US2 action class being available for delegation.
 
-### Completion Gate
+### Cycle Completion Gate
 
-- Cycle status remains **INCOMPLETE** until T052, T053, T054, T055, T056, T057, T058, T059, and T060 are complete and CI confirms T050/T051 coverage enforcement.
+- Cycle is **COMPLETE** when all DocOps tasks (T032-T038) are done, smoke/tests pass (T027, T031), and coverage gate enforcement is verified (T029, T030, T031).
 
 ---
 
 ## Parallel Execution Examples
 
-### User Story 1
+### User Story 1 (A)
 
 ```bash
-# Parallel unit tests
-T016, T017, T018, T019
+# Parallel tests
+T010, T011
 
-# Then implementation sequence
-T021 -> T022 -> T023 -> T024 -> T025 -> T026
+# Implementation sequence
+T012 -> T013 -> T014 -> T015
 ```
 
-### User Story 2
+### User Story 2 (B)
 
 ```bash
-# Parallel unit tests
-T027, T028, T029
+# Parallel tests
+T016, T017
 
-# Parallel implementation where safe
-T031 || T032
-# Then
-T033 -> T034 -> T035
+# Implementation sequence
+T018 -> T019 -> T020
 ```
 
-### User Story 3
+### User Story 3 (C)
 
 ```bash
-# Parallel unit tests
-T036, T037, T038, T039
+# Parallel tests
+T021, T022
 
-# Parallel seam implementations
-T041 || T042 || T043 || T044 || T045
-# Then integration wiring
-T046 -> T047
+# Implementation sequence
+T023 -> T024 -> T025
 ```
 
 ---
 
 ## Implementation Strategy
 
-### MVP First (US1)
+### Suggested MVP Scope
 
 1. Complete Phase 1 and Phase 2.
-2. Deliver Phase 3 (US1) and validate T020 integration test.
-3. Demo MVP activation-to-preview flow.
+2. Deliver US1 (A) and US2 (B) to obtain runnable plugin shell (`runIde` + visible tool window + callable action).
+3. Validate smoke checks before expanding to runtime integration hardening (US3).
 
 ### Incremental Delivery
 
-1. Add US2 for explorer-to-preview navigation.
-2. Add US3 seams and semantic scroll behavior.
-3. Finish Phase 6 quality and DocOps gates.
-
-### Parallel Team Strategy
-
-1. Team completes Setup + Foundational together.
-2. After Phase 2:
-   - Engineer A: US1 runtime and preview tasks.
-   - Engineer B: US2 explorer and route tasks.
-   - Engineer C: US3 seams and scroll tasks.
-3. Merge only after Phase 6 completion gate is green.
+1. Build/descriptor enablement (US1)
+2. UI shell (US2)
+3. Runtime handoff wiring (US3)
+4. Testing/coverage gate hardening (Phase 6)
+5. DocOps closure (Phase 7)

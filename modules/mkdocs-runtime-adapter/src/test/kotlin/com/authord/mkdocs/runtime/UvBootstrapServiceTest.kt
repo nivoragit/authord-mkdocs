@@ -1,12 +1,24 @@
 package com.authord.mkdocs.runtime
 
 import java.nio.file.Path
+import kotlin.io.path.createDirectories
+import kotlin.io.path.createTempDirectory
+import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class UvBootstrapServiceTest {
+    @Test
+    fun `command result exposes stdout and stderr properties`() {
+        val result = CommandResult(exitCode = 7, stdout = "ok", stderr = "err")
+
+        assertEquals(7, result.exitCode)
+        assertEquals("ok", result.stdout)
+        assertEquals("err", result.stderr)
+    }
+
     @Test
     fun `runs bootstrap and install commands on first activation`() {
         val commands = mutableListOf<List<String>>()
@@ -21,8 +33,162 @@ class UvBootstrapServiceTest {
         assertTrue(result.success)
         assertFalse(result.skipped)
         assertEquals(listOf("uv", "venv", expectedRuntimePath), commands[0])
-        assertEquals(listOf("uv", "pip", "install", "mkdocs"), commands[1])
+        assertEquals(listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs"), commands[1])
         assertEquals(expectedRuntimePath, result.runtimePath)
+    }
+
+    @Test
+    fun `reuses existing runtime directory and skips uv venv command`() {
+        val tempProject = createTempDirectory(prefix = "uv-bootstrap-existing-runtime-")
+        try {
+            val existingRuntime = tempProject.resolve(".mkdocs-plugin-venv")
+            existingRuntime.createDirectories()
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                CommandResult(exitCode = 0)
+            }
+
+            val result = service.bootstrap(tempProject.toString())
+            val expectedRuntimePath = tempProject.resolve(".mkdocs-plugin-venv").toString()
+
+            assertTrue(result.success)
+            assertFalse(result.skipped)
+            assertEquals(1, commands.size)
+            assertEquals(listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs"), commands.single())
+            assertEquals(existingRuntime.toString(), result.runtimePath)
+        } finally {
+            tempProject.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `continues when setup reports existing virtual environment and installs mkdocs`() {
+        val commands = mutableListOf<List<String>>()
+        val projectPath = "/tmp/project-existing-race"
+        val expectedRuntimePath = Path.of(projectPath).resolve(".mkdocs-plugin-venv").toString()
+        val service = UvBootstrapService { command, _ ->
+            commands += command
+            if (command[1] == "venv") {
+                CommandResult(
+                    exitCode = 2,
+                    stderr = "A virtual environment already exists at '$expectedRuntimePath'",
+                )
+            } else {
+                CommandResult(exitCode = 0)
+            }
+        }
+
+        val result = service.bootstrap(projectPath)
+
+        assertTrue(result.success)
+        assertFalse(result.skipped)
+        assertEquals(2, commands.size)
+        assertEquals("venv", commands[0][1])
+        assertEquals("pip", commands[1][1])
+        assertEquals(listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs"), commands[1])
+    }
+
+    @Test
+    fun `continues when setup reports existing virtual environment in stdout`() {
+        val commands = mutableListOf<List<String>>()
+        val projectPath = "/tmp/project-existing-race-stdout"
+        val expectedRuntimePath = Path.of(projectPath).resolve(".mkdocs-plugin-venv").toString()
+        val service = UvBootstrapService { command, _ ->
+            commands += command
+            if (command[1] == "venv") {
+                CommandResult(
+                    exitCode = 2,
+                    stdout = "error: Failed to create virtual environment\n  Caused by: A virtual environment already exists at `$expectedRuntimePath`",
+                    stderr = "",
+                )
+            } else {
+                CommandResult(exitCode = 0)
+            }
+        }
+
+        val result = service.bootstrap(projectPath)
+
+        assertTrue(result.success)
+        assertFalse(result.skipped)
+        assertEquals(2, commands.size)
+        assertEquals(listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs"), commands[1])
+    }
+
+    @Test
+    fun `installs mkdocs material when mkdocs config uses material theme`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-material-theme-")
+        try {
+            val mkdocsConfig = projectRoot.resolve("mkdocs.yml")
+            mkdocsConfig.writeText(
+                """
+                site_name: Demo
+                theme:
+                  name: material
+                """.trimIndent() + "\n",
+            )
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                CommandResult(exitCode = 0)
+            }
+
+            val result = service.bootstrap(projectRoot.toString())
+            val runtimePath = projectRoot.resolve(".mkdocs-plugin-venv").toString()
+
+            assertTrue(result.success)
+            assertFalse(result.skipped)
+            assertEquals(2, commands.size)
+            assertEquals(listOf("uv", "venv", runtimePath), commands[0])
+            assertEquals(
+                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs", "mkdocs-material"),
+                commands[1],
+            )
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `re-runs package install when required package set expands`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-package-refresh-")
+        try {
+            projectRoot.resolve(".mkdocs-plugin-venv").createDirectories()
+            val mkdocsConfig = projectRoot.resolve("mkdocs.yml")
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                CommandResult(exitCode = 0)
+            }
+
+            val first = service.bootstrap(projectRoot.toString())
+            assertTrue(first.success)
+            assertFalse(first.skipped)
+            assertEquals(1, commands.size)
+
+            mkdocsConfig.writeText(
+                """
+                site_name: Demo
+                theme:
+                  name: material
+                """.trimIndent() + "\n",
+            )
+
+            val second = service.bootstrap(projectRoot.toString())
+            val runtimePath = projectRoot.resolve(".mkdocs-plugin-venv").toString()
+
+            assertTrue(second.success)
+            assertFalse(second.skipped)
+            assertEquals(2, commands.size)
+            assertEquals(
+                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs", "mkdocs-material"),
+                commands.last(),
+            )
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
     }
 
     @Test

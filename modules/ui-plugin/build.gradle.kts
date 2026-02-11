@@ -1,3 +1,7 @@
+plugins {
+    id("org.jetbrains.intellij")
+}
+
 dependencies {
     implementation(project(":modules:core-domain"))
     implementation(project(":modules:mkdocs-runtime-adapter"))
@@ -15,4 +19,31 @@ kotlin {
         "../../tests/integration",
         "../../tests/contract"
     )
+}
+
+intellij {
+    version.set(providers.gradleProperty("platformVersion"))
+    type.set(providers.gradleProperty("platformType"))
+    plugins.set(
+        providers.gradleProperty("platformPlugins").map { raw ->
+            raw.split(',')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+        }
+    )
+}
+
+tasks {
+    patchPluginXml {
+        sinceBuild.set(providers.gradleProperty("sinceBuild"))
+        untilBuild.set(providers.gradleProperty("untilBuild"))
+    }
+
+    instrumentCode {
+        enabled = false
+    }
+
+    instrumentTestCode {
+        enabled = false
+    }
 }

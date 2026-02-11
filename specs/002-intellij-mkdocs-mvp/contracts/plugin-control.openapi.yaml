@@ -1,310 +1,208 @@
 openapi: 3.1.0
 info:
-  title: IntelliJ MkDocs Plugin Control Contract
-  version: 0.1.0
+  title: IntelliJ MkDocs Plugin Shell Control Contract
+  version: 0.2.0
   description: >
-    Internal control contract for MVP runtime lifecycle, topic-tree commands,
-    and preview navigation coordination.
-x-contract-validation:
-  validatedOn: "2026-02-08"
-  validatedAgainst:
-    - "modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/PluginActivationService.kt"
-    - "modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/topic/TopicTreeCommandDtos.kt"
-    - "modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/command/DefaultPluginCommandBus.kt"
-    - "modules/core-domain/src/main/kotlin/com/authord/mkdocs/core/navigation/RouteMappingService.kt"
-  notes:
-    - "Runtime start/stop/restart/status schemas align with runtime manager lifecycle states."
-    - "Topic tree command/result DTO fields align with implemented command classes."
-    - "Preview navigation request/result aligns with navigation coordinator route mapping behavior."
+    Internal plugin-shell control contract for runIde readiness, tool window shell creation,
+    Start MkDocs Preview action behavior, and runtime handoff delegation.
 servers:
   - url: plugin://local
-    description: In-process plugin command boundary
+    description: In-process plugin shell boundary
 paths:
-  /v1/runtime/start:
-    post:
-      summary: Start runtime and mkdocs server for a project
-      operationId: startRuntime
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RuntimeStartRequest'
-      responses:
-        '202':
-          description: Startup accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RuntimeStatus'
-  /v1/runtime/stop:
-    post:
-      summary: Stop active mkdocs server
-      operationId: stopRuntime
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RuntimeStopRequest'
-      responses:
-        '200':
-          description: Stop completed
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RuntimeStatus'
-  /v1/runtime/restart:
-    post:
-      summary: Restart active mkdocs server
-      operationId: restartRuntime
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/RuntimeRestartRequest'
-      responses:
-        '202':
-          description: Restart accepted
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/RuntimeStatus'
-  /v1/runtime/status/{projectId}:
+  /v1/plugin-shell/readiness:
     get:
-      summary: Get runtime status for project
-      operationId: getRuntimeStatus
+      summary: Get plugin shell readiness state for a project
+      operationId: getPluginShellReadiness
       parameters:
-        - in: path
+        - in: query
           name: projectId
           required: true
           schema:
             type: string
       responses:
         '200':
-          description: Current runtime status
+          description: Current shell readiness state
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/RuntimeStatus'
-  /v1/topic-tree/commands:
+                $ref: '#/components/schemas/PluginShellReadiness'
+  /v1/plugin-shell/tool-window/create:
     post:
-      summary: Execute topic-tree mutation command
-      operationId: executeTopicTreeCommand
+      summary: Create or refresh MkDocs tool window shell content
+      operationId: createToolWindowShell
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/TopicTreeCommand'
+              $ref: '#/components/schemas/ToolWindowCreateRequest'
       responses:
         '200':
-          description: Command executed
+          description: Tool window shell state
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TopicTreeCommandResult'
-  /v1/preview/navigation:
+                $ref: '#/components/schemas/ToolWindowState'
+  /v1/plugin-shell/actions/start-preview/update:
     post:
-      summary: Navigate preview to mapped route from selected docs file
-      operationId: navigatePreview
+      summary: Resolve Start MkDocs Preview action visibility/enabled state
+      operationId: updateStartPreviewAction
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/PreviewNavigationRequest'
+              $ref: '#/components/schemas/ActionUpdateRequest'
       responses:
         '200':
-          description: Navigation handled
+          description: Action presentation state
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/PreviewNavigationResult'
+                $ref: '#/components/schemas/ActionPresentationState'
+  /v1/plugin-shell/actions/start-preview/perform:
+    post:
+      summary: Invoke Start MkDocs Preview action and delegate to existing runtime services
+      operationId: performStartPreviewAction
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/StartPreviewActionRequest'
+      responses:
+        '200':
+          description: Runtime handoff result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/StartPreviewActionResult'
+  /v1/plugin-shell/runtime/handoff:
+    post:
+      summary: Direct adapter-level runtime handoff for shell integration
+      operationId: handoffRuntimeFromPluginShell
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RuntimeHandoffRequest'
+      responses:
+        '200':
+          description: Runtime handoff outcome
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RuntimeHandoffResult'
 components:
   schemas:
-    RuntimeStartRequest:
+    PluginShellReadiness:
       type: object
-      required: [projectId, projectPath]
+      required: [projectId, pluginLoaded, toolWindowRegistered, startActionRegistered, runIdeReady]
+      properties:
+        projectId:
+          type: string
+        pluginLoaded:
+          type: boolean
+        toolWindowRegistered:
+          type: boolean
+        startActionRegistered:
+          type: boolean
+        runIdeReady:
+          type: boolean
+    ToolWindowCreateRequest:
+      type: object
+      required: [projectId]
+      properties:
+        projectId:
+          type: string
+        refresh:
+          type: boolean
+          default: false
+    ToolWindowState:
+      type: object
+      required: [projectId, contentCreated, visible]
+      properties:
+        projectId:
+          type: string
+        contentCreated:
+          type: boolean
+        visible:
+          type: boolean
+        statusMessage:
+          type: string
+    ActionUpdateRequest:
+      type: object
+      required: [projectId]
       properties:
         projectId:
           type: string
         projectPath:
           type: string
-        ensureRuntime:
+    ActionPresentationState:
+      type: object
+      required: [projectId, visible, enabled]
+      properties:
+        projectId:
+          type: string
+        visible:
           type: boolean
-          default: true
-    RuntimeStopRequest:
+        enabled:
+          type: boolean
+        disabledReason:
+          type: string
+    StartPreviewActionRequest:
       type: object
-      required: [projectId]
+      required: [projectId, projectPath, triggerSource]
       properties:
         projectId:
           type: string
-    RuntimeRestartRequest:
+        projectPath:
+          type: string
+        triggerSource:
+          type: string
+          enum: [ACTION, TOOL_WINDOW]
+        startupOutput:
+          type: string
+    StartPreviewActionResult:
       type: object
-      required: [projectId]
+      required: [projectId, invoked, delegated]
       properties:
         projectId:
           type: string
-    RuntimeStatus:
+        invoked:
+          type: boolean
+        delegated:
+          type: boolean
+        handoffResult:
+          $ref: '#/components/schemas/RuntimeHandoffResult'
+    RuntimeHandoffRequest:
       type: object
-      required: [projectId, state, singleInstance]
+      required: [projectId, projectPath, triggerSource]
       properties:
         projectId:
           type: string
-        state:
+        projectPath:
           type: string
-          enum:
-            - UNINITIALIZED
-            - BOOTSTRAPPING
-            - READY
-            - SERVING
-            - RESTARTING
-            - STOPPING
-            - STOPPED
-            - FAILED
-            - DISPOSED
-        baseUrl:
+        triggerSource:
+          type: string
+          enum: [ACTION, TOOL_WINDOW]
+        startupOutput:
+          type: string
+    RuntimeHandoffResult:
+      type: object
+      required: [projectId, started, alreadyRunning, baseUrlDetected]
+      properties:
+        projectId:
+          type: string
+        started:
+          type: boolean
+        alreadyRunning:
+          type: boolean
+        baseUrlDetected:
+          type: boolean
+        previewUrl:
           type: string
           format: uri
-        runtimeReady:
-          type: boolean
-        singleInstance:
-          type: boolean
-        lastError:
-          type: string
-    TopicTreeCommand:
-      type: object
-      required: [commandId, commandType, treeId, payload]
-      properties:
-        commandId:
-          type: string
-        commandType:
-          type: string
-          enum: [ADD, MOVE, REMOVE, RENAME, REPARENT, REORDER, VALIDATE]
-        treeId:
-          type: string
-        payload:
-          oneOf:
-            - $ref: '#/components/schemas/AddNodePayload'
-            - $ref: '#/components/schemas/MoveNodePayload'
-            - $ref: '#/components/schemas/RemoveNodePayload'
-            - $ref: '#/components/schemas/RenameNodePayload'
-            - $ref: '#/components/schemas/ReparentNodePayload'
-            - $ref: '#/components/schemas/ReorderNodePayload'
-            - $ref: '#/components/schemas/ValidateTreePayload'
-    AddNodePayload:
-      type: object
-      required: [parentNodeId, nodeId, title, orderIndex]
-      properties:
-        parentNodeId:
-          type: string
-        nodeId:
-          type: string
-        title:
-          type: string
-          minLength: 1
-        orderIndex:
-          type: integer
-          minimum: 0
-    MoveNodePayload:
-      type: object
-      required: [nodeId, newParentNodeId, newOrderIndex]
-      properties:
-        nodeId:
-          type: string
-        newParentNodeId:
-          type: string
-        newOrderIndex:
-          type: integer
-          minimum: 0
-    RemoveNodePayload:
-      type: object
-      required: [nodeId]
-      properties:
-        nodeId:
-          type: string
-    RenameNodePayload:
-      type: object
-      required: [nodeId, newTitle]
-      properties:
-        nodeId:
-          type: string
-        newTitle:
-          type: string
-          minLength: 1
-    ReparentNodePayload:
-      type: object
-      required: [nodeId, newParentNodeId]
-      properties:
-        nodeId:
-          type: string
-        newParentNodeId:
-          type: string
-    ReorderNodePayload:
-      type: object
-      required: [parentNodeId, orderedNodeIds]
-      properties:
-        parentNodeId:
-          type: string
-        orderedNodeIds:
-          type: array
-          items:
-            type: string
-          minItems: 1
-    ValidateTreePayload:
-      type: object
-      properties:
-        strict:
-          type: boolean
-          default: true
-    TopicTreeCommandResult:
-      type: object
-      required: [commandId, status]
-      properties:
-        commandId:
-          type: string
-        status:
-          type: string
-          enum: [SUCCESS, REJECTED, FAILED]
-        treeVersion:
-          type: integer
-        violations:
-          type: array
-          items:
-            $ref: '#/components/schemas/Violation'
-        message:
-          type: string
-    Violation:
-      type: object
-      required: [code, detail]
-      properties:
-        code:
-          type: string
-        detail:
-          type: string
-    PreviewNavigationRequest:
-      type: object
-      required: [projectId, selectedPath]
-      properties:
-        projectId:
-          type: string
-        selectedPath:
-          type: string
-        docsRoot:
-          type: string
-          default: docs
-    PreviewNavigationResult:
-      type: object
-      required: [projectId, outcome]
-      properties:
-        projectId:
-          type: string
-        mappedRoute:
-          type: string
-        outcome:
-          type: string
-          enum: [APPLIED, SKIPPED, FAILED]
-        reason:
+        failureReason:
           type: string

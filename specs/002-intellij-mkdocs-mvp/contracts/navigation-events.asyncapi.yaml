@@ -1,165 +1,190 @@
 asyncapi: 3.0.0
 info:
-  title: IntelliJ MkDocs Plugin Navigation Events
-  version: 0.1.0
-  description: Event contracts for docs selection and preview navigation flows.
-x-contract-validation:
-  validatedOn: "2026-02-08"
-  validatedAgainst:
-    - "modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/DocsFileSelectionPublisher.kt"
-    - "modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/NavigationCoordinator.kt"
-    - "modules/mkdocs-runtime-adapter/src/main/kotlin/com/authord/mkdocs/runtime/BaseUrlDetector.kt"
-  notes:
-    - "File selection payload fields align with docs selection event publisher."
-    - "Preview navigation requested/applied/failed payloads align with navigation result states."
-    - "Runtime base URL detected payload aligns with base URL detection behavior."
+  title: IntelliJ MkDocs Plugin Shell Events
+  version: 0.2.0
+  description: Event contracts for plugin-shell readiness, tool-window initialization, action invocations, and runtime handoff outcomes.
 channels:
-  docs.file.selected:
-    address: docs.file.selected
+  plugin.shell.loaded:
+    address: plugin.shell.loaded
     messages:
-      fileSelection:
-        $ref: '#/components/messages/DocsFileSelected'
-  preview.navigation.requested:
-    address: preview.navigation.requested
+      shellLoaded:
+        $ref: '#/components/messages/PluginShellLoaded'
+  plugin.shell.tool-window.ready:
+    address: plugin.shell.tool-window.ready
     messages:
-      navigationRequested:
-        $ref: '#/components/messages/PreviewNavigationRequested'
-  preview.navigation.applied:
-    address: preview.navigation.applied
+      toolWindowReady:
+        $ref: '#/components/messages/ToolWindowReady'
+  plugin.shell.action.updated:
+    address: plugin.shell.action.updated
     messages:
-      navigationApplied:
-        $ref: '#/components/messages/PreviewNavigationApplied'
-  preview.navigation.failed:
-    address: preview.navigation.failed
+      actionUpdated:
+        $ref: '#/components/messages/StartActionUpdated'
+  plugin.shell.action.invoked:
+    address: plugin.shell.action.invoked
     messages:
-      navigationFailed:
-        $ref: '#/components/messages/PreviewNavigationFailed'
-  runtime.base-url.detected:
-    address: runtime.base-url.detected
+      actionInvoked:
+        $ref: '#/components/messages/StartActionInvoked'
+  plugin.shell.runtime.handoff.succeeded:
+    address: plugin.shell.runtime.handoff.succeeded
     messages:
-      baseUrlDetected:
-        $ref: '#/components/messages/RuntimeBaseUrlDetected'
+      handoffSucceeded:
+        $ref: '#/components/messages/RuntimeHandoffSucceeded'
+  plugin.shell.runtime.handoff.failed:
+    address: plugin.shell.runtime.handoff.failed
+    messages:
+      handoffFailed:
+        $ref: '#/components/messages/RuntimeHandoffFailed'
 operations:
-  publishDocsSelection:
+  publishPluginShellLoaded:
     action: send
     channel:
-      $ref: '#/channels/docs.file.selected'
+      $ref: '#/channels/plugin.shell.loaded'
     messages:
-      - $ref: '#/channels/docs.file.selected/messages/fileSelection'
-  publishNavigationRequested:
+      - $ref: '#/channels/plugin.shell.loaded/messages/shellLoaded'
+  publishToolWindowReady:
     action: send
     channel:
-      $ref: '#/channels/preview.navigation.requested'
+      $ref: '#/channels/plugin.shell.tool-window.ready'
     messages:
-      - $ref: '#/channels/preview.navigation.requested/messages/navigationRequested'
-  publishNavigationApplied:
+      - $ref: '#/channels/plugin.shell.tool-window.ready/messages/toolWindowReady'
+  publishStartActionUpdated:
     action: send
     channel:
-      $ref: '#/channels/preview.navigation.applied'
+      $ref: '#/channels/plugin.shell.action.updated'
     messages:
-      - $ref: '#/channels/preview.navigation.applied/messages/navigationApplied'
-  publishNavigationFailed:
+      - $ref: '#/channels/plugin.shell.action.updated/messages/actionUpdated'
+  publishStartActionInvoked:
     action: send
     channel:
-      $ref: '#/channels/preview.navigation.failed'
+      $ref: '#/channels/plugin.shell.action.invoked'
     messages:
-      - $ref: '#/channels/preview.navigation.failed/messages/navigationFailed'
-  publishBaseUrlDetected:
+      - $ref: '#/channels/plugin.shell.action.invoked/messages/actionInvoked'
+  publishRuntimeHandoffSucceeded:
     action: send
     channel:
-      $ref: '#/channels/runtime.base-url.detected'
+      $ref: '#/channels/plugin.shell.runtime.handoff.succeeded'
     messages:
-      - $ref: '#/channels/runtime.base-url.detected/messages/baseUrlDetected'
+      - $ref: '#/channels/plugin.shell.runtime.handoff.succeeded/messages/handoffSucceeded'
+  publishRuntimeHandoffFailed:
+    action: send
+    channel:
+      $ref: '#/channels/plugin.shell.runtime.handoff.failed'
+    messages:
+      - $ref: '#/channels/plugin.shell.runtime.handoff.failed/messages/handoffFailed'
 components:
   messages:
-    DocsFileSelected:
-      name: DocsFileSelected
+    PluginShellLoaded:
+      name: PluginShellLoaded
       payload:
-        $ref: '#/components/schemas/DocsFileSelectedPayload'
-    PreviewNavigationRequested:
-      name: PreviewNavigationRequested
+        $ref: '#/components/schemas/PluginShellLoadedPayload'
+    ToolWindowReady:
+      name: ToolWindowReady
       payload:
-        $ref: '#/components/schemas/PreviewNavigationRequestedPayload'
-    PreviewNavigationApplied:
-      name: PreviewNavigationApplied
+        $ref: '#/components/schemas/ToolWindowReadyPayload'
+    StartActionUpdated:
+      name: StartActionUpdated
       payload:
-        $ref: '#/components/schemas/PreviewNavigationAppliedPayload'
-    PreviewNavigationFailed:
-      name: PreviewNavigationFailed
+        $ref: '#/components/schemas/StartActionUpdatedPayload'
+    StartActionInvoked:
+      name: StartActionInvoked
       payload:
-        $ref: '#/components/schemas/PreviewNavigationFailedPayload'
-    RuntimeBaseUrlDetected:
-      name: RuntimeBaseUrlDetected
+        $ref: '#/components/schemas/StartActionInvokedPayload'
+    RuntimeHandoffSucceeded:
+      name: RuntimeHandoffSucceeded
       payload:
-        $ref: '#/components/schemas/RuntimeBaseUrlDetectedPayload'
+        $ref: '#/components/schemas/RuntimeHandoffSucceededPayload'
+    RuntimeHandoffFailed:
+      name: RuntimeHandoffFailed
+      payload:
+        $ref: '#/components/schemas/RuntimeHandoffFailedPayload'
   schemas:
-    DocsFileSelectedPayload:
+    PluginShellLoadedPayload:
       type: object
-      required: [eventId, projectId, selectedPath, occurredAt]
+      required: [eventId, projectId, pluginLoaded, occurredAt]
       properties:
         eventId:
           type: string
         projectId:
           type: string
-        selectedPath:
+        pluginLoaded:
+          type: boolean
+        occurredAt:
+          type: string
+          format: date-time
+    ToolWindowReadyPayload:
+      type: object
+      required: [eventId, projectId, toolWindowId, contentCreated, occurredAt]
+      properties:
+        eventId:
+          type: string
+        projectId:
+          type: string
+        toolWindowId:
+          type: string
+        contentCreated:
+          type: boolean
+        occurredAt:
+          type: string
+          format: date-time
+    StartActionUpdatedPayload:
+      type: object
+      required: [eventId, projectId, visible, enabled, occurredAt]
+      properties:
+        eventId:
+          type: string
+        projectId:
+          type: string
+        visible:
+          type: boolean
+        enabled:
+          type: boolean
+        disabledReason:
           type: string
         occurredAt:
           type: string
           format: date-time
-    PreviewNavigationRequestedPayload:
+    StartActionInvokedPayload:
       type: object
-      required: [eventId, projectId, selectedPath, requestedRoute, occurredAt]
+      required: [eventId, projectId, triggerSource, occurredAt]
       properties:
         eventId:
           type: string
         projectId:
           type: string
-        selectedPath:
+        triggerSource:
           type: string
-        requestedRoute:
-          type: string
+          enum: [ACTION, TOOL_WINDOW]
         occurredAt:
           type: string
           format: date-time
-    PreviewNavigationAppliedPayload:
+    RuntimeHandoffSucceededPayload:
       type: object
-      required: [eventId, projectId, route, occurredAt]
+      required: [eventId, projectId, started, alreadyRunning, previewUrl, occurredAt]
       properties:
         eventId:
           type: string
         projectId:
           type: string
-        route:
-          type: string
-        occurredAt:
-          type: string
-          format: date-time
-    PreviewNavigationFailedPayload:
-      type: object
-      required: [eventId, projectId, route, reason, occurredAt]
-      properties:
-        eventId:
-          type: string
-        projectId:
-          type: string
-        route:
-          type: string
-        reason:
-          type: string
-        occurredAt:
-          type: string
-          format: date-time
-    RuntimeBaseUrlDetectedPayload:
-      type: object
-      required: [eventId, projectId, baseUrl, occurredAt]
-      properties:
-        eventId:
-          type: string
-        projectId:
-          type: string
-        baseUrl:
+        started:
+          type: boolean
+        alreadyRunning:
+          type: boolean
+        previewUrl:
           type: string
           format: uri
+        occurredAt:
+          type: string
+          format: date-time
+    RuntimeHandoffFailedPayload:
+      type: object
+      required: [eventId, projectId, failureReason, occurredAt]
+      properties:
+        eventId:
+          type: string
+        projectId:
+          type: string
+        failureReason:
+          type: string
         occurredAt:
           type: string
           format: date-time

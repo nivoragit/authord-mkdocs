@@ -2,6 +2,40 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.0] - 2026-02-09
+
+## Added
+
+1. IntelliJ plugin-shell enablement for MVP runtime integration:
+- IntelliJ Gradle plugin configuration and compatibility properties for `runIde`.
+- Plugin descriptor updates for platform dependency, tool window registration, and Start action registration.
+- Minimal IntelliJ tool window factory (`MkdocsToolWindowFactory`) and Start action (`StartMkdocsAction`).
+- Project-scoped runtime integration service (`PluginRuntimeIntegrationService`) delegating to existing activation/runtime services.
+
+2. Plugin-shell unit test coverage:
+- `PluginBuildPolicyTest`
+- `PluginDescriptorRegistrationTest`
+- `MkdocsToolWindowFactoryTest`
+- `StartMkdocsActionPresentationTest`
+- `StartMkdocsActionInvocationTest`
+- `PluginRuntimeIntegrationServiceTest`
+
+3. Plugin-shell DocOps artifacts:
+- Updated feature spec for R-01..R-06 scope.
+- Updated technical design notes with plugin entry architecture and function-level usage guidance.
+- Updated operational runbook with `runIde` workflow and troubleshooting.
+- Updated requirements→tests traceability matrix for plugin-shell requirements.
+- Added runIde smoke validation checklist at `tests/integration/plugin-shell/RunIdeSmokeValidation.md`.
+
+## Changed
+
+1. `modules/ui-plugin` build now applies IntelliJ plugin tooling and patches plugin compatibility range from `gradle.properties`.
+2. `modules/ui-plugin/src/main/resources/META-INF/plugin.xml` now includes required IntelliJ extension registrations for this cycle.
+
+## Migration Notes
+
+No migration steps are required for this additive plugin-shell cycle.
+
 ## [0.1.0] - 2026-02-08
 
 ## Added

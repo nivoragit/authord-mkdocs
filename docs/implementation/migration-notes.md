@@ -1,22 +1,26 @@
 # Migration Notes
 
-## Current Release Context
+## Release Context
 
-This is the first implementation baseline for the IntelliJ MkDocs MVP in this repository.
+This cycle adds plugin-shell entry wiring (build/plugin descriptor/tool-window/action/runtime integration) on top of existing MVP services.
 
-## Migration Impact
+## Compatibility Impact
 
-No data, schema, or runtime migration steps are required.
+No breaking migration steps are required.
 
-## Compatibility Notes
+## Backward Compatibility Notes
 
-1. Extension seams (`TopicTreePort`, `PluginCommandBus`/`CommandRegistry`, `PreviewSyncPort`, `VectorStorePort`) are present with minimal/default behavior.
-2. Future-cycle capabilities remain disabled by default feature policy.
-3. Existing projects only need standard prerequisites (`JDK 21`, `uv`) to run build/test validation.
+1. Existing MVP runtime/domain modules remain unchanged in behavior.
+2. Mandatory seams remain present and compatible:
+- `TopicTreePort`
+- `PluginCommandBus` + `CommandRegistry`
+- `PreviewSyncPort`
+- `VectorStorePort`
+3. Plugin-shell additions are additive and do not enable future-cycle features by default.
 
-## Forward-Looking Migration Guidance
+## If Future Breaking Changes Occur
 
-If future cycles enable currently excluded capabilities, add a versioned migration section covering:
-1. Behavioral flag defaults and rollout strategy.
-2. Contract/schema changes for command/event payloads.
-3. Any persisted state migration (if persistence is introduced later).
+Add a migration section with:
+1. interface version changes,
+2. required configuration updates,
+3. compatibility window and rollback guidance.

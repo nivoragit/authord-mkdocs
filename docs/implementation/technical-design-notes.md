@@ -1,155 +1,85 @@
-# Technical Design Notes: IntelliJ MkDocs MVP
+# Technical Design Notes: IntelliJ Plugin Shell Cycle
 
 ## 1. Architecture Overview
 
-The implementation uses a multi-module architecture to separate domain logic, runtime process control, plugin-facing orchestration, extension contracts, and default adapters.
+This cycle adds plugin entry wiring so the current MVP can run as an IntelliJ plugin shell while keeping existing runtime/domain behavior intact.
 
-## 1.1 Modules
+### 1.1 Shell Modules and Responsibilities
 
-1. `modules/core-domain`
-- Topic tree domain model and invariants.
-- Route mapping logic for docs file to preview route.
-- Semantic scroll delta logic excluding comment ranges.
-- Feature policy model and runtime lifecycle enum.
+1. `build.gradle.kts` + `gradle.properties`
+- Enables IntelliJ Platform Gradle plugin setup.
+- Defines IDE target and plugin compatibility metadata.
 
-2. `modules/mkdocs-runtime-adapter`
-- Runtime bootstrap via `uv` and `mkdocs` install.
-- MkDocs process lifecycle manager (single instance per project).
-- Base URL parsing from startup output.
+2. `modules/ui-plugin/src/main/resources/META-INF/plugin.xml`
+- Declares platform dependency.
+- Registers tool window factory and Start MkDocs Preview action.
+- Registers project-scoped runtime integration service.
 
-3. `modules/ui-plugin`
-- Activation orchestration.
-- Docs explorer service.
-- File selection publisher.
-- Navigation coordinator and preview pane state coordinator.
-- Composition root wiring seam defaults.
+3. `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/intellij/`
+- `MkdocsToolWindowFactory`: minimal tool-window shell panel.
+- `StartMkdocsAction`: action-system entry point for runtime handoff.
+- `PluginRuntimeIntegrationService`: project-scoped adapter that delegates to existing activation/runtime services.
 
-4. `modules/extension-ports`
-- `TopicTreePort` and typed command/result DTOs.
-- `PluginCommandBus` + `CommandRegistry` contracts.
-- `PreviewSyncPort` contract.
-- `VectorStorePort` contract.
+4. Existing runtime/domain modules (reused, not rewritten)
+- `UvBootstrapService`
+- `MkdocsProcessManager`
+- `BaseUrlDetector`
+- `PluginActivationService`
 
-5. `modules/infra-defaults`
-- In-memory command registry.
-- No-op preview sync adapter.
-- No-op vector store adapter.
+## 2. Plugin Entry Architecture
 
-## 2. Key Design Decisions
+## 2.1 Tool Window Path
 
-1. Keep future extensions behind ports and default adapters now, without enabling out-of-scope behavior.
-2. Enforce domain invariants in a central topic tree aggregate.
-3. Keep runtime lifecycle single-instance per project ID to avoid duplicate mkdocs servers.
-4. Use explicit route mapping service to make file->route behavior deterministic and testable.
-5. Use feature-flag policy defaults to allow MVP flow and disallow future-cycle feature paths.
+1. IntelliJ loads plugin descriptor and registers `MkdocsToolWindowFactory`.
+2. Tool window factory creates minimal shell content panel.
+3. Start button delegates to `PluginRuntimeIntegrationService.startPreview(TOOL_WINDOW)`.
 
-## 3. Core Contracts and Data Structures
+## 2.2 Action Path
 
-## 3.1 Topic Tree Command Boundary
+1. IntelliJ registers `StartMkdocsAction`.
+2. `update` computes visibility/enabled state from project context and runtime readiness.
+3. `actionPerformed` delegates to `PluginRuntimeIntegrationService.startPreview(ACTION)`.
 
-- Command types: `ADD`, `MOVE`, `REMOVE`, `RENAME`, `REPARENT`, `REORDER`, `VALIDATE`.
-- Results: `SUCCESS`, `REJECTED`, `FAILED` with version and violations.
-- Domain aggregate enforces:
-- parent existence
-- unique node IDs
-- non-negative indices
-- root removal protection
-- reorder sibling-set exactness
-- cycle prevention
-- rename title validation and reparent root/cycle protections
+## 2.3 Runtime Handoff Path
 
-Provider-independent topic runway primitives include:
-`TopicId`, `TopicNode`, `TopicTree`, `TopicOrder`, `TopicLink`, and `TopicMetadata`.
+1. Project-scoped runtime integration service collects project path + startup output context.
+2. Service delegates to existing `PluginActivationService`.
+3. Activation flow reuses existing bootstrap, runtime manager, and base-URL detection.
+4. Single-instance runtime behavior remains controlled by `MkdocsProcessManager`.
 
-## 3.2 Runtime Lifecycle
+## 3. Lifecycle and Invariants
 
-- Lifecycle states include:
-`UNINITIALIZED`, `BOOTSTRAPPING`, `READY`, `SERVING`, `RESTARTING`, `STOPPING`, `STOPPED`, `FAILED`, `DISPOSED`.
-- Runtime start command shape by default:
-`mkdocs serve`
-- Host/port are not hardcoded in runtime manager defaults.
+1. One runtime manager instance per IntelliJ project service instance.
+2. Runtime can only start when:
+- project base path exists,
+- MVP feature policy allows execution,
+- runtime is not already active for the same project.
+3. Dispose path must call runtime stop/dispose safely.
+4. No hardcoded runtime host/port values are introduced in plugin shell code.
 
-## 3.3 Preview Routing Rules
+## 4. Function-Level Usage Guidance
 
-- `docs/index.md` -> `/`
-- `docs/foo/index.md` -> `/foo/`
-- `docs/foo.md` -> `/foo/`
-- nested index/file rules preserved.
-- non-docs or non-markdown selections are rejected from navigation.
+The entries below are the usage contracts for new/changed public plugin-shell services.
 
-## 3.4 Scroll Semantics
+| Function/Service | Purpose | Inputs | Outputs | Errors/Failure Modes | Usage Example |
+|------------------|---------|--------|---------|----------------------|---------------|
+| `PluginRuntimeIntegrationService.canStartPreview()` | Determine if Start action/tool-window trigger should be enabled. | Project-scoped state and feature policy. | `Boolean` readiness. | Returns `false` when project path is missing, policy blocks MVP flow, or runtime is already running. | `if (service.canStartPreview()) { ... }` |
+| `PluginRuntimeIntegrationService.startPreview(trigger)` | Delegate preview start to existing activation/runtime orchestration. | `trigger: ACTION or TOOL_WINDOW`; project base path; startup output provider text. | `ActivationResult` with success flag, reason, and message/URL. | `START_FAILED` when path missing; activation failure reasons from existing activation service. | `service.startPreview(PreviewStartTrigger.ACTION)` |
+| `PluginRuntimeIntegrationService.stopPreview()` | Stop runtime for current project. | none (project-scoped). | `Boolean` stopped state. | Returns `false` when no active runtime exists. | `service.stopPreview()` |
+| `PluginRuntimeIntegrationService.updateFeatureFlags(policy)` | Override active policy for lifecycle/guard behavior. | `FeatureFlagPolicy`. | none. | Can disable action/runtime readiness when MVP flag is false. | `service.updateFeatureFlags(FeatureFlagPolicy(mvpEnabled = false))` |
+| `StartMkdocsAction.update(event)` | Apply action visibility/enabled state in action system. | `AnActionEvent` with project context. | UI presentation state update. | Hidden+disabled when project is missing; disabled when runtime cannot start. | Registered action in `plugin.xml`; invoked by IntelliJ action updates. |
+| `StartMkdocsAction.actionPerformed(event)` | Trigger runtime handoff from action invocation. | `AnActionEvent` with project context. | Delegates to runtime integration service. | No-op when project missing or runtime start is not allowed. | User runs **Start MkDocs Preview** from Tools menu. |
+| `MkdocsToolWindowFactory.createToolWindowContent(project, toolWindow)` | Build and register minimal shell content for MkDocs tool window. | IntelliJ `Project` + `ToolWindow`. | Tool window content registered in content manager. | If runtime cannot start, start button handler is a no-op. | IntelliJ constructs tool window after plugin load. |
 
-- `ScrollSemanticService` computes scroll delta while subtracting overlap against comment ranges.
-- Pure-comment movement yields no effective semantic delta.
+## 5. Compatibility and Versioning
 
-## 4. Main Flows
+1. `PluginRuntimeIntegrationService` API version: `1.0.0`.
+2. Existing seam interfaces remain unchanged for this cycle.
+3. Plugin shell changes are additive and preserve existing MVP workflows.
 
-## 4.1 Activation Flow
+## 6. Validation Strategy
 
-1. Validate feature policy allows MVP-only execution.
-2. Bootstrap runtime (`uv venv ...`, `uv pip install mkdocs`) unless already bootstrapped for project path.
-3. Start or reuse per-project mkdocs runtime process.
-4. Detect base URL from startup output.
-5. Open preview session with detected base URL.
-6. Return activation result with success/failure reason.
-
-## 4.2 Explorer -> Preview Navigation Flow
-
-1. Docs explorer discovers markdown files under `docs/`.
-2. Selection is published as event.
-3. Navigation coordinator maps path to route.
-4. Preview pane session navigates to route.
-5. Failure handler provides explicit message when mapping is not applicable.
-
-## 4.3 Extension Seam Wiring
-
-1. Composition root builds default `InMemoryCommandRegistry`.
-2. Registers topic command handlers (`ADD/MOVE/REMOVE/RENAME/REPARENT/REORDER/VALIDATE`).
-3. Builds `DefaultPluginCommandBus` against registry.
-4. Wires no-op `PreviewSyncPort` and no-op `VectorStorePort`.
-
-## 5. Function-Level Usage Guidance
-
-The following usage contracts are the authoritative references for new/changed MVP services.
-
-| Service / Function | Purpose | Inputs | Outputs | Errors / Failure Modes | Usage Example |
-|--------------------|---------|--------|---------|------------------------|---------------|
-| `UvBootstrapService.bootstrap(projectPath)` | Prepare plugin-managed runtime and install MkDocs once per project path. | `projectPath: String` | `BootstrapResult(success, runtimePath, executedCommands, skipped, errorMessage)` | Returns `success=false` when `uv venv` or `uv pip install mkdocs` exits non-zero; `errorMessage` captures stderr fallback text. | Call during activation before runtime start; abort activation if `success=false`. |
-| `MkdocsProcessManager.start(projectId, workingDir, config)` | Start or reuse a single MkDocs process for one project ID. | `projectId`, `workingDir`, optional `RuntimeServerConfig(extraArgs)` | `RuntimeStartResult(started, processId, command, alreadyRunning)` | Reuses existing process when alive; launch failure surfaces via `started=false` and caller-owned launcher behavior. | Call after bootstrap and before URL detection. |
-| `MkdocsProcessManager.stop/restart/dispose` | Lifecycle controls with dispose-safe cleanup semantics. | `projectId` | `Boolean` for stop/dispose, `RuntimeStartResult` for restart | `stop`/`dispose` return `false` when no process exists; `restart` falls back to fresh start when prior state is absent. | Call from plugin shutdown and explicit restart flows. |
-| `BaseUrlDetector.detectBaseUrl(startupOutput)` | Detect runtime preview base URL from process stdout text. | `startupOutput: String` | URL string or `null` | Returns `null` when no valid URL token exists; caller treats this as activation failure (`BASE_URL_NOT_FOUND`). | Parse captured startup logs before opening preview. |
-| `PluginActivationService.activate(...)` | Orchestrate policy guard, bootstrap, runtime start, URL detection, and preview open. | `projectId`, `projectPath`, `startupOutput`, optional `runtimeConfig` | `ActivationResult(success, reason, message, previewUrl)` | Fails with typed reasons: policy disabled, bootstrap failure, runtime failure, URL missing. | Entry point for first-use and repeated activation flows. |
-| `DocsExplorerService.discoverMarkdownFiles(projectPath, docsRoot)` | Discover markdown files under docs root using OS-neutral path traversal. | `projectPath`, optional `docsRoot` | `List<String>` project-relative paths | Returns empty list when docs root does not exist or is not a directory. | Populate explorer model before user navigation. |
-| `RouteMappingService.mapToRoute(selectedPath, docsRoot)` | Convert docs markdown file path to normalized preview route. | `selectedPath`, optional `docsRoot` | Route string (for example `/guide/`) or `null` | Returns `null` for non-docs or non-markdown paths. | Use before preview navigation to enforce deterministic routing rules. |
-| `NavigationCoordinator.onFileSelected(projectId, selectedPath)` | Apply route mapping and update preview pane state for current project. | `projectId`, `selectedPath` | `NavigationResult(applied, route, message)` | Non-applicable mappings produce `applied=false` with failure message from `PreviewNavigationFailureHandler`. | Handle explorer selection events. |
-| `ScrollSemanticService.calculateSemanticDelta(...)` | Compute editor scroll delta excluding overlaps with comment ranges. | Previous/current offsets, viewport size, list of `CommentRange` | `Int` effective semantic delta | Returns `0` for non-movement or fully-commented movement window. | Forward computed semantic delta to `PreviewSyncPort` seam. |
-| `TopicTreePort.execute(command)` and `PluginCommandBus.dispatch(command)` | Execute command-based topic mutations through registry-resolved handlers. | Typed `TopicTreeCommand` DTOs | `TopicTreeCommandResult(status, message, violations)` | Rejected results include code/message violations (`NODE_MISSING`, `CYCLE`, etc.); unregistered command handlers return typed failure from bus implementation. | Register handlers in composition root; dispatch from mutation entry points. |
-| `PreviewSyncPort.onEditorScrollSemanticDelta(...)` | Extension seam for preview sync capabilities while MVP keeps default behavior no-op. | `projectId`, `documentPath`, semantic `delta` | No direct return value | MVP default adapter intentionally performs no action; future adapters must preserve semantic delta contract (comments already excluded). | Invoke after computing semantic scroll delta events. |
-| `VectorStorePort.upsert/search` | Extension seam for future vector-backed retrieval with MVP-safe defaults. | Upsert: `documentId`, `content`; Search: `query`, `limit` | Upsert: none; Search: `List<String>` provider-specific hits | MVP default adapter returns empty search results and stores nothing by design. | Leave wired for extension readiness without enabling vector behavior in MVP. |
-
-## 6. Quality and Governance Design
-
-1. Root Gradle config applies Jacoco line coverage rule minimum `1.0` for scoped modules.
-2. CI workflow enforces `clean test jacocoTestCoverageVerification`.
-3. Policy tests verify required SDD/implementation docs artifacts, coverage scope configuration, runtime neutrality constraints, and KDoc coverage for public declarations.
-4. ADRs capture seam decisions for future extension cycles.
-5. Public seam/service interfaces are version-tagged in source KDoc (`API Version: 1.0.0`).
-
-## 7. Known Boundaries
-
-1. Plugin metadata exists, but full IntelliJ extension-point UI wiring is intentionally limited in this cycle.
-2. Contract schemas (OpenAPI/AsyncAPI) are internal design/verification contracts, not public network APIs.
-3. Future-cycle capabilities remain disabled by default feature policy.
-
-## 8. Key Implementation Files
-
-| Area | Primary Files |
-|------|---------------|
-| Activation flow | `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/PluginActivationService.kt`, `modules/mkdocs-runtime-adapter/src/main/kotlin/com/authord/mkdocs/runtime/UvBootstrapService.kt`, `modules/mkdocs-runtime-adapter/src/main/kotlin/com/authord/mkdocs/runtime/MkdocsProcessManager.kt`, `modules/mkdocs-runtime-adapter/src/main/kotlin/com/authord/mkdocs/runtime/BaseUrlDetector.kt` |
-| Docs navigation flow | `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/DocsExplorerService.kt`, `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/NavigationCoordinator.kt`, `modules/core-domain/src/main/kotlin/com/authord/mkdocs/core/navigation/RouteMappingService.kt`, `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/PreviewPaneCoordinator.kt` |
-| Scroll semantics | `modules/core-domain/src/main/kotlin/com/authord/mkdocs/core/scroll/ScrollSemanticService.kt` |
-| Topic tree seam + domain | `modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/TopicTreePort.kt`, `modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/topic/TopicTreeCommandDtos.kt`, `modules/core-domain/src/main/kotlin/com/authord/mkdocs/core/topic/TopicTreeAggregate.kt` |
-| Command bus seam | `modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/command/PluginCommandBus.kt`, `modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/command/DefaultPluginCommandBus.kt`, `modules/infra-defaults/src/main/kotlin/com/authord/mkdocs/defaults/command/InMemoryCommandRegistry.kt` |
-| Preview/vector seams | `modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/preview/PreviewSyncPort.kt`, `modules/infra-defaults/src/main/kotlin/com/authord/mkdocs/defaults/preview/NoOpPreviewSyncAdapter.kt`, `modules/extension-ports/src/main/kotlin/com/authord/mkdocs/ports/vector/VectorStorePort.kt`, `modules/infra-defaults/src/main/kotlin/com/authord/mkdocs/defaults/vector/NoOpVectorStoreAdapter.kt` |
-| Feature policy | `modules/core-domain/src/main/kotlin/com/authord/mkdocs/core/flags/FeatureFlagPolicy.kt`, `modules/ui-plugin/src/main/kotlin/com/authord/mkdocs/ui/FeatureFlagPolicyService.kt` |
-| Quality gates | `build.gradle.kts`, `.github/workflows/ci.yml`, `modules/core-domain/src/test/kotlin/com/authord/mkdocs/core/quality/DocumentationArtifactsPolicyTest.kt`, `modules/core-domain/src/test/kotlin/com/authord/mkdocs/core/quality/CoverageScopePolicyTest.kt` |
+1. Policy tests for build/descriptors.
+2. Unit tests for tool-window content path, action presentation/invocation, runtime integration lifecycle guard.
+3. RunIde smoke workflow for plugin load + visible entry points.
+4. Coverage gate remains 100% for scoped code.

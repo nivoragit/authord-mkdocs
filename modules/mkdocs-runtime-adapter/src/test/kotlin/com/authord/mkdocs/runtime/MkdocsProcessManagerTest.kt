@@ -4,7 +4,10 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
-private class FakeHandle(override val id: String) : ManagedProcessHandle {
+private class FakeHandle(
+    override val id: String,
+    private val startupOutputText: String = "",
+) : ManagedProcessHandle {
     private var alive = true
 
     override fun stop() {
@@ -12,9 +15,38 @@ private class FakeHandle(override val id: String) : ManagedProcessHandle {
     }
 
     override fun isAlive(): Boolean = alive
+
+    override fun startupOutput(): String = startupOutputText
 }
 
 class MkdocsProcessManagerTest {
+    @Test
+    fun `managed process handle default startup output is empty`() {
+        val handle = object : ManagedProcessHandle {
+            override val id: String = "default-handle"
+
+            override fun stop() {
+                // no-op
+            }
+
+            override fun isAlive(): Boolean = false
+        }
+
+        assertEquals("", handle.startupOutput())
+    }
+
+    @Test
+    fun `runtime start result default startup output is empty`() {
+        val result = RuntimeStartResult(
+            started = true,
+            processId = "process-1",
+            command = listOf("mkdocs", "serve"),
+            alreadyRunning = false,
+        )
+
+        assertEquals("", result.startupOutput)
+    }
+
     @Test
     fun `ensures single server instance per project`() {
         var launchCount = 0
@@ -100,5 +132,16 @@ class MkdocsProcessManagerTest {
 
         assertEquals("process-extra", start.processId)
         assertEquals(listOf("mkdocs", "serve", "--dirtyreload"), start.command)
+    }
+
+    @Test
+    fun `start result includes captured startup output`() {
+        val manager = MkdocsProcessManager(ProcessLauncher { _, _ ->
+            FakeHandle("process-output", startupOutputText = "ready at http://127.0.0.1:8000/")
+        })
+
+        val start = manager.start("project-5", "/tmp/project")
+
+        assertEquals("ready at http://127.0.0.1:8000/", start.startupOutput)
     }
 }

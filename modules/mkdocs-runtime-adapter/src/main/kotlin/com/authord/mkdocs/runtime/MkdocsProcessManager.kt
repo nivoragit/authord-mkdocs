@@ -11,6 +11,7 @@ const val PROCESS_LIFECYCLE_API_VERSION: String = "1.0.0"
  * - Optional `extraArgs` may be supplied by callers for controlled extensions.
  */
 data class RuntimeServerConfig(
+    val command: List<String> = listOf("mkdocs", "serve"),
     val extraArgs: List<String> = emptyList(),
 )
 
@@ -27,6 +28,13 @@ interface ManagedProcessHandle {
 
     /** Returns `true` when process is alive. */
     fun isAlive(): Boolean
+
+    /**
+     * Returns startup output observed for this process, if available.
+     *
+     * Implementations that do not capture output may return an empty string.
+     */
+    fun startupOutput(): String = ""
 }
 
 /**
@@ -49,6 +57,7 @@ data class RuntimeStartResult(
     val processId: String,
     val command: List<String>,
     val alreadyRunning: Boolean,
+    val startupOutput: String = "",
 )
 
 private data class RunningProcess(
@@ -77,10 +86,11 @@ class MkdocsProcessManager(
                 processId = existing.handle.id,
                 command = existing.command,
                 alreadyRunning = true,
+                startupOutput = existing.handle.startupOutput(),
             )
         }
 
-        val command = mutableListOf("mkdocs", "serve").apply {
+        val command = config.command.toMutableList().apply {
             addAll(config.extraArgs)
         }
 
@@ -92,6 +102,7 @@ class MkdocsProcessManager(
             processId = handle.id,
             command = command,
             alreadyRunning = false,
+            startupOutput = handle.startupOutput(),
         )
     }
 

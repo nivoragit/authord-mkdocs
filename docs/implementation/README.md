@@ -1,10 +1,10 @@
-# IntelliJ MkDocs MVP Implementation Docs
+# IntelliJ MkDocs Implementation Docs
 
-This folder documents the currently implemented MVP on branch `002-intellij-mkdocs-mvp`.
+This folder documents the current plugin-shell implementation cycle on branch `002-intellij-mkdocs-mvp`.
 
 ## Documents
 
-- `feature-spec.md`: Implemented feature scope, requirements, and acceptance outcomes.
+- `feature-spec.md`: Implemented feature scope (R-01..R-06), requirements, and acceptance outcomes.
 - `technical-design-notes.md`: Module architecture, flows, seams, and design constraints.
 - `operational-runbook.md`: Build/test/run operations and runtime troubleshooting.
 - `test-plan-traceability.md`: Test strategy and requirement-to-test mapping.

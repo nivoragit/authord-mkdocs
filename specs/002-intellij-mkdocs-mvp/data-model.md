@@ -1,221 +1,166 @@
-# Data Model: IntelliJ MkDocs Plugin MVP
+# Data Model: IntelliJ Plugin Shell Cycle
 
 ## Overview
 
-This model defines domain entities, contract DTOs, and lifecycle state needed for the MVP and extension seams.
+This model defines planning-level entities for plugin-shell enablement while reusing existing runtime/domain modules.
 
 ## Entities
 
-### 1) TopicTree
+### 1) PluginShellConfig
 
-- Purpose: Aggregate root for ordered documentation topics managed by command mutations.
+- Purpose: Declares installable plugin-shell build/runtime metadata.
 - Fields:
-  - `treeId` (string, immutable)
-  - `rootNodeId` (string, immutable)
-  - `nodes` (map of `TopicNode` keyed by `nodeId`)
-  - `version` (integer, monotonic)
+  - `pluginId` (string, immutable)
+  - `pluginName` (string)
+  - `ideTarget` (string)
+  - `sinceBuild` (string)
+  - `untilBuild` (string, optional)
+  - `runIdeEnabled` (boolean)
 - Relationships:
-  - Owns many `TopicNode`.
-  - Mutated by `TopicTreeCommand`.
+  - Drives descriptor and build-plugin workflow.
 - Validation Rules:
-  - Exactly one root node.
-  - No cycles in parent-child graph.
-  - Sibling order must be contiguous and unique.
-  - Parent must exist for non-root nodes.
-  - `version` increments by 1 per successful mutation.
+  - `pluginId` and `pluginName` must be non-empty.
+  - `ideTarget` and compatibility bounds must be coherent.
+  - `runIdeEnabled` must be true for cycle acceptance.
 
-### 2) TopicNode
+### 2) PluginDescriptorRegistration
 
-- Purpose: Represents a single topic entry in the topic tree.
+- Purpose: Represents descriptor-level registrations required for plugin shell.
 - Fields:
-  - `nodeId` (string, immutable)
-  - `parentNodeId` (string, nullable only for root)
-  - `title` (string, required, non-empty)
-  - `sourcePath` (string, optional in MVP)
-  - `orderIndex` (integer, required)
-  - `status` (enum: `ACTIVE`, `REMOVED`)
+  - `dependsPlatform` (boolean)
+  - `toolWindowId` (string)
+  - `toolWindowFactoryClass` (string)
+  - `startActionId` (string)
+  - `startActionClass` (string)
 - Relationships:
-  - Belongs to one `TopicTree`.
-  - Referenced by add/move/remove/reorder/validate commands.
+  - Bound to `PluginShellConfig` and UI entry components.
 - Validation Rules:
-  - `title` non-empty after trim.
-  - `orderIndex >= 0`.
-  - Root cannot be removed.
+  - `dependsPlatform` must be true.
+  - Tool-window and action IDs/classes must be present and unique.
 
-### 3) TopicTreeCommand
+### 3) ToolWindowShellState
 
-- Purpose: DTO for mutation requests routed through command bus/registry.
-- Fields:
-  - `commandId` (string, immutable, unique)
-  - `commandType` (enum: `ADD`, `MOVE`, `REMOVE`, `REORDER`, `VALIDATE`)
-  - `treeId` (string, required)
-  - `payload` (object, shape depends on command type)
-  - `requestedAt` (timestamp)
-- Relationships:
-  - Produces `TopicTreeCommandResult`.
-  - Routed by `PluginCommandBus`.
-- Validation Rules:
-  - `payload` must match command schema for `commandType`.
-  - `commandId` must be unique per request.
-
-### 4) TopicTreeCommandResult
-
-- Purpose: Standard result envelope for command execution.
-- Fields:
-  - `commandId` (string, required)
-  - `status` (enum: `SUCCESS`, `REJECTED`, `FAILED`)
-  - `treeVersion` (integer, optional)
-  - `violations` (array of violation objects)
-  - `message` (string)
-- Relationships:
-  - Returned by `TopicTreePort` commands.
-- Validation Rules:
-  - `SUCCESS` requires `treeVersion`.
-  - `REJECTED` requires at least one violation.
-
-### 5) RouteMappingRequest
-
-- Purpose: Input for path-to-preview route conversion.
-- Fields:
-  - `selectedPath` (string, required)
-  - `docsRoot` (string, required)
-- Relationships:
-  - Consumed by `RouteMappingService`.
-  - Produces `RouteMappingResult`.
-- Validation Rules:
-  - `selectedPath` must resolve under `docsRoot`.
-  - Only markdown file extensions are eligible.
-
-### 6) RouteMappingResult
-
-- Purpose: Deterministic output for preview route changes.
-- Fields:
-  - `route` (string, required)
-  - `normalizedPath` (string, required)
-  - `mappingRule` (enum: `ROOT_INDEX`, `SEGMENT_INDEX`, `SEGMENT_FILE`, `NESTED`)
-- Relationships:
-  - Emitted as part of preview navigation event flow.
-- Validation Rules:
-  - `route` starts and ends with `/`.
-  - Root route is exactly `/`.
-
-### 7) ScrollSemanticSample
-
-- Purpose: Captures semantic scroll delta excluding comment PSI ranges.
-- Fields:
-  - `sampleId` (string)
-  - `documentPath` (string)
-  - `rawDelta` (integer)
-  - `excludedCommentDelta` (integer)
-  - `semanticDelta` (integer)
-  - `capturedAt` (timestamp)
-- Relationships:
-  - Produced by `ScrollSemanticService`.
-  - Optionally forwarded to `PreviewSyncPort`.
-- Validation Rules:
-  - `semanticDelta = rawDelta - excludedCommentDelta`.
-  - Excluded ranges must correspond to comment PSI regions only.
-
-### 8) MkDocsRuntimeState
-
-- Purpose: Tracks runtime setup and mkdocs process lifecycle for one project.
+- Purpose: Captures tool window initialization and content state per project.
 - Fields:
   - `projectId` (string)
-  - `state` (enum: `UNINITIALIZED`, `BOOTSTRAPPING`, `READY`, `SERVING`, `RESTARTING`, `STOPPING`, `STOPPED`, `FAILED`, `DISPOSED`)
-  - `runtimePath` (string, optional)
+  - `toolWindowVisible` (boolean)
+  - `contentCreated` (boolean)
+  - `statusMessage` (string)
+- Relationships:
+  - Created by `MkdocsToolWindowFactory`.
+  - Read by action/runtime integration adapter.
+- Validation Rules:
+  - `contentCreated` must be true before shell is considered initialized.
+
+### 4) StartPreviewActionState
+
+- Purpose: Defines action presentation and invocation eligibility.
+- Fields:
+  - `projectId` (string)
+  - `visible` (boolean)
+  - `enabled` (boolean)
+  - `disabledReason` (string, optional)
+- Relationships:
+  - Produced by action `update` logic.
+  - Consumed by user invocation path.
+- Validation Rules:
+  - If `enabled` is false, `disabledReason` should be provided.
+
+### 5) PluginRuntimeIntegrationRequest
+
+- Purpose: Adapter request from action/tool window to existing runtime entrypoint.
+- Fields:
+  - `projectId` (string)
+  - `projectPath` (string)
+  - `triggerSource` (enum: `ACTION`, `TOOL_WINDOW`)
+  - `startupOutput` (string)
+- Relationships:
+  - Routed to existing activation/runtime services.
+- Validation Rules:
+  - `projectId` and `projectPath` are required.
+  - `triggerSource` must be one of supported values.
+
+### 6) PluginRuntimeIntegrationResult
+
+- Purpose: Standard result returned from runtime handoff adapter.
+- Fields:
+  - `projectId` (string)
+  - `started` (boolean)
+  - `alreadyRunning` (boolean)
+  - `baseUrlDetected` (boolean)
+  - `previewUrl` (string, optional)
+  - `failureReason` (string, optional)
+- Relationships:
+  - Mirrors existing runtime/activation outcomes.
+  - Drives action feedback and shell status display.
+- Validation Rules:
+  - If `started` and `baseUrlDetected` are true, `previewUrl` must be present.
+  - Failure outcomes must include `failureReason`.
+
+### 7) RuntimeLifecycleGuardState
+
+- Purpose: Ensures single runtime instance semantics per project in integration layer.
+- Fields:
+  - `projectId` (string)
+  - `runtimeActive` (boolean)
   - `processId` (string, optional)
-  - `baseUrl` (string, optional)
-  - `lastError` (string, optional)
+  - `lastTransition` (enum: `START`, `REUSE`, `STOP`, `RESTART`, `FAILED`)
 - Relationships:
-  - Owned by runtime manager per project.
-  - Drives preview session creation and teardown.
+  - Delegates to existing process manager/source-of-truth state.
 - Validation Rules:
-  - One active `SERVING` process per `projectId`.
-  - `baseUrl` required for `SERVING`.
-  - `DISPOSED` is terminal.
+  - At most one active process per `projectId`.
 
-### 9) PreviewSession
+### 8) PluginShellSmokeCheck
 
-- Purpose: Represents current embedded preview pane state.
+- Purpose: Captures `runIde` smoke verification status for cycle acceptance.
 - Fields:
-  - `sessionId` (string)
-  - `projectId` (string)
-  - `baseUrl` (string)
-  - `currentRoute` (string)
-  - `status` (enum: `OPEN`, `CLOSED`, `ERROR`)
+  - `runIdeLaunchSucceeded` (boolean)
+  - `pluginLoaded` (boolean)
+  - `toolWindowPresent` (boolean)
+  - `actionPresent` (boolean)
+  - `actionInvokable` (boolean)
 - Relationships:
-  - Depends on `MkDocsRuntimeState` with valid base URL.
-  - Updated by file selection and route mapping.
+  - Aggregates shell acceptance outcomes for runbook/test plan.
 - Validation Rules:
-  - `OPEN` requires reachable `baseUrl`.
-  - Route updates require active session status.
+  - All booleans must be true for smoke acceptance.
 
-### 10) DocsFileSelectionEvent
+### 9) DocOpsArtifactStatus
 
-- Purpose: Event emitted when user selects a docs markdown file in explorer.
+- Purpose: Tracks required cycle documentation completeness.
 - Fields:
-  - `eventId` (string)
-  - `projectId` (string)
-  - `selectedPath` (string)
-  - `occurredAt` (timestamp)
+  - `featureSpecUpdated` (boolean)
+  - `designNotesUpdated` (boolean)
+  - `runbookUpdated` (boolean)
+  - `testPlanTraceabilityUpdated` (boolean)
+  - `changelogUpdated` (boolean)
+  - `migrationNotesUpdatedOrN/A` (boolean)
 - Relationships:
-  - Consumed by navigation coordinator.
-  - Triggers `RouteMappingRequest`.
+  - Used by release-gate checks.
 - Validation Rules:
-  - `selectedPath` must be inside docs root and markdown.
-
-### 11) PreviewNavigationEvent
-
-- Purpose: Event emitted for requested/applied preview route changes.
-- Fields:
-  - `eventId` (string)
-  - `projectId` (string)
-  - `route` (string)
-  - `phase` (enum: `REQUESTED`, `APPLIED`, `FAILED`)
-  - `reason` (string, optional)
-  - `occurredAt` (timestamp)
-- Relationships:
-  - Produced by navigation coordinator.
-  - Can be observed by `PreviewSyncPort`.
-- Validation Rules:
-  - `APPLIED` requires valid route.
-  - `FAILED` requires reason.
-
-### 12) FeatureFlagSet
-
-- Purpose: Controls staged enablement of MVP and extension seams.
-- Fields:
-  - `flags` (map<string, boolean>)
-  - `updatedAt` (timestamp)
-- Relationships:
-  - Read by runtime, UI coordinator, and seam adapters.
-- Validation Rules:
-  - Out-of-scope capabilities default to disabled.
+  - All required artifacts must be true before cycle completion.
 
 ## State Transitions
 
-### Runtime Lifecycle
+### Plugin Shell Readiness
 
-1. `UNINITIALIZED -> BOOTSTRAPPING`: first activation starts runtime setup.
-2. `BOOTSTRAPPING -> READY`: runtime created and tooling installed.
-3. `READY -> SERVING`: mkdocs process launched and base URL detected.
-4. `SERVING -> RESTARTING`: explicit restart command.
-5. `RESTARTING -> SERVING`: process relaunched and URL revalidated.
-6. `SERVING -> STOPPING -> STOPPED`: explicit stop command or IDE deactivation.
-7. `ANY_ACTIVE -> FAILED`: setup/startup/process failure.
-8. `STOPPED|FAILED -> DISPOSED`: project disposal / IDE shutdown cleanup.
+1. `CONFIGURED`: plugin build and descriptor metadata are valid.
+2. `LOADED`: plugin loads in development IDE sandbox.
+3. `TOOL_WINDOW_READY`: tool window content factory created shell panel.
+4. `ACTION_READY`: start-preview action visible and invokable.
+5. `RUNTIME_HANDOFF_READY`: action delegates to runtime adapter and returns controlled result.
+6. `VERIFIED`: smoke and quality/documentation gates pass.
 
-### Topic Tree Mutation Lifecycle
+### Runtime Handoff Adapter Flow
 
-1. `Command Received`: command bus routes typed DTO.
-2. `Validation`: invariant checks run by domain service.
-3. `Mutation`: apply if valid.
-4. `Result`: emit success/rejected/failed result DTO.
+1. `REQUEST_RECEIVED`: action/tool-window submits integration request.
+2. `DELEGATED`: existing activation/runtime service invoked.
+3. `REUSED_OR_STARTED`: runtime single-instance behavior resolved.
+4. `URL_RESOLVED_OR_FAILED`: base URL detected or controlled failure returned.
+5. `RESULT_PUBLISHED`: adapter result surfaced back to UI shell.
 
 ## Invariant Summary
 
-- Topic tree is acyclic, rooted, and order-consistent.
-- Route mapping rules are deterministic and path-safe.
-- Semantic scroll excludes comment PSI ranges by definition.
-- Runtime allows only one active mkdocs server per project.
-- Extension ports remain available even when adapters are no-op.
+- Plugin shell work must not duplicate runtime/domain business logic.
+- Single runtime instance per project remains enforced by existing runtime lifecycle manager.
+- Tool window and action registration are mandatory for shell readiness.
+- Out-of-scope features remain disabled while mandatory extension seams remain present.

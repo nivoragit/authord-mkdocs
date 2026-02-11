@@ -2,5 +2,30 @@
     <id>com.authord.mkdocs.plugin</id>
     <name>Authord MkDocs Plugin</name>
     <vendor>Authord</vendor>
-    <description>IntelliJ MkDocs MVP with extension-ready seams.</description>
+    <description>
+        IntelliJ MkDocs MVP with extension-ready seams and plugin-shell entry points.
+    </description>
+
+    <depends>com.intellij.modules.platform</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <projectService serviceImplementation="com.authord.mkdocs.ui.intellij.PluginRuntimeIntegrationService" />
+        <toolWindow
+            id="Authord MkDocs"
+            factoryClass="com.authord.mkdocs.ui.intellij.MkdocsToolWindowFactory"
+            anchor="right"
+            canCloseContents="false"
+        />
+    </extensions>
+
+    <actions>
+        <action
+            id="com.authord.mkdocs.action.startPreview"
+            class="com.authord.mkdocs.ui.intellij.StartMkdocsAction"
+            text="Start MkDocs Preview"
+            description="Start MkDocs Preview for the active project"
+        >
+            <add-to-group group-id="ToolsMenu" anchor="last" />
+        </action>
+    </actions>
 </idea-plugin>
