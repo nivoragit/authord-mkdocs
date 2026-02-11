@@ -32,7 +32,7 @@ This cycle adds plugin entry wiring so the current MVP can run as an IntelliJ pl
 
 1. IntelliJ loads plugin descriptor and registers `MkdocsToolWindowFactory`.
 2. Tool window factory creates minimal shell content panel.
-3. Start button delegates to `PluginRuntimeIntegrationService.startPreview(TOOL_WINDOW)`.
+3. Tool window content path auto-starts preview through `PluginRuntimeIntegrationService.startPreview(TOOL_WINDOW)`.
 
 ## 2.2 Action Path
 
@@ -46,6 +46,14 @@ This cycle adds plugin entry wiring so the current MVP can run as an IntelliJ pl
 2. Service delegates to existing `PluginActivationService`.
 3. Activation flow reuses existing bootstrap, runtime manager, and base-URL detection.
 4. Single-instance runtime behavior remains controlled by `MkdocsProcessManager`.
+
+## 2.4 Session Stabilization Path (2026-02-11)
+
+1. Runtime command path uses `mkdocs serve --livereload --dirty`.
+2. Runtime process is launched through a parent-PID guard script so MkDocs exits when IDE exits.
+3. Typing in active docs markdown schedules preview refresh after document save.
+4. Scroll sync maps editor viewport percentage directly to preview viewport percentage (`0.0..1.0`).
+5. Scroll listener handles `VisibleAreaEvent.oldRectangle == null` safely to prevent runIde project-load crash.
 
 ## 3. Lifecycle and Invariants
 
@@ -69,7 +77,10 @@ The entries below are the usage contracts for new/changed public plugin-shell se
 | `PluginRuntimeIntegrationService.updateFeatureFlags(policy)` | Override active policy for lifecycle/guard behavior. | `FeatureFlagPolicy`. | none. | Can disable action/runtime readiness when MVP flag is false. | `service.updateFeatureFlags(FeatureFlagPolicy(mvpEnabled = false))` |
 | `StartMkdocsAction.update(event)` | Apply action visibility/enabled state in action system. | `AnActionEvent` with project context. | UI presentation state update. | Hidden+disabled when project is missing; disabled when runtime cannot start. | Registered action in `plugin.xml`; invoked by IntelliJ action updates. |
 | `StartMkdocsAction.actionPerformed(event)` | Trigger runtime handoff from action invocation. | `AnActionEvent` with project context. | Delegates to runtime integration service. | No-op when project missing or runtime start is not allowed. | User runs **Start MkDocs Preview** from Tools menu. |
-| `MkdocsToolWindowFactory.createToolWindowContent(project, toolWindow)` | Build and register minimal shell content for MkDocs tool window. | IntelliJ `Project` + `ToolWindow`. | Tool window content registered in content manager. | If runtime cannot start, start button handler is a no-op. | IntelliJ constructs tool window after plugin load. |
+| `MkdocsToolWindowFactory.createToolWindowContent(project, toolWindow)` | Build/register shell content and auto-start preview for MkDocs tool window. | IntelliJ `Project` + `ToolWindow`. | Tool window content registered; preview start attempted. | If runtime cannot start, failure is reported and tool window stays available. | IntelliJ constructs tool window after plugin load. |
+| `MkdocsToolWindowFactory.scheduleTypingRefresh(...)` | Refresh preview route for active docs markdown after typing. | project/runtime/preview context, selected path, optional document. | `Boolean` scheduled-state. | Returns `false` when runtime inactive, path outside docs markdown, or editor is not active file. | Triggered from document listener in tool-window factory. |
+| `MkdocsToolWindowFactory.scheduleScrollSync(...)` | Apply editor viewport progress to preview viewport progress. | project/runtime/preview context, selected path, raw delta, document length, visible offsets. | `Boolean` scheduled-state. | Returns `false` when runtime inactive, non-doc path, no active editor match, or negligible progress change. | Triggered from visible-area listener in tool-window factory. |
+| `PreviewContent.scrollToProgress(progress)` | Scroll preview pane to normalized vertical progress. | `progress` in `[0.0, 1.0]`. | none. | No-op in non-JCEF fallback preview. | Called by `scheduleScrollSync(...)`. |
 
 ## 5. Compatibility and Versioning
 
@@ -81,5 +92,6 @@ The entries below are the usage contracts for new/changed public plugin-shell se
 
 1. Policy tests for build/descriptors.
 2. Unit tests for tool-window content path, action presentation/invocation, runtime integration lifecycle guard.
-3. RunIde smoke workflow for plugin load + visible entry points.
-4. Coverage gate remains 100% for scoped code.
+3. Unit tests for typing refresh and viewport-percentage scroll sync behavior in tool-window factory.
+4. RunIde smoke workflow for plugin load + visible entry points.
+5. Coverage gate remains 100% for scoped code.

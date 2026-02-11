@@ -2,7 +2,7 @@
 
 **Feature Branch**: `[002-intellij-mkdocs-mvp]`  
 **Created**: 2026-02-08  
-**Status**: Draft  
+**Status**: Updated (session addendum applied 2026-02-11)  
 **Input**: User description: "Cycle goal: make current MVP runnable inside IntelliJ as a real plugin shell."
 
 ## User Scenarios & Testing *(mandatory)*
@@ -57,13 +57,14 @@ A platform engineer can wire action/tool-window entry points to existing runtime
 - Project context exists but base path is unavailable.
 - Start action is invoked while runtime start is not allowed by feature-policy guardrails.
 - Tool window start button is clicked while runtime is already active.
+- Tool window auto-start path runs before editor visible-area events are fully initialized.
 - `runIde` environment launches but plugin descriptor registration is invalid.
 - Runtime startup output does not contain a detectable URL and activation returns controlled failure.
 
 ## Out of Scope *(mandatory)*
 
 - New end-user features beyond plugin-shell enablement.
-- Code↔preview scroll synchronization behavior.
+- Bidirectional code↔preview synchronization behavior.
 - AI chatbot or command-execution features.
 - Vector retrieval/database-backed behavior.
 - Full WriterSide-like topic-tree UX parity.
@@ -111,3 +112,9 @@ A platform engineer can wire action/tool-window entry points to existing runtime
 - **SC-003**: 100% of in-scope unit tests pass for action presentation, action invocation delegation, tool-window content path, and runtime lifecycle guard behavior.
 - **SC-004**: Scoped unit coverage remains at 100% and CI gate fails below threshold.
 - **SC-005**: Cycle is marked complete only after documentation bundle, tests, and coverage gate are all green.
+
+## Session Addendum Reference
+
+Current-session runtime/preview stabilization requirements are documented in:
+
+- `specs/002-intellij-mkdocs-mvp/session-2026-02-11-preview-sync.md`

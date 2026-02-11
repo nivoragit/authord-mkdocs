@@ -50,6 +50,7 @@ GRADLE_USER_HOME=$PWD/.gradle-user ./gradlew :modules:ui-plugin:runIde --no-daem
 - Plugin loads without descriptor errors.
 - **Authord MkDocs** tool window is visible.
 - **Start MkDocs Preview** action appears in **Tools** menu and is invokable.
+- Tool window auto-starts preview and resolves preview URL from runtime output.
 
 ## 5. Runtime Handoff Diagnostics
 
@@ -58,6 +59,19 @@ When action/tool-window trigger is invoked:
 2. Confirm project base path exists.
 3. Confirm runtime lifecycle state through `isRuntimeRunning()` before/after start.
 4. Confirm activation result reason/message when startup output lacks URL.
+
+## 5.1 Runtime Serve Command (Current Session)
+
+Runtime start delegates to an OS-neutral command path based on:
+
+```text
+uv run --python <runtime-python> python <project>/.mkdocs-plugin-runtime/serve_with_parent_guard.py --parent-pid <ide-pid> --working-dir <project> -- mkdocs serve --livereload --dirty
+```
+
+Key operational behavior:
+1. `--livereload --dirty` enables fast preview rebuilds for authoring.
+2. Parent-PID guard terminates MkDocs when IDE process exits.
+3. No hardcoded host/port is used; preview base URL is detected from startup output.
 
 ## 6. Common Failure Signatures and Fixes
 
@@ -103,6 +117,36 @@ Possible causes:
 Actions:
 1. Add/adjust tests under `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/intellij/`.
 2. Re-run `jacocoTestCoverageVerification`.
+
+## 6.5 `runIde` window opens then auto-closes
+
+Possible causes:
+- Plugin exception during tool-window initialization.
+- Unhandled scroll listener edge case at editor startup.
+
+Actions:
+1. Inspect `modules/ui-plugin/build/idea-sandbox/system/log/idea.log`.
+2. Search for `project loading failed` and plugin stack traces.
+3. Verify no `VisibleAreaEvent.getOldRectangle()` null dereference exists in tool-window scroll listener path.
+
+## 6.6 Preview start fails with `Address already in use`
+
+Possible causes:
+- Existing MkDocs process already bound to default port.
+
+Actions:
+1. Stop prior MkDocs process.
+2. Restart preview from tool window/action.
+3. If repeated, restart IDE sandbox to reinitialize process manager state.
+
+## 6.7 Preview start fails with theme config error
+
+Possible causes:
+- `mkdocs.yml` references theme packages not installed in runtime venv.
+
+Actions:
+1. Install required theme package in project/runtime environment.
+2. Re-run preview start and confirm startup output includes detected base URL.
 
 ## 7. Completion Rule
 

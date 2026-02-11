@@ -128,7 +128,13 @@ class MkdocsToolWindowFactory(
     ) {
         project.messageBus.connect(project).subscribe(
             FileEditorManagerListener.FILE_EDITOR_MANAGER,
+            /**
+             * Listens for active editor selection changes to keep preview routing aligned.
+             */
             object : FileEditorManagerListener {
+                /**
+                 * Routes preview to the newly selected docs markdown file.
+                 */
                 override fun selectionChanged(event: FileEditorManagerEvent) {
                     val selectedPath = event.newFile?.path ?: return
                     applyPreviewRoute(project, runtimeService, previewContent, selectedPath)
@@ -144,7 +150,13 @@ class MkdocsToolWindowFactory(
     ) {
         typingListenerRegistrar(
             project,
+            /**
+             * Observes typing events to schedule delayed preview refreshes.
+             */
             object : DocumentListener {
+                /**
+                 * Schedules refresh after edits in the currently active docs file.
+                 */
                 override fun documentChanged(event: DocumentEvent) {
                     val virtualFile = FileDocumentManager.getInstance().getFile(event.document) ?: return
                     scheduleTypingRefresh(
@@ -166,7 +178,13 @@ class MkdocsToolWindowFactory(
     ) {
         visibleAreaListenerRegistrar(
             project,
+            /**
+             * Tracks editor viewport movement for percentage-based preview scroll sync.
+             */
             object : VisibleAreaListener {
+                /**
+                 * Applies viewport-derived progress to preview scroll position.
+                 */
                 override fun visibleAreaChanged(event: VisibleAreaEvent) {
                     val virtualFile = FileDocumentManager.getInstance().getFile(event.editor.document) ?: return
                     val selectedPath = virtualFile.path
@@ -368,9 +386,20 @@ class MkdocsToolWindowFactory(
     }
 }
 
+/**
+ * Contract for the preview surface embedded in the MkDocs tool window.
+ */
 interface PreviewContent {
+    /**
+     * Swing component rendered inside the tool window content panel.
+     */
     val component: JComponent
 
+    /**
+     * Navigates preview to the provided URL.
+     *
+     * @param url absolute preview URL.
+     */
     fun loadUrl(url: String)
 
     /**
@@ -391,10 +420,16 @@ private class JcefPreviewContent : PreviewContent {
 
     override val component: JComponent = browser.component
 
+    /**
+     * Loads preview content in the embedded Chromium browser.
+     */
     override fun loadUrl(url: String) {
         browser.loadURL(withRefreshToken(url))
     }
 
+    /**
+     * Applies direct pixel delta scrolling in the embedded browser viewport.
+     */
     override fun scrollBy(delta: Int) {
         if (delta == 0) {
             return
@@ -410,6 +445,11 @@ private class JcefPreviewContent : PreviewContent {
         browser.cefBrowser.executeJavaScript(script, "about:blank", 0)
     }
 
+    /**
+     * Scrolls the embedded browser to a normalized document progress position.
+     *
+     * @param progress normalized value in range [0.0, 1.0].
+     */
     override fun scrollToProgress(progress: Double) {
         val clamped = progress.coerceIn(0.0, 1.0)
         val script = """
@@ -465,6 +505,9 @@ private class HtmlPreviewContent : PreviewContent {
 
     override val component: JComponent = JScrollPane(editorPane)
 
+    /**
+     * Shows preview URL fallback content when JCEF is unavailable.
+     */
     override fun loadUrl(url: String) {
         editorPane.text = """
             <html>

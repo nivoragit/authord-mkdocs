@@ -29,6 +29,8 @@ Actions:
 2. Verify mkdocs process is spawned.
 3. Verify base URL parsed from stdout.
 4. Verify lifecycle transitioned to `SERVING`.
+5. Verify serve command options include `--livereload --dirty`.
+6. Verify parent-PID guard script is used for process launch.
 
 Failure Signals:
 - Duplicate process instance for same project.
@@ -39,6 +41,7 @@ Actions:
 - Enforce single-instance lock by project ID.
 - Capture full startup output and parser diagnostics.
 - Validate docs configuration presence.
+- Validate required MkDocs theme packages are installed for project config.
 
 ### C) Runtime Restart
 
@@ -89,3 +92,9 @@ Actions:
 - `BOOTSTRAP_FAILED`: simulated non-zero exit from `uv` bootstrap command produced actionable error details.
 - `SINGLE_INSTANCE_GUARD`: repeated start request for same project returned already-running status and did not launch a second process.
 - `RESTART_REPLACED_PROCESS`: restart request stopped prior process handle and started a new handle ID.
+
+## Validated Signatures (2026-02-11 Session Addendum)
+
+- `PORT_IN_USE`: startup fails with `Address already in use`; activation reports detailed startup output.
+- `THEME_MISSING`: startup fails with unrecognized theme name; activation reports configuration error output.
+- `PARENT_BOUND_RUNTIME`: guarded runtime launcher exits child process after parent IDE process is no longer alive.

@@ -49,14 +49,27 @@ GRADLE_USER_HOME=$PWD/.gradle-user ./gradlew :modules:ui-plugin:runIde --no-daem
 - Plugin loads without descriptor/build errors.
 - **Authord MkDocs** tool window is visible.
 - **Start MkDocs Preview** action is visible in **Tools** menu and callable.
+- Tool window auto-start attempts preview and reports result.
 
 ## 5) Runtime handoff checks (R-05)
 
-1. Trigger Start action or tool-window button.
-2. Confirm runtime integration service delegates to existing activation/runtime services.
-3. Re-trigger start and confirm single-instance lifecycle guard behavior.
+1. Open MkDocs tool window and verify auto-start behavior.
+2. Trigger Start action from **Tools** menu as explicit retry/start entry point.
+3. Confirm Start action is disabled while runtime is already active.
+4. Confirm runtime command path includes `mkdocs serve --livereload --dirty`.
+5. Confirm parent-PID lifecycle guard is active for runtime process.
 
-## 6) Documentation and release gate closure
+## 5.1 Session scroll/typing sync checks (2026-02-11)
+
+1. Edit active docs markdown content and verify preview refresh after typing delay.
+2. Scroll editor viewport and verify preview tracks same normalized viewport progress.
+3. Check `idea.log` has no `VisibleAreaEvent.getOldRectangle()` null-pointer failures.
+## 6) Session addendum artifacts
+
+1. `specs/002-intellij-mkdocs-mvp/session-2026-02-11-preview-sync.md`
+2. `docs/implementation/session-2026-02-11-plugin-preview-stabilization.md`
+
+## 7) Documentation and release gate closure
 
 Before marking cycle complete, ensure updates exist for:
 1. `spec.md`

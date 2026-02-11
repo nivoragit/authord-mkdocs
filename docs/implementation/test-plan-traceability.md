@@ -6,6 +6,7 @@
 2. Ensure action/tool-window/runtime handoff behavior is unit tested.
 3. Ensure CI enforces 100% scoped unit coverage.
 4. Keep requirements-to-tests traceability explicit and current.
+5. Validate current-session preview stabilization behavior (live update + viewport-percentage sync + runIde crash guard).
 
 ## 2. Test Levels
 
@@ -17,6 +18,7 @@
 
 2. Integration and smoke validation
 - `runIde` smoke checklist for plugin load, tool window presence, and action availability.
+- Session regression checks from `idea.log` for startup/plugin exceptions during tool-window/editor initialization.
 
 3. Policy tests
 - Coverage gate and doc artifact policy tests.
@@ -57,6 +59,23 @@ GRADLE_USER_HOME=$PWD/.gradle-user ./gradlew :modules:ui-plugin:test --no-daemon
 - `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/intellij/PluginRuntimeIntegrationServiceTest.kt`
 - `tests/integration/plugin-shell/RunIdeSmokeValidation.md`
 
+## 5.1 Session Stabilization Test Inventory (2026-02-11)
+
+- `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/intellij/MkdocsToolWindowFactoryTest.kt`
+- `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/PluginActivationServiceTest.kt`
+- `modules/ui-plugin/src/test/kotlin/com/authord/mkdocs/ui/intellij/PluginRuntimeIntegrationServiceTest.kt`
+- `modules/mkdocs-runtime-adapter/src/test/kotlin/com/authord/mkdocs/runtime/UvBootstrapServiceTest.kt` (inline theme parsing and package resolution branches)
+
+## 5.2 Session Requirements to Tests
+
+| Session Req ID | Session Requirement Summary | Unit Tests | Runtime Evidence |
+|----------------|-----------------------------|------------|------------------|
+| S-01 | Runtime command uses `mkdocs serve --livereload --dirty` | `PluginActivationServiceTest` | runIde preview startup logs |
+| S-02 | Runtime stops on IDE exit via parent-PID guard | `PluginActivationServiceTest`, `PluginRuntimeIntegrationServiceTest` | process/lifecycle checks in runbook |
+| S-03 | Typing refresh updates active docs preview route | `MkdocsToolWindowFactoryTest` | live editing validation in runIde |
+| S-04 | Scroll sync maps editor viewport percentage to preview percentage | `MkdocsToolWindowFactoryTest` | interactive scroll validation in runIde |
+| S-05 | Tool-window scroll listener handles null rectangle startup events safely | `MkdocsToolWindowFactoryTest` | absence of NPE in `idea.log` during startup |
+
 ## 6. Coverage and Completion Gate
 
 Cycle is incomplete until all are true:
@@ -64,3 +83,9 @@ Cycle is incomplete until all are true:
 2. `jacocoTestCoverageVerification` passes at 100% scoped unit coverage.
 3. runIde smoke checklist is executed and documented.
 4. Traceability matrix remains aligned with current requirements and tests.
+
+Current status (2026-02-11):
+1. Unit tests: passing for current scope.
+2. Coverage gate: failing at `:modules:ui-plugin:jacocoTestCoverageVerification` (0.7 / required 1.0).
+3. runIde smoke: recorded.
+4. Traceability matrix: updated.

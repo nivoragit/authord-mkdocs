@@ -2,6 +2,40 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.1] - 2026-02-11
+
+## Added
+
+1. Session stabilization documentation artifacts:
+- `docs/implementation/session-2026-02-11-plugin-preview-stabilization.md`
+- `specs/002-intellij-mkdocs-mvp/session-2026-02-11-preview-sync.md`
+
+2. Viewport-percentage preview sync behavior:
+- editor viewport progress now maps directly to preview viewport progress.
+- tool-window factory tests extended for percentage-based mapping and startup edge cases.
+3. Runtime adapter coverage tests for inline MkDocs theme parsing:
+- added scalar/map/empty-block/non-material branch tests in `UvBootstrapServiceTest`.
+
+## Changed
+
+1. Runtime serve command path now uses:
+- `mkdocs serve --livereload --dirty`
+- parent-bound guarded execution to align server lifecycle with IDE lifecycle.
+
+2. Tool window runtime behavior now auto-starts preview on content creation and keeps action path as explicit retry/start entry point.
+
+3. Tool-window scroll listener now handles null visible-area history safely during early editor initialization.
+
+## Fixed
+
+1. `runIde` auto-close/project-load crash caused by null `VisibleAreaEvent.oldRectangle` in preview scroll listener.
+2. Preview start re-invocation availability when base URL detection fails (process cleanup on failure path).
+3. KDoc policy violations fixed for `MkdocsToolWindowFactory` listener callbacks and preview contract methods.
+
+## Migration Notes
+
+No breaking migration steps are required. This is an additive stabilization release.
+
 ## [0.2.0] - 2026-02-09
 
 ## Added

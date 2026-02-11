@@ -18,11 +18,16 @@ Make the existing MVP runnable inside IntelliJ as a real plugin shell without ex
 7. Lifecycle/single-instance guard preservation through existing runtime manager semantics.
 8. Unit and policy tests for build/descriptor/action/tool-window/runtime-integration paths.
 9. RunIde smoke validation checklist artifacts and updated DocOps package.
+10. Current-session stabilization updates for preview runtime and sync behavior:
+- Runtime command uses `mkdocs serve --livereload --dirty`.
+- Runtime is parent-bound so server process terminates with IDE shutdown.
+- Tool window auto-starts preview on creation.
+- Editor typing refresh and viewport-percentage preview scroll sync in tool window.
 
 ## 3. Out of Scope (Explicitly Excluded)
 
 1. New end-user features beyond plugin shell enablement.
-2. Code↔preview scroll synchronization.
+2. Bidirectional code↔preview scroll synchronization (preview-to-code remains out of scope).
 3. AI chatbot/command execution workflows.
 4. Vector retrieval/database-backed behavior.
 5. WriterSide-like full topic tree UX parity.
@@ -57,3 +62,9 @@ Cycle remains incomplete until all of the following are true:
 2. Coverage gate passes at 100% scoped unit coverage.
 3. RunIde smoke checklist evidence is recorded.
 4. Required DocOps artifacts are updated.
+
+## 7. Session Addendum (2026-02-11)
+
+1. Added crash guard for `VisibleAreaEvent.oldRectangle == null` in scroll listener path.
+2. Replaced scroll-delta approximation with direct viewport-percentage mapping (`editor progress == preview progress`).
+3. Updated operational guidance for common startup failures (`Address already in use`, missing MkDocs theme package, base-URL detection failures).
