@@ -6,6 +6,8 @@ import com.authord.mkdocs.runtime.CommandRunner
 import com.authord.mkdocs.runtime.ManagedProcessHandle
 import com.authord.mkdocs.runtime.MkdocsProcessManager
 import com.authord.mkdocs.runtime.ProcessLauncher
+import com.authord.mkdocs.runtime.ProjectManagedUvExecutableProvider
+import com.authord.mkdocs.runtime.StaticUvExecutableProvider
 import com.authord.mkdocs.runtime.UvBootstrapService
 import com.authord.mkdocs.ui.ActivationErrorPresenter
 import com.authord.mkdocs.ui.ActivationFailureReason
@@ -71,11 +73,16 @@ data class RuntimeIntegrationDependencies(
             } else {
                 ProcessBuilderProcessLauncher()
             }
+            val uvExecutableProvider = if (useInMemoryAdapters) {
+                StaticUvExecutableProvider()
+            } else {
+                ProjectManagedUvExecutableProvider()
+            }
             val processManager = MkdocsProcessManager(processLauncher)
             val previewPaneCoordinator = PreviewPaneCoordinator()
             return RuntimeIntegrationDependencies(
                 activationService = PluginActivationService(
-                    bootstrapService = UvBootstrapService(commandRunner),
+                    bootstrapService = UvBootstrapService(commandRunner, uvExecutableProvider),
                     processManager = processManager,
                     baseUrlDetector = com.authord.mkdocs.runtime.BaseUrlDetector(),
                     previewPaneCoordinator = previewPaneCoordinator,

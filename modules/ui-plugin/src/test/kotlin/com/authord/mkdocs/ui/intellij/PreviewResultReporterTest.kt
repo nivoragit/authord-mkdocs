@@ -2,6 +2,7 @@ package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ui.ActivationFailureReason
 import com.authord.mkdocs.ui.ActivationResult
+import kotlin.test.assertFalse
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -44,5 +45,18 @@ class PreviewResultReporterTest {
         val formatted = formatPreviewResultMessage(result)
 
         assertEquals("Preview server failed to start.", formatted)
+    }
+
+    @Test
+    fun `failure reporting path remains invokable for project notifications`() {
+        val project = IntellijTestFixtures.project(locationHash = "preview-reporter")
+
+        presentPreviewResult(
+            project = project,
+            message = "Preview server failed to start.",
+            success = false,
+        )
+
+        assertFalse(project.isDisposed)
     }
 }

@@ -9,6 +9,7 @@
     <depends>com.intellij.modules.platform</depends>
 
     <extensions defaultExtensionNs="com.intellij">
+        <notificationGroup id="Authord MkDocs Notifications" displayType="BALLOON" isLogByDefault="true" />
         <projectService serviceImplementation="com.authord.mkdocs.ui.intellij.PluginRuntimeIntegrationService" />
         <toolWindow
             id="Authord MkDocs"

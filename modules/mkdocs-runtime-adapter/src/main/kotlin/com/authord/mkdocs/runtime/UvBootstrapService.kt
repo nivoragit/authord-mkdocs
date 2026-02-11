@@ -38,6 +38,7 @@ data class CommandResult(
 data class BootstrapResult(
     val success: Boolean,
     val runtimePath: String,
+    val uvExecutablePath: String,
     val executedCommands: List<List<String>>,
     val skipped: Boolean,
     val errorMessage: String = "",
@@ -52,7 +53,16 @@ data class BootstrapResult(
  */
 class UvBootstrapService(
     private val commandRunner: CommandRunner,
+    private val uvExecutableProvider: UvExecutableProvider,
 ) {
+    /**
+     * Backward-compatible constructor that defaults to shell `uv` resolution.
+     */
+    constructor(commandRunner: CommandRunner) : this(
+        commandRunner = commandRunner,
+        uvExecutableProvider = StaticUvExecutableProvider(),
+    )
+
     private val bootstrappedProjectPackages = mutableMapOf<String, Set<String>>()
 
     /**
@@ -64,6 +74,18 @@ class UvBootstrapService(
     fun bootstrap(projectPath: String): BootstrapResult {
         val runtimeDirectory = Path.of(projectPath).resolve(".mkdocs-plugin-venv")
         val runtimePath = runtimeDirectory.toString()
+        val uvResolution = uvExecutableProvider.resolve(projectPath)
+        if (!uvResolution.success) {
+            return BootstrapResult(
+                success = false,
+                runtimePath = runtimePath,
+                uvExecutablePath = "",
+                executedCommands = emptyList(),
+                skipped = false,
+                errorMessage = uvResolution.errorMessage,
+            )
+        }
+        val uvExecutable = uvResolution.executablePath
         val requiredPackages = resolveRequiredPackages(projectPath)
         val cachedPackages = bootstrappedProjectPackages[projectPath]
 
@@ -71,25 +93,27 @@ class UvBootstrapService(
             return BootstrapResult(
                 success = true,
                 runtimePath = runtimePath,
+                uvExecutablePath = uvExecutable,
                 executedCommands = emptyList(),
                 skipped = true,
             )
         }
 
         val installCommand = buildList {
-            addAll(listOf("uv", "pip", "install", "--python", runtimePath))
+            addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath))
             addAll(requiredPackages)
         }
         val executed = mutableListOf<List<String>>()
 
         if (!runtimeDirectory.exists()) {
-            val setupCommand = listOf("uv", "venv", runtimePath)
+            val setupCommand = listOf(uvExecutable, "venv", runtimePath)
             val setupResult = commandRunner.run(setupCommand, projectPath)
             executed += setupCommand
             if (setupResult.exitCode != 0 && !isExistingRuntimeError(setupResult)) {
                 return BootstrapResult(
                     success = false,
                     runtimePath = runtimePath,
+                    uvExecutablePath = uvExecutable,
                     executedCommands = executed,
                     skipped = false,
                     errorMessage = setupResult.stderr.ifBlank { "Failed to create runtime" },
@@ -103,6 +127,7 @@ class UvBootstrapService(
             return BootstrapResult(
                 success = false,
                 runtimePath = runtimePath,
+                uvExecutablePath = uvExecutable,
                 executedCommands = executed,
                 skipped = false,
                 errorMessage = installResult.stderr.ifBlank { "Failed to install mkdocs" },
@@ -113,6 +138,7 @@ class UvBootstrapService(
         return BootstrapResult(
             success = true,
             runtimePath = runtimePath,
+            uvExecutablePath = uvExecutable,
             executedCommands = executed,
             skipped = false,
         )

@@ -70,6 +70,7 @@ class PluginActivationService(
                 command = parentBoundServeCommand(
                     projectPath = projectPath,
                     runtimePath = bootstrapResult.runtimePath,
+                    uvExecutablePath = bootstrapResult.uvExecutablePath,
                 ),
             ),
         )
@@ -125,12 +126,16 @@ class PluginActivationService(
         return ""
     }
 
-    private fun parentBoundServeCommand(projectPath: String, runtimePath: String): List<String> {
+    private fun parentBoundServeCommand(
+        projectPath: String,
+        runtimePath: String,
+        uvExecutablePath: String,
+    ): List<String> {
         val scriptPath = ensureParentGuardScript(projectPath)
         val parentPid = ProcessHandle.current().pid().toString()
 
         return listOf(
-            "uv",
+            uvExecutablePath,
             "run",
             "--python",
             runtimePath,

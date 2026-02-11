@@ -22,19 +22,65 @@ class UvBootstrapServiceTest {
     @Test
     fun `runs bootstrap and install commands on first activation`() {
         val commands = mutableListOf<List<String>>()
-        val service = UvBootstrapService { command, _ ->
-            commands += command
-            CommandResult(exitCode = 0)
-        }
+        val service = UvBootstrapService(
+            commandRunner = { command, _ ->
+                commands += command
+                CommandResult(exitCode = 0)
+            },
+            uvExecutableProvider = StaticUvExecutableProvider(),
+        )
 
         val result = service.bootstrap("/tmp/project")
         val expectedRuntimePath = Path.of("/tmp/project").resolve(".mkdocs-plugin-venv").toString()
 
         assertTrue(result.success)
         assertFalse(result.skipped)
+        assertEquals("uv", result.uvExecutablePath)
         assertEquals(listOf("uv", "venv", expectedRuntimePath), commands[0])
         assertEquals(listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs"), commands[1])
         assertEquals(expectedRuntimePath, result.runtimePath)
+    }
+
+    @Test
+    fun `uses resolved uv executable path for all commands`() {
+        val commands = mutableListOf<List<String>>()
+        val projectPath = "/tmp/custom-uv-project"
+        val expectedRuntimePath = Path.of(projectPath).resolve(".mkdocs-plugin-venv").toString()
+        val customUv = "/tmp/authord-runtime-tools/uv"
+        val service = UvBootstrapService(
+            commandRunner = { command, _ ->
+                commands += command
+                CommandResult(exitCode = 0)
+            },
+            uvExecutableProvider = StaticUvExecutableProvider(customUv),
+        )
+
+        val result = service.bootstrap(projectPath)
+
+        assertTrue(result.success)
+        assertEquals(customUv, result.uvExecutablePath)
+        assertEquals(listOf(customUv, "venv", expectedRuntimePath), commands[0])
+        assertEquals(listOf(customUv, "pip", "install", "--python", expectedRuntimePath, "mkdocs"), commands[1])
+    }
+
+    @Test
+    fun `fails bootstrap when uv executable cannot be resolved`() {
+        val service = UvBootstrapService(
+            commandRunner = { _, _ -> CommandResult(exitCode = 0) },
+            uvExecutableProvider = UvExecutableProvider {
+                UvExecutableResult(
+                    success = false,
+                    errorMessage = "Unable to find uv executable",
+                )
+            },
+        )
+
+        val result = service.bootstrap("/tmp/project")
+
+        assertFalse(result.success)
+        assertEquals("", result.uvExecutablePath)
+        assertTrue(result.errorMessage.contains("Unable to find uv"))
+        assertTrue(result.executedCommands.isEmpty())
     }
 
     @Test

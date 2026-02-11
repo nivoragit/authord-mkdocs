@@ -7,6 +7,7 @@ import com.authord.mkdocs.runtime.ManagedProcessHandle
 import com.authord.mkdocs.runtime.MkdocsProcessManager
 import com.authord.mkdocs.runtime.ProcessLauncher
 import com.authord.mkdocs.runtime.UvBootstrapService
+import com.authord.mkdocs.runtime.StaticUvExecutableProvider
 import java.nio.file.Files
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -234,7 +235,10 @@ class PluginActivationServiceTest {
                 ActivationHandle("p1", alive = true, startupOutputText = "Serving at http://127.0.0.1:8000/"),
             )
             val svc = service(
-                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                bootstrap = UvBootstrapService(
+                    commandRunner = { _, _ -> CommandResult(0) },
+                    uvExecutableProvider = StaticUvExecutableProvider("/tmp/custom-uv"),
+                ),
                 processManager = MkdocsProcessManager(launcher),
             )
 
@@ -248,7 +252,15 @@ class PluginActivationServiceTest {
             assertTrue(result.success)
             assertEquals(projectRoot.toString(), launcher.workingDir)
             val expectedRuntimePath = projectRoot.resolve(".mkdocs-plugin-venv").toString()
-            assertTrue(launcher.command.take(5) == listOf("uv", "run", "--python", expectedRuntimePath, "python"))
+            assertTrue(
+                launcher.command.take(5) == listOf(
+                    "/tmp/custom-uv",
+                    "run",
+                    "--python",
+                    expectedRuntimePath,
+                    "python",
+                ),
+            )
             assertTrue("--parent-pid" in launcher.command)
             assertTrue("--working-dir" in launcher.command)
             assertTrue("serve" in launcher.command)

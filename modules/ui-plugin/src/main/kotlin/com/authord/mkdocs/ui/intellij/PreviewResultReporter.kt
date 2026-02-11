@@ -1,7 +1,12 @@
 package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ui.ActivationResult
+import com.intellij.notification.NotificationGroupManager
+import com.intellij.notification.NotificationType
 import com.intellij.openapi.project.Project
+
+private const val NOTIFICATION_GROUP_ID = "Authord MkDocs Notifications"
+private const val NOTIFICATION_TITLE = "Authord MkDocs"
 
 /**
  * Emits preview start results in a way that is visible during runIde sessions.
@@ -9,6 +14,15 @@ import com.intellij.openapi.project.Project
 internal fun presentPreviewResult(project: Project, message: String, success: Boolean) {
     val level = if (success) "INFO" else "ERROR"
     println("[Authord MkDocs][$level][${project.name}] $message")
+
+    if (!success) {
+        runCatching {
+            NotificationGroupManager.getInstance()
+                .getNotificationGroup(NOTIFICATION_GROUP_ID)
+                .createNotification(NOTIFICATION_TITLE, message, NotificationType.ERROR)
+                .notify(project)
+        }
+    }
 }
 
 /**
