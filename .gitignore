@@ -32,3 +32,9 @@ coverage/
 # Project generated
 tests/integration/.gitkeep
 tests/contract/.gitkeep
+
+# Keep Gradle wrapper in VCS (required for CI)
+!/gradle/wrapper/gradle-wrapper.jar
+!/gradle/wrapper/gradle-wrapper.properties
+!/gradlew
+!/gradlew.bat
