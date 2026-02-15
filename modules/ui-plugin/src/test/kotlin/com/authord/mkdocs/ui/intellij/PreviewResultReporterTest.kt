@@ -48,6 +48,32 @@ class PreviewResultReporterTest {
     }
 
     @Test
+    fun `formats fallback failure message when activation message is blank`() {
+        val result = ActivationResult(
+            success = false,
+            reason = ActivationFailureReason.START_FAILED,
+            message = "   ",
+        )
+
+        val formatted = formatPreviewResultMessage(result)
+
+        assertEquals("Preview start failed.", formatted)
+    }
+
+    @Test
+    fun `formats success message with unknown url when preview url is blank`() {
+        val result = ActivationResult(
+            success = true,
+            previewUrl = "  ",
+            message = "Activation completed",
+        )
+
+        val formatted = formatPreviewResultMessage(result)
+
+        assertEquals("MkDocs preview started: <unknown-url>", formatted)
+    }
+
+    @Test
     fun `failure reporting path remains invokable for project notifications`() {
         val project = IntellijTestFixtures.project(locationHash = "preview-reporter")
 
@@ -55,6 +81,19 @@ class PreviewResultReporterTest {
             project = project,
             message = "Preview server failed to start.",
             success = false,
+        )
+
+        assertFalse(project.isDisposed)
+    }
+
+    @Test
+    fun `success reporting path remains invokable without notification dispatch`() {
+        val project = IntellijTestFixtures.project(locationHash = "preview-reporter-success")
+
+        presentPreviewResult(
+            project = project,
+            message = "Preview server is running.",
+            success = true,
         )
 
         assertFalse(project.isDisposed)

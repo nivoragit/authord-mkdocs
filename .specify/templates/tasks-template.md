@@ -72,6 +72,10 @@ Examples of foundational tasks (adjust based on your project):
 - [ ] T010 Define public interface versioning and backward-compatibility policy
 - [ ] T011 Configure CI to fail when scoped unit coverage is below threshold
 - [ ] T012 Define KDoc/comment compliance checks for public APIs and non-obvious logic
+- [ ] T013 Define canonical `mkdocs.yml` `nav` sourcing and deterministic fallback policy for topic-tree initialization
+- [ ] T014 Define atomic sync strategy (or compensating rollback) for tree model, docs files, and `mkdocs.yml` updates
+- [ ] T015 Define deterministic `mkdocs.yml` serialization policy and regression checks
+- [ ] T016 Define startup/file-change reconciliation policy for `nav` vs `docs_dir`, including conflict handling rules
 
 **Checkpoint**: Foundation ready - user story implementation can now begin in parallel
 

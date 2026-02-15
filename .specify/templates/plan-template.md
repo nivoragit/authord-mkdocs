@@ -38,7 +38,7 @@
 | III. Delivery Completeness | Plans all required docs: feature spec, technical design notes, operational runbook, test plan + traceability matrix, changelog, migration notes (if needed) | [PASS/FAIL] |
 | IV. Test Gate | Enforces 100% unit coverage for scoped code and CI failure below threshold | [PASS/FAIL] |
 | V. MVP-First, Extension-Ready | Limits implementation to MVP behavior and defines stable interfaces with default/no-op adapters for future features | [PASS/FAIL] |
-| VI. Topic-Tree Parity Runway | Keeps topic-tree domain vendor-independent and defines command-based mutation + validation runway | [PASS/FAIL] |
+| VI. Topic-Tree Parity Runway | Keeps topic-tree domain vendor-independent, treats `mkdocs.yml` `nav` as canonical, enforces atomic tree/docs/nav sync, deterministic serialization, and startup/file-change reconciliation policy | [PASS/FAIL] |
 | VII. Backward Compatibility | Defines interface versioning and confirms MVP workflows remain compatible | [PASS/FAIL] |
 | VIII. Code Documentation Standard | Plans KDoc for all public APIs and meaningful comments for non-obvious logic/invariants | [PASS/FAIL] |
 

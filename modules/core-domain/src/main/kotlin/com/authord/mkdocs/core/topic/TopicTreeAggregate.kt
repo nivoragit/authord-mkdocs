@@ -1,6 +1,9 @@
 package com.authord.mkdocs.core.topic
 
 import com.authord.mkdocs.ports.TopicTreePort
+import com.authord.mkdocs.ports.topic.AddChildTopicNodeCommand
+import com.authord.mkdocs.ports.topic.AddExistingFileTopicNodeCommand
+import com.authord.mkdocs.ports.topic.AddExternalLinkTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
 import com.authord.mkdocs.ports.topic.MoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
@@ -22,6 +25,15 @@ enum class TopicNodeStatus {
 }
 
 /**
+ * Node kind carried by aggregate topic nodes.
+ */
+enum class TopicNodeKind {
+    PAGE,
+    SECTION,
+    EXTERNAL_LINK,
+}
+
+/**
  * Aggregate node model used by the MVP mutation engine.
  */
 data class TopicNode(
@@ -30,6 +42,9 @@ data class TopicNode(
     val title: String,
     val orderIndex: Int,
     val status: TopicNodeStatus = TopicNodeStatus.ACTIVE,
+    val kind: TopicNodeKind = TopicNodeKind.PAGE,
+    val sourcePath: String? = null,
+    val externalUrl: String? = null,
 )
 
 /**
@@ -45,7 +60,14 @@ class TopicTreeAggregate(
     private val rootNodeId: String = "root",
 ) {
     private val nodes = linkedMapOf(
-        rootNodeId to TopicNode(rootNodeId, null, "Root", 0, TopicNodeStatus.ACTIVE),
+        rootNodeId to TopicNode(
+            nodeId = rootNodeId,
+            parentNodeId = null,
+            title = "Root",
+            orderIndex = 0,
+            status = TopicNodeStatus.ACTIVE,
+            kind = TopicNodeKind.SECTION,
+        ),
     )
 
     var version: Int = 0
@@ -62,6 +84,9 @@ class TopicTreeAggregate(
     fun apply(command: TopicTreeCommand): TopicTreeCommandResult {
         return when (command) {
             is AddTopicNodeCommand -> add(command)
+            is AddChildTopicNodeCommand -> addChild(command)
+            is AddExistingFileTopicNodeCommand -> addExistingFile(command)
+            is AddExternalLinkTopicNodeCommand -> addExternalLink(command)
             is MoveTopicNodeCommand -> move(command)
             is RemoveTopicNodeCommand -> remove(command)
             is RenameTopicNodeCommand -> rename(command)
@@ -87,7 +112,127 @@ class TopicTreeAggregate(
             parentNodeId = command.parentNodeId,
             title = command.title,
             orderIndex = command.orderIndex,
+            kind = TopicNodeKind.PAGE,
+            sourcePath = command.sourcePath,
         )
+        normalizeSiblingOrder(command.parentNodeId)
+        return success(command.commandId)
+    }
+
+    private fun addChild(command: AddChildTopicNodeCommand): TopicTreeCommandResult {
+        val target = nodes[command.targetNodeId] ?: return rejected(command.commandId, "NODE_MISSING", "Target node does not exist")
+        if (target.status != TopicNodeStatus.ACTIVE) {
+            return rejected(command.commandId, "NODE_REMOVED", "Target node is removed")
+        }
+        if (nodes.containsKey(command.childNodeId)) {
+            return rejected(command.commandId, "DUPLICATE_NODE", "Node already exists")
+        }
+        if (command.childTitle.isBlank() || command.childOrderIndex < 0) {
+            return rejected(command.commandId, "INVALID_INPUT", "Child title/order invalid")
+        }
+
+        when (target.kind) {
+            TopicNodeKind.EXTERNAL_LINK -> {
+                return rejected(command.commandId, "INVALID_PARENT_KIND", "Cannot add child to external link")
+            }
+
+            TopicNodeKind.SECTION -> {
+                nodes[command.childNodeId] = TopicNode(
+                    nodeId = command.childNodeId,
+                    parentNodeId = target.nodeId,
+                    title = command.childTitle,
+                    orderIndex = command.childOrderIndex,
+                    kind = TopicNodeKind.PAGE,
+                    sourcePath = command.childSourcePath,
+                )
+                normalizeSiblingOrder(target.nodeId)
+                return success(command.commandId)
+            }
+
+            TopicNodeKind.PAGE -> {
+                val preservedPageNodeId = nextPreservedPageNodeId(target.nodeId)
+                val existingChildren = childNodesOf(target.nodeId)
+                existingChildren.forEach { child ->
+                    nodes[child.nodeId] = child.copy(orderIndex = child.orderIndex + 1)
+                }
+
+                nodes[target.nodeId] = target.copy(
+                    kind = TopicNodeKind.SECTION,
+                    sourcePath = null,
+                    externalUrl = null,
+                )
+
+                nodes[preservedPageNodeId] = TopicNode(
+                    nodeId = preservedPageNodeId,
+                    parentNodeId = target.nodeId,
+                    title = target.title,
+                    orderIndex = 0,
+                    kind = TopicNodeKind.PAGE,
+                    sourcePath = target.sourcePath,
+                )
+                nodes[command.childNodeId] = TopicNode(
+                    nodeId = command.childNodeId,
+                    parentNodeId = target.nodeId,
+                    title = command.childTitle,
+                    orderIndex = maxOf(1, command.childOrderIndex),
+                    kind = TopicNodeKind.PAGE,
+                    sourcePath = command.childSourcePath,
+                )
+                normalizeSiblingOrder(target.nodeId, preservedPageNodeId)
+                return success(command.commandId)
+            }
+        }
+    }
+
+    private fun addExistingFile(command: AddExistingFileTopicNodeCommand): TopicTreeCommandResult {
+        if (!nodes.containsKey(command.parentNodeId)) {
+            return rejected(command.commandId, "PARENT_MISSING", "Parent does not exist")
+        }
+        if (nodes.containsKey(command.nodeId)) {
+            return rejected(command.commandId, "DUPLICATE_NODE", "Node already exists")
+        }
+        if (command.title.isBlank() || command.orderIndex < 0 || command.relativePath.isBlank()) {
+            return rejected(command.commandId, "INVALID_INPUT", "Title/path/order invalid")
+        }
+        if (!command.relativePath.endsWith(".md")) {
+            return rejected(command.commandId, "INVALID_PATH", "Existing file path must point to markdown")
+        }
+
+        nodes[command.nodeId] = TopicNode(
+            nodeId = command.nodeId,
+            parentNodeId = command.parentNodeId,
+            title = command.title,
+            orderIndex = command.orderIndex,
+            kind = TopicNodeKind.PAGE,
+            sourcePath = command.relativePath,
+        )
+        normalizeSiblingOrder(command.parentNodeId)
+        return success(command.commandId)
+    }
+
+    private fun addExternalLink(command: AddExternalLinkTopicNodeCommand): TopicTreeCommandResult {
+        if (!nodes.containsKey(command.parentNodeId)) {
+            return rejected(command.commandId, "PARENT_MISSING", "Parent does not exist")
+        }
+        if (nodes.containsKey(command.nodeId)) {
+            return rejected(command.commandId, "DUPLICATE_NODE", "Node already exists")
+        }
+        if (command.title.isBlank() || command.orderIndex < 0 || command.externalUrl.isBlank()) {
+            return rejected(command.commandId, "INVALID_INPUT", "Title/url/order invalid")
+        }
+        if (!isSupportedExternalUrl(command.externalUrl)) {
+            return rejected(command.commandId, "INVALID_LINK", "External URL must be http or https")
+        }
+
+        nodes[command.nodeId] = TopicNode(
+            nodeId = command.nodeId,
+            parentNodeId = command.parentNodeId,
+            title = command.title,
+            orderIndex = command.orderIndex,
+            kind = TopicNodeKind.EXTERNAL_LINK,
+            externalUrl = command.externalUrl,
+        )
+        normalizeSiblingOrder(command.parentNodeId)
         return success(command.commandId)
     }
 
@@ -226,6 +371,40 @@ class TopicTreeAggregate(
             current = nodes[current]?.parentNodeId
         }
         return false
+    }
+
+    private fun childNodesOf(parentId: String): List<TopicNode> {
+        return nodes.values
+            .filter { it.parentNodeId == parentId && it.status == TopicNodeStatus.ACTIVE }
+    }
+
+    private fun normalizeSiblingOrder(parentId: String, forcedFirstNodeId: String? = null) {
+        val siblings = childNodesOf(parentId)
+            .sortedWith(
+                compareBy<TopicNode> {
+                    if (forcedFirstNodeId != null && it.nodeId == forcedFirstNodeId) -1 else 0
+                }.thenBy { it.orderIndex }
+                    .thenBy { it.nodeId },
+            )
+
+        siblings.forEachIndexed { index, sibling ->
+            nodes[sibling.nodeId] = sibling.copy(orderIndex = index)
+        }
+    }
+
+    private fun nextPreservedPageNodeId(parentNodeId: String): String {
+        var suffix = 0
+        var candidate = "${parentNodeId}__page"
+        while (nodes.containsKey(candidate)) {
+            suffix += 1
+            candidate = "${parentNodeId}__page$suffix"
+        }
+        return candidate
+    }
+
+    private fun isSupportedExternalUrl(url: String): Boolean {
+        val normalized = url.trim()
+        return normalized.startsWith("http://") || normalized.startsWith("https://")
     }
 }
 

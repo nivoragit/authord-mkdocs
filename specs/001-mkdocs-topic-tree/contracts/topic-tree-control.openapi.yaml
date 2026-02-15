@@ -1,0 +1,354 @@
+openapi: 3.1.0
+info:
+  title: MkDocs Topic Tree Control Contract
+  version: 0.3.0
+  description: >
+    In-process contract for Phase 2 topic-tree management, deterministic
+    MkDocs synchronization, instance scoping, and reconciliation workflows.
+servers:
+  - url: plugin://local
+    description: IntelliJ in-process boundary
+paths:
+  /v1/instances:
+    get:
+      summary: List registered MkDocs instances for the current project
+      operationId: listInstances
+      responses:
+        '200':
+          description: Instance list response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceListResponse'
+    post:
+      summary: Add an explicit MkDocs instance by config path
+      operationId: addInstance
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddInstanceRequest'
+      responses:
+        '200':
+          description: Added instance
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MkDocsInstance'
+  /v1/instances/discover:
+    post:
+      summary: Discover default root-level MkDocs instance
+      operationId: discoverDefaultInstance
+      responses:
+        '200':
+          description: Discovery result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoveryResult'
+  /v1/instances/{instanceId}/select:
+    put:
+      summary: Select active instance for subsequent operations
+      operationId: selectInstance
+      parameters:
+        - in: path
+          name: instanceId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Selection status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstanceSelectionResult'
+  /v1/instances/{instanceId}/tree:
+    get:
+      summary: Load topic tree for active or selected instance
+      operationId: getTopicTree
+      parameters:
+        - in: path
+          name: instanceId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Topic tree snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TopicTreeSnapshot'
+  /v1/instances/{instanceId}/commands:
+    post:
+      summary: Execute a topic mutation/validation command
+      operationId: executeTopicCommand
+      parameters:
+        - in: path
+          name: instanceId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TopicCommandRequest'
+      responses:
+        '200':
+          description: Mutation outcome
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MutationOutcome'
+  /v1/instances/{instanceId}/reconcile:
+    post:
+      summary: Trigger startup/file-change reconciliation for an instance
+      operationId: reconcileInstance
+      parameters:
+        - in: path
+          name: instanceId
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReconcileRequest'
+      responses:
+        '200':
+          description: Reconciliation report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReconciliationReport'
+  /v1/instances/{instanceId}/validation:
+    get:
+      summary: Read latest validation issues for instance tree/nav/files
+      operationId: getValidationIssues
+      parameters:
+        - in: path
+          name: instanceId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Validation issue list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ValidationIssueList'
+  /v1/instances/{instanceId}/unlinked:
+    get:
+      summary: Read unlinked markdown files bucket for instance docs scope
+      operationId: getUnlinkedFiles
+      parameters:
+        - in: path
+          name: instanceId
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Unlinked files response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UnlinkedFilesResponse'
+components:
+  schemas:
+    InstanceListResponse:
+      type: object
+      required: [instances, activeInstanceId]
+      properties:
+        instances:
+          type: array
+          items:
+            $ref: '#/components/schemas/MkDocsInstance'
+        activeInstanceId:
+          type: string
+    AddInstanceRequest:
+      type: object
+      required: [configPath]
+      properties:
+        configPath:
+          type: string
+        label:
+          type: string
+    DiscoveryResult:
+      type: object
+      required: [defaultDiscovered, instance]
+      properties:
+        defaultDiscovered:
+          type: boolean
+        instance:
+          $ref: '#/components/schemas/MkDocsInstance'
+    MkDocsInstance:
+      type: object
+      required: [instanceId, configPath, docsDirPath, isDefault]
+      properties:
+        instanceId:
+          type: string
+        configPath:
+          type: string
+        docsDirPath:
+          type: string
+        label:
+          type: string
+        isDefault:
+          type: boolean
+    InstanceSelectionResult:
+      type: object
+      required: [instanceId, selected]
+      properties:
+        instanceId:
+          type: string
+        selected:
+          type: boolean
+        message:
+          type: string
+    TopicTreeSnapshot:
+      type: object
+      required: [treeId, instanceId, version, nodes]
+      properties:
+        treeId:
+          type: string
+        instanceId:
+          type: string
+        version:
+          type: integer
+        nodes:
+          type: array
+          items:
+            $ref: '#/components/schemas/TopicNode'
+    TopicNode:
+      type: object
+      required: [topicId, title, kind, order]
+      properties:
+        topicId:
+          type: string
+        title:
+          type: string
+        kind:
+          type: string
+          enum: [PAGE, SECTION, EXTERNAL_LINK]
+        order:
+          type: integer
+        parentId:
+          type: string
+          nullable: true
+        sourcePath:
+          type: string
+          nullable: true
+        externalUrl:
+          type: string
+          nullable: true
+    TopicCommandRequest:
+      type: object
+      required: [commandId, commandType, payload]
+      properties:
+        commandId:
+          type: string
+        commandType:
+          type: string
+          enum: [ADD, MOVE, REMOVE, RENAME, REPARENT, REORDER, VALIDATE]
+        payload:
+          type: object
+          additionalProperties: true
+        dryRun:
+          type: boolean
+          default: false
+    MutationOutcome:
+      type: object
+      required: [commandId, status]
+      properties:
+        commandId:
+          type: string
+        status:
+          type: string
+          enum: [SUCCESS, REJECTED, FAILED]
+        treeVersion:
+          type: integer
+          nullable: true
+        issues:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationIssue'
+        rollbackApplied:
+          type: boolean
+          default: false
+        message:
+          type: string
+    ReconcileRequest:
+      type: object
+      properties:
+        reason:
+          type: string
+          enum: [STARTUP, FILE_CHANGE, MANUAL]
+    ReconciliationReport:
+      type: object
+      required: [instanceId, policy, missingNavTargets, unlinkedFiles, issues]
+      properties:
+        instanceId:
+          type: string
+        policy:
+          type: string
+          enum: [NAV_FIRST_NON_DESTRUCTIVE]
+        missingNavTargets:
+          type: array
+          items:
+            type: string
+        unlinkedFiles:
+          type: array
+          items:
+            type: string
+        issues:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationIssue'
+    ValidationIssueList:
+      type: object
+      required: [instanceId, issues]
+      properties:
+        instanceId:
+          type: string
+        issues:
+          type: array
+          items:
+            $ref: '#/components/schemas/ValidationIssue'
+    ValidationIssue:
+      type: object
+      required: [issueId, category, severity, message]
+      properties:
+        issueId:
+          type: string
+        category:
+          type: string
+          enum: [BROKEN_PATH, DUPLICATE_REFERENCE, MALFORMED_LINK, MISSING_FILE, INSTANCE_SCOPE, OTHER]
+        severity:
+          type: string
+          enum: [INFO, WARN, ERROR]
+        message:
+          type: string
+        nodeRef:
+          type: string
+          nullable: true
+        pathRef:
+          type: string
+          nullable: true
+    UnlinkedFilesResponse:
+      type: object
+      required: [instanceId, files]
+      properties:
+        instanceId:
+          type: string
+        files:
+          type: array
+          items:
+            type: string

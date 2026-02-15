@@ -1,27 +1,21 @@
 <!--
 Sync Impact Report
-- Version change: template (unversioned) -> 1.0.0
+- Version change: 1.0.0 -> 1.1.0
 - Modified principles:
-  - Placeholder Principle 1 -> I. OS-Neutral Execution
-  - Placeholder Principle 2 -> II. Runtime Decoupling
-  - Placeholder Principle 3 -> III. Delivery Completeness Per Cycle
-  - Placeholder Principle 4 -> IV. Test Gate
-  - Placeholder Principle 5 -> V. MVP-First, Extension-Ready
-- Added principles:
-  - VI. Topic-Tree Parity Runway
-  - VII. Backward-Compatible Evolution
-  - VIII. Code Documentation Standard
+  - VI. Topic-Tree Parity Runway (expanded with canonical nav, atomic sync, deterministic serialization, and startup reconciliation obligations)
 - Added sections:
-  - Implementation Standards
-  - Delivery Workflow and Compliance
+  - None
 - Removed sections:
-  - Template placeholder comments and bracket tokens
+  - None
 - Templates requiring updates:
   - ✅ Updated: .specify/templates/plan-template.md
   - ✅ Updated: .specify/templates/spec-template.md
   - ✅ Updated: .specify/templates/tasks-template.md
   - ⚠ Pending: .specify/templates/commands/*.md (directory not present in repository)
-  - ✅ Reviewed: AGENTS.md (no constitution references required changes)
+  - ✅ Reviewed (no update required): docs/implementation/README.md
+  - ✅ Reviewed (no update required): docs/implementation/technical-design-notes.md
+  - ✅ Reviewed (no update required): docs/implementation/operational-runbook.md
+  - ✅ Reviewed (no update required): docs/implementation/test-plan-traceability.md
 - Follow-up TODOs:
   - None
 -->
@@ -104,6 +98,11 @@ Rationale: this preserves iteration speed without sacrificing extension seams.
   - `reparent`
   - `reorder`
 - Storage/provider integration MUST remain pluggable.
+- `mkdocs.yml` `nav` MUST be the canonical persisted navigation model.
+- Plugin topic tree state MUST be derived from `mkdocs.yml` `nav`, or from a deterministic fallback when `nav` is missing.
+- Mutations spanning tree model, markdown files, and `mkdocs.yml` MUST be atomic; if true atomicity is not feasible, a compensating rollback procedure MUST be implemented and documented.
+- `mkdocs.yml` writes MUST be deterministic to minimize diff churn for unchanged logical structures.
+- Startup and file-change flows MUST reconcile `nav` and `docs_dir` with an explicit, documented conflict handling policy.
 
 Rationale: parity evolution requires a stable, provider-agnostic domain core.
 
@@ -127,7 +126,7 @@ Rationale: maintainability requires explicit intent and contract-level documenta
 
 1. Runtime and filesystem changes MUST satisfy Principles I and II before merge.
 2. Public interface updates MUST satisfy Principles III, VII, and VIII in the same cycle.
-3. Topic-tree related work MUST satisfy Principle VI even when UI parity is deferred.
+3. Topic-tree related work MUST satisfy Principle VI, including canonical nav source, atomic sync integrity, deterministic serialization, and startup reconciliation, even when UI parity is deferred.
 4. Coverage and CI settings MUST enforce Principle IV continuously.
 
 ## Delivery Workflow and Compliance
@@ -155,4 +154,4 @@ Rationale: maintainability requires explicit intent and contract-level documenta
 - Compliance review is REQUIRED on every plan, task list, and release gate review.
 - Violations MUST be documented in plan/task artifacts with justification and remediation steps.
 
-**Version**: 1.0.0 | **Ratified**: 2026-02-08 | **Last Amended**: 2026-02-08
+**Version**: 1.1.0 | **Ratified**: 2026-02-08 | **Last Amended**: 2026-02-13

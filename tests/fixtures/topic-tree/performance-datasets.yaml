@@ -1,0 +1,49 @@
+version: 1
+profile: phase2-topic-tree-performance
+startup_reconciliation:
+  targets:
+    p95_ms: 2000
+  datasets:
+    - id: startup-small
+      markdown_files: 50
+      instances: 1
+      expected_p95_ms: 500
+    - id: startup-medium
+      markdown_files: 500
+      instances: 3
+      expected_p95_ms: 1500
+    - id: startup-reference
+      markdown_files: 1000
+      instances: 5
+      expected_p95_ms: 2000
+mutation_feedback:
+  targets:
+    p95_ms: 300
+  datasets:
+    - id: mutation-small
+      markdown_files: 50
+      operations:
+        - add
+        - rename
+        - move
+        - remove
+      expected_p95_ms: 120
+    - id: mutation-reference
+      markdown_files: 1000
+      operations:
+        - add
+        - rename
+        - move
+        - remove
+        - reorder
+        - reparent
+      expected_p95_ms: 300
+scale_profile:
+  targets:
+    instances: 5
+    markdown_files_total: 10000
+  datasets:
+    - id: scale-reference
+      instances: 5
+      markdown_files_total: 10000
+      expected_cross_instance_leakage: 0

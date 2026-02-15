@@ -200,7 +200,7 @@ class PluginRuntimeIntegrationServiceTest {
     fun `project startup output provider reads value from project user data`() {
         val project = IntellijTestFixtures.project()
         val provider = ProjectUserDataStartupOutputProvider()
-        val expected = "server log includes https://preview.example/"
+        val expected = " log includes https://preview.example/"
         project.putUserData(ProjectUserDataStartupOutputProvider.KEY, expected)
 
         val resolved = provider.startupOutput(project, PreviewStartTrigger.ACTION)

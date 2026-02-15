@@ -2,6 +2,38 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.2.2] - 2026-02-15
+
+## Added
+
+1. Phase 2 success-criteria evidence artifacts:
+- `tests/integration/topic-tree/StartupTimingEvidence.md`
+- `tests/integration/topic-tree/PartialSyncZeroStateEvidence.md`
+- `tests/integration/topic-tree/SeededValidationEvidence.md`
+- `tests/integration/topic-tree/CompatibilityRegressionEvidence.md`
+- `tests/integration/topic-tree/MutationResponsivenessEvidence.md`
+- `tests/integration/topic-tree/InstanceScaleEvidence.md`
+
+2. Public API usage guidance summary:
+- `docs/implementation/public-api-usage.md`
+
+## Changed
+
+1. Phase 2 release docs synchronized for current execution state:
+- `specs/001-mkdocs-topic-tree/spec.md`
+- `specs/001-mkdocs-topic-tree/technical-design-notes.md`
+- `specs/001-mkdocs-topic-tree/operational-runbook.md`
+- `specs/001-mkdocs-topic-tree/test-plan-traceability.md`
+- `specs/001-mkdocs-topic-tree/analysis-closure.md`
+- `tests/integration/topic-tree/RunIdeDecouplingEvidence.md`
+
+2. Runtime decoupling checkpoint evidence refreshed from focused run:
+- `.tmp/gate-runs/20260215T050001Z_t119_runtime_decoupling.log`
+
+## Migration Notes
+
+No breaking migration steps are required for this documentation/evidence update.
+
 ## [0.2.1] - 2026-02-11
 
 ## Added

@@ -90,9 +90,7 @@ class MkdocsProcessManager(
             )
         }
 
-        val command = config.command.toMutableList().apply {
-            addAll(config.extraArgs)
-        }
+        val command = buildCommand(config)
 
         val handle = processLauncher.launch(command, workingDir)
         processes[projectId] = RunningProcess(handle, workingDir, config, command)
@@ -138,4 +136,17 @@ class MkdocsProcessManager(
      * Returns `true` when runtime process is alive for a project.
      */
     fun isRunning(projectId: String): Boolean = processes[projectId]?.handle?.isAlive() == true
+
+    /**
+     * Builds effective runtime command without injecting host/port defaults.
+     *
+     * Runtime endpoint selection remains decoupled from the plugin by relying on
+     * process stdout URL discovery instead of hardcoded host/port assumptions.
+     */
+    private fun buildCommand(config: RuntimeServerConfig): List<String> {
+        val sanitizedBase = config.command.map { it.trim() }.filter { it.isNotEmpty() }
+        val sanitizedExtras = config.extraArgs.map { it.trim() }.filter { it.isNotEmpty() }
+        val baseCommand = if (sanitizedBase.isEmpty()) listOf("mkdocs", "serve") else sanitizedBase
+        return baseCommand + sanitizedExtras
+    }
 }

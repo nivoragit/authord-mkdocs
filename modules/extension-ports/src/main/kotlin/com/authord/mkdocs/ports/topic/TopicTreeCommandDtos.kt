@@ -5,6 +5,9 @@ package com.authord.mkdocs.ports.topic
  */
 enum class TopicTreeCommandType {
     ADD,
+    ADD_CHILD,
+    ADD_EXISTING_FILE,
+    ADD_EXTERNAL_LINK,
     MOVE,
     REMOVE,
     RENAME,
@@ -37,8 +40,56 @@ data class AddTopicNodeCommand(
     val nodeId: String,
     val title: String,
     val orderIndex: Int,
+    val sourcePath: String? = null,
 ) : TopicTreeCommand {
     override val commandType: TopicTreeCommandType = TopicTreeCommandType.ADD
+}
+
+/**
+ * Adds a child node under an existing target node.
+ *
+ * If the target node is a page node, domain policy may transform it to a section container.
+ */
+data class AddChildTopicNodeCommand(
+    override val commandId: String,
+    override val treeId: String,
+    val targetNodeId: String,
+    val childNodeId: String,
+    val childTitle: String,
+    val childOrderIndex: Int,
+    val childSourcePath: String? = null,
+) : TopicTreeCommand {
+    override val commandType: TopicTreeCommandType = TopicTreeCommandType.ADD_CHILD
+}
+
+/**
+ * Adds an existing markdown file into navigation at a selected location.
+ */
+data class AddExistingFileTopicNodeCommand(
+    override val commandId: String,
+    override val treeId: String,
+    val parentNodeId: String,
+    val nodeId: String,
+    val title: String,
+    val relativePath: String,
+    val orderIndex: Int,
+) : TopicTreeCommand {
+    override val commandType: TopicTreeCommandType = TopicTreeCommandType.ADD_EXISTING_FILE
+}
+
+/**
+ * Adds an external link topic node.
+ */
+data class AddExternalLinkTopicNodeCommand(
+    override val commandId: String,
+    override val treeId: String,
+    val parentNodeId: String,
+    val nodeId: String,
+    val title: String,
+    val externalUrl: String,
+    val orderIndex: Int,
+) : TopicTreeCommand {
+    override val commandType: TopicTreeCommandType = TopicTreeCommandType.ADD_EXTERNAL_LINK
 }
 
 /**

@@ -1,5 +1,6 @@
 package com.authord.mkdocs.runtime
 
+import org.yaml.snakeyaml.Yaml
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.io.path.exists
@@ -55,6 +56,10 @@ class UvBootstrapService(
     private val commandRunner: CommandRunner,
     private val uvExecutableProvider: UvExecutableProvider,
 ) {
+    companion object {
+        private val builtinPluginNames = setOf("search")
+    }
+
     /**
      * Backward-compatible constructor that defaults to shell `uv` resolution.
      */
@@ -155,16 +160,84 @@ class UvBootstrapService(
 
     private fun resolveRequiredPackages(projectPath: String): List<String> {
         val packages = mutableListOf("mkdocs")
-        if (usesMaterialTheme(projectPath)) {
+        val config = loadMkdocsConfig(projectPath)
+        if (usesMaterialTheme(config)) {
             packages += "mkdocs-material"
         }
-        return packages
+        packages += resolvePluginPackages(config)
+        return packages.distinct()
     }
 
-    private fun usesMaterialTheme(projectPath: String): Boolean {
-        val configPath = resolveMkdocsConfigPath(projectPath) ?: return false
-        val content = runCatching { Files.readString(configPath) }.getOrElse { return false }
-        return hasMaterialTheme(content)
+    private fun loadMkdocsConfig(projectPath: String): Map<*, *>? {
+        val configPath = resolveMkdocsConfigPath(projectPath) ?: return null
+        return runCatching {
+            Files.newBufferedReader(configPath).use { reader ->
+                Yaml().load<Any?>(reader)
+            } as? Map<*, *>
+        }.getOrNull()
+    }
+
+    private fun usesMaterialTheme(config: Map<*, *>?): Boolean {
+        val rawTheme = config?.get("theme") ?: return false
+        return when (rawTheme) {
+            is String -> isMaterialValue(rawTheme)
+            is Map<*, *> -> isMaterialValue(rawTheme["name"]?.toString().orEmpty())
+            else -> false
+        }
+    }
+
+    private fun resolvePluginPackages(config: Map<*, *>?): List<String> {
+        val pluginNames = extractPluginNames(config?.get("plugins"))
+        return pluginNames.mapNotNull(::pluginPackageFor).distinct()
+    }
+
+    private fun extractPluginNames(rawPlugins: Any?): List<String> {
+        return when (rawPlugins) {
+            null -> emptyList()
+            is String -> listOfNotNull(normalizePluginName(rawPlugins))
+            is List<*> -> rawPlugins.flatMap { entry ->
+                when (entry) {
+                    is String -> listOfNotNull(normalizePluginName(entry))
+                    is Map<*, *> -> entry.keys.mapNotNull { key -> normalizePluginName(key?.toString().orEmpty()) }
+                    else -> emptyList()
+                }
+            }
+
+            is Map<*, *> -> rawPlugins.keys.mapNotNull { key -> normalizePluginName(key?.toString().orEmpty()) }
+            else -> emptyList()
+        }
+    }
+
+    private fun pluginPackageFor(pluginName: String): String? {
+        val normalizedName = pluginName.replace('_', '-')
+        if (normalizedName in builtinPluginNames) {
+            return null
+        }
+        if (normalizedName.startsWith("mkdocs-")) {
+            return normalizedName
+        }
+        return "mkdocs-$normalizedName"
+    }
+
+    private fun isMaterialValue(rawValue: String): Boolean {
+        val normalized = rawValue
+            .removePrefix("\"")
+            .removeSuffix("\"")
+            .removePrefix("'")
+            .removeSuffix("'")
+            .trim()
+        return normalized == "material"
+    }
+
+    private fun normalizePluginName(rawValue: String): String? {
+        val normalized = rawValue
+            .removePrefix("\"")
+            .removeSuffix("\"")
+            .removePrefix("'")
+            .removeSuffix("'")
+            .trim()
+            .lowercase()
+        return normalized.ifBlank { null }
     }
 
     private fun resolveMkdocsConfigPath(projectPath: String): Path? {
@@ -176,79 +249,5 @@ class UvBootstrapService(
 
         val ymlAlt = root.resolve("mkdocs.yaml")
         return if (ymlAlt.exists()) ymlAlt else null
-    }
-
-    // We intentionally avoid a YAML dependency for this MVP and parse only the theme name patterns we need.
-    private fun hasMaterialTheme(content: String): Boolean {
-        val lines = content.lineSequence()
-            .map { it.substringBefore('#').trimEnd() }
-            .toList()
-
-        var inThemeBlock = false
-        var themeIndent = -1
-
-        for (rawLine in lines) {
-            if (rawLine.isBlank()) {
-                continue
-            }
-
-            val indent = rawLine.indexOfFirst { !it.isWhitespace() }.let { if (it == -1) rawLine.length else it }
-            val line = rawLine.trim()
-
-            if (inThemeBlock && indent <= themeIndent) {
-                inThemeBlock = false
-            }
-
-            if (!inThemeBlock && line.startsWith("theme:")) {
-                val value = line.removePrefix("theme:").trim()
-                if (value.isBlank()) {
-                    inThemeBlock = true
-                    themeIndent = indent
-                    continue
-                }
-                if (inlineThemeDeclaresMaterial(value)) {
-                    return true
-                }
-                continue
-            }
-
-            if (inThemeBlock && line.startsWith("name:")) {
-                val value = line.removePrefix("name:").trim()
-                if (isMaterialValue(value)) {
-                    return true
-                }
-            }
-        }
-
-        return false
-    }
-
-    private fun inlineThemeDeclaresMaterial(themeValue: String): Boolean {
-        if (isMaterialValue(themeValue)) {
-            return true
-        }
-
-        if (!themeValue.startsWith("{") || !themeValue.endsWith("}")) {
-            return false
-        }
-
-        val inlineEntries = themeValue
-            .removePrefix("{")
-            .removeSuffix("}")
-            .split(',')
-            .map { it.trim() }
-
-        val nameEntry = inlineEntries.firstOrNull { it.startsWith("name:") } ?: return false
-        return isMaterialValue(nameEntry.removePrefix("name:").trim())
-    }
-
-    private fun isMaterialValue(rawValue: String): Boolean {
-        val normalized = rawValue
-            .removePrefix("\"")
-            .removeSuffix("\"")
-            .removePrefix("'")
-            .removeSuffix("'")
-            .trim()
-        return normalized == "material"
     }
 }

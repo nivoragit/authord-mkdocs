@@ -68,6 +68,32 @@ class StartMkdocsActionInvocationTest {
     }
 
     @Test
+    fun `actionPerformed blocks start when compatibility release gate is blocked`() {
+        val project = IntellijTestFixtures.project()
+        val service = PluginRuntimeIntegrationService(project)
+        service.setStartupOutputForNextRun("ready at https://preview.example/docs/")
+        val action = StartMkdocsAction(
+            runtimeServiceResolver = { service },
+            compatibilityGateServiceResolver = { CompatibilityReleaseGateService() },
+            compatibilityRegressionsProvider = {
+                listOf(
+                    CompatibilityRegression(
+                        id = "compat-1",
+                        kind = CompatibilityRegressionKind.PREVIEW_START_FAILURE,
+                        description = "Preview does not start",
+                        resolved = false,
+                    ),
+                )
+            },
+        )
+
+        val invoked = action.invokeForProject(project)
+
+        assertFalse(invoked)
+        assertFalse(service.isRuntimeRunning())
+    }
+
+    @Test
     fun `actionPerformed entrypoint handles null project event`() {
         val action = StartMkdocsAction(
             runtimeServiceResolver = { error("Service must not be resolved without project context") },

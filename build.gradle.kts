@@ -115,3 +115,21 @@ subprojects {
         dependsOn("jacocoTestCoverageVerification")
     }
 }
+
+val scopedCoverageModules = listOf(
+    ":modules:core-domain",
+    ":modules:extension-ports",
+    ":modules:mkdocs-runtime-adapter",
+    ":modules:ui-plugin",
+)
+
+// Aggregates scoped module coverage enforcement into a single root release gate.
+val scopedCoverageGate by tasks.registering {
+    group = LifecycleBasePlugin.VERIFICATION_GROUP
+    description = "Fails when any scoped module violates the 100% coverage gate."
+    dependsOn(
+        scopedCoverageModules.map { modulePath ->
+            project(modulePath).tasks.named("jacocoTestCoverageVerification")
+        },
+    )
+}

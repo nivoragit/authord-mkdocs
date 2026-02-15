@@ -1,0 +1,209 @@
+asyncapi: 3.0.0
+info:
+  title: MkDocs Topic Tree Events
+  version: 0.3.0
+  description: >
+    Event contract for topic-tree mutation orchestration, reconciliation,
+    instance selection, rollback, and validation reporting.
+channels:
+  topic-tree.instance.selected:
+    address: topic-tree.instance.selected
+    messages:
+      instanceSelected:
+        $ref: '#/components/messages/InstanceSelected'
+  topic-tree.mutation.succeeded:
+    address: topic-tree.mutation.succeeded
+    messages:
+      mutationSucceeded:
+        $ref: '#/components/messages/MutationSucceeded'
+  topic-tree.mutation.failed:
+    address: topic-tree.mutation.failed
+    messages:
+      mutationFailed:
+        $ref: '#/components/messages/MutationFailed'
+  topic-tree.rollback.applied:
+    address: topic-tree.rollback.applied
+    messages:
+      rollbackApplied:
+        $ref: '#/components/messages/RollbackApplied'
+  topic-tree.reconciliation.completed:
+    address: topic-tree.reconciliation.completed
+    messages:
+      reconciliationCompleted:
+        $ref: '#/components/messages/ReconciliationCompleted'
+  topic-tree.validation.updated:
+    address: topic-tree.validation.updated
+    messages:
+      validationUpdated:
+        $ref: '#/components/messages/ValidationUpdated'
+operations:
+  publishInstanceSelected:
+    action: send
+    channel:
+      $ref: '#/channels/topic-tree.instance.selected'
+    messages:
+      - $ref: '#/channels/topic-tree.instance.selected/messages/instanceSelected'
+  publishMutationSucceeded:
+    action: send
+    channel:
+      $ref: '#/channels/topic-tree.mutation.succeeded'
+    messages:
+      - $ref: '#/channels/topic-tree.mutation.succeeded/messages/mutationSucceeded'
+  publishMutationFailed:
+    action: send
+    channel:
+      $ref: '#/channels/topic-tree.mutation.failed'
+    messages:
+      - $ref: '#/channels/topic-tree.mutation.failed/messages/mutationFailed'
+  publishRollbackApplied:
+    action: send
+    channel:
+      $ref: '#/channels/topic-tree.rollback.applied'
+    messages:
+      - $ref: '#/channels/topic-tree.rollback.applied/messages/rollbackApplied'
+  publishReconciliationCompleted:
+    action: send
+    channel:
+      $ref: '#/channels/topic-tree.reconciliation.completed'
+    messages:
+      - $ref: '#/channels/topic-tree.reconciliation.completed/messages/reconciliationCompleted'
+  publishValidationUpdated:
+    action: send
+    channel:
+      $ref: '#/channels/topic-tree.validation.updated'
+    messages:
+      - $ref: '#/channels/topic-tree.validation.updated/messages/validationUpdated'
+components:
+  messages:
+    InstanceSelected:
+      name: InstanceSelected
+      payload:
+        $ref: '#/components/schemas/InstanceSelectedPayload'
+    MutationSucceeded:
+      name: MutationSucceeded
+      payload:
+        $ref: '#/components/schemas/MutationSucceededPayload'
+    MutationFailed:
+      name: MutationFailed
+      payload:
+        $ref: '#/components/schemas/MutationFailedPayload'
+    RollbackApplied:
+      name: RollbackApplied
+      payload:
+        $ref: '#/components/schemas/RollbackAppliedPayload'
+    ReconciliationCompleted:
+      name: ReconciliationCompleted
+      payload:
+        $ref: '#/components/schemas/ReconciliationCompletedPayload'
+    ValidationUpdated:
+      name: ValidationUpdated
+      payload:
+        $ref: '#/components/schemas/ValidationUpdatedPayload'
+  schemas:
+    InstanceSelectedPayload:
+      type: object
+      required: [eventId, projectId, instanceId, isDefault, occurredAt]
+      properties:
+        eventId:
+          type: string
+        projectId:
+          type: string
+        instanceId:
+          type: string
+        isDefault:
+          type: boolean
+        occurredAt:
+          type: string
+          format: date-time
+    MutationSucceededPayload:
+      type: object
+      required: [eventId, instanceId, commandId, commandType, treeVersion, occurredAt]
+      properties:
+        eventId:
+          type: string
+        instanceId:
+          type: string
+        commandId:
+          type: string
+        commandType:
+          type: string
+        treeVersion:
+          type: integer
+        occurredAt:
+          type: string
+          format: date-time
+    MutationFailedPayload:
+      type: object
+      required: [eventId, instanceId, commandId, errorCode, message, occurredAt]
+      properties:
+        eventId:
+          type: string
+        instanceId:
+          type: string
+        commandId:
+          type: string
+        errorCode:
+          type: string
+          enum: [VALIDATION, CONFIG_PARSE, CONFIG_WRITE, FILE_IO, RECONCILIATION, ORCHESTRATION, INSTANCE_SCOPE]
+        message:
+          type: string
+        recoverable:
+          type: boolean
+        occurredAt:
+          type: string
+          format: date-time
+    RollbackAppliedPayload:
+      type: object
+      required: [eventId, instanceId, commandId, rollbackSteps, occurredAt]
+      properties:
+        eventId:
+          type: string
+        instanceId:
+          type: string
+        commandId:
+          type: string
+        rollbackSteps:
+          type: array
+          items:
+            type: string
+        occurredAt:
+          type: string
+          format: date-time
+    ReconciliationCompletedPayload:
+      type: object
+      required: [eventId, instanceId, policy, missingNavTargets, unlinkedFiles, occurredAt]
+      properties:
+        eventId:
+          type: string
+        instanceId:
+          type: string
+        policy:
+          type: string
+          enum: [NAV_FIRST_NON_DESTRUCTIVE]
+        missingNavTargets:
+          type: array
+          items:
+            type: string
+        unlinkedFiles:
+          type: array
+          items:
+            type: string
+        occurredAt:
+          type: string
+          format: date-time
+    ValidationUpdatedPayload:
+      type: object
+      required: [eventId, instanceId, issueCount, highestSeverity, occurredAt]
+      properties:
+        eventId:
+          type: string
+        instanceId:
+          type: string
+        issueCount:
+          type: integer
+        highestSeverity:
+          type: string
+          enum: [INFO, WARN, ERROR]
+        occurredAt:
+          type: string
+          format: date-time

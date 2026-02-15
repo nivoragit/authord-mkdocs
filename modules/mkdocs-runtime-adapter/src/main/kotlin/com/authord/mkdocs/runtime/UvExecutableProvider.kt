@@ -154,10 +154,10 @@ class DefaultUvArchiveExtractor : UvArchiveExtractor {
                                 return@use true
                             }
                         }
+                        false
                     }
                 }
             }
-            false
         }.getOrElse { exception ->
             return UvExecutableResult(
                 success = false,

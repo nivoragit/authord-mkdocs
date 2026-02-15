@@ -9,6 +9,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import kotlin.io.path.exists
+import kotlin.io.path.name
 
 /**
  * Result returned by plugin activation flow.
@@ -30,6 +31,8 @@ class PluginActivationService(
     private val previewPaneCoordinator: PreviewPaneCoordinator,
     private val errorPresenter: ActivationErrorPresenter,
 ) {
+    private val siteNameKeyRegex = Regex("""^\s*site_name\s*:""")
+
     /**
      * Activates plugin runtime for a project.
      *
@@ -131,6 +134,7 @@ class PluginActivationService(
         runtimePath: String,
         uvExecutablePath: String,
     ): List<String> {
+        ensureSiteNameRequiredByMkDocs(projectPath)
         val scriptPath = ensureParentGuardScript(projectPath)
         val parentPid = ProcessHandle.current().pid().toString()
 
@@ -152,6 +156,56 @@ class PluginActivationService(
             "--dirty",
         )
     }
+
+    private fun ensureSiteNameRequiredByMkDocs(projectPath: String) {
+        val configPath = resolveMkdocsConfigPath(projectPath) ?: return
+        val existing = runCatching { Files.readString(configPath) }.getOrNull() ?: return
+        if (existing.lineSequence().any { line ->
+                val trimmed = line.trimStart()
+                trimmed.isNotEmpty() && !trimmed.startsWith("#") && siteNameKeyRegex.containsMatchIn(trimmed)
+            }
+        ) {
+            return
+        }
+
+        val fallbackSiteName = defaultSiteName(Path.of(projectPath))
+        val addition = buildString {
+            if (!existing.endsWith('\n')) {
+                append('\n')
+            }
+            append("site_name: '${escapeSingleQuotedYaml(fallbackSiteName)}'\n")
+        }
+        runCatching {
+            Files.writeString(configPath, addition, StandardOpenOption.APPEND)
+        }
+    }
+
+    private fun resolveMkdocsConfigPath(projectPath: String): Path? {
+        val rootPath = Path.of(projectPath)
+        val yml = rootPath.resolve("mkdocs.yml")
+        if (yml.exists()) {
+            return yml
+        }
+        val yaml = rootPath.resolve("mkdocs.yaml")
+        if (yaml.exists()) {
+            return yaml
+        }
+        return null
+    }
+
+    private fun defaultSiteName(projectPath: Path): String {
+        val leafName = projectPath.name.trim()
+        if (leafName.isBlank()) {
+            return "MkDocs Site"
+        }
+        return leafName
+            .replace('-', ' ')
+            .replace('_', ' ')
+            .trim()
+            .ifBlank { "MkDocs Site" }
+    }
+
+    private fun escapeSingleQuotedYaml(value: String): String = value.replace("'", "''")
 
     private fun ensureParentGuardScript(projectPath: String): Path {
         val runtimeDir = Path.of(projectPath).resolve(".mkdocs-plugin-runtime")

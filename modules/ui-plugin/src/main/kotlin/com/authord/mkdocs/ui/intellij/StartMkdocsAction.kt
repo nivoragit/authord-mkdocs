@@ -15,6 +15,10 @@ class StartMkdocsAction(
         PluginCompositionRoot().runtimeIntegration(it)
     },
     private val resultPresenter: (Project, String, Boolean) -> Unit = ::presentPreviewResult,
+    private val compatibilityGateServiceResolver: (Project) -> CompatibilityReleaseGateService = {
+        CompatibilityReleaseGateService()
+    },
+    private val compatibilityRegressionsProvider: (Project) -> List<CompatibilityRegression> = { emptyList() },
 ) : AnAction("Start MkDocs Preview"), DumbAware {
     /**
      * Uses background update thread to respect action-system threading guidance.
@@ -51,6 +55,16 @@ class StartMkdocsAction(
 
     internal fun invokeForProject(project: Project?): Boolean {
         if (project == null) {
+            return false
+        }
+
+        val compatibilityDecision = compatibilityGateServiceResolver(project).evaluate(
+            regressions = compatibilityRegressionsProvider(project),
+            projectId = project.locationHash,
+            instanceId = "default",
+        )
+        if (compatibilityDecision.blocked) {
+            resultPresenter(project, compatibilityDecision.summary, false)
             return false
         }
 

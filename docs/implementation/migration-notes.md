@@ -2,7 +2,7 @@
 
 ## Release Context
 
-This cycle adds plugin-shell entry wiring (build/plugin descriptor/tool-window/action/runtime integration) on top of existing MVP services.
+This cycle includes Phase 2 topic-tree evidence and documentation closure updates on top of existing MVP and plugin-shell services.
 
 ## Compatibility Impact
 
@@ -21,6 +21,14 @@ No breaking migration steps are required.
 - runtime serve command now uses `--livereload --dirty`,
 - runtime process is tied to IDE parent lifecycle,
 - preview sync uses viewport-percentage mapping from editor to preview.
+5. Phase 2 evidence artifacts are additive and do not introduce API-breaking behavior:
+- `tests/integration/topic-tree/StartupTimingEvidence.md`
+- `tests/integration/topic-tree/PartialSyncZeroStateEvidence.md`
+- `tests/integration/topic-tree/SeededValidationEvidence.md`
+- `tests/integration/topic-tree/CompatibilityRegressionEvidence.md`
+- `tests/integration/topic-tree/MutationResponsivenessEvidence.md`
+- `tests/integration/topic-tree/InstanceScaleEvidence.md`
+- `docs/implementation/public-api-usage.md`
 
 ## If Future Breaking Changes Occur
 

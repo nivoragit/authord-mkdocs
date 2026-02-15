@@ -13,8 +13,22 @@ class PluginDescriptorRegistrationTest {
         val content = Files.readString(pluginXmlPath)
 
         assertTrue(content.contains("<depends>com.intellij.modules.platform</depends>"))
+        assertTrue(
+            content.contains("<depends optional=\"true\" config-file=\"markdown-toolbar.xml\">org.intellij.plugins.markdown</depends>"),
+        )
         assertTrue(content.contains("factoryClass=\"com.authord.mkdocs.ui.intellij.MkdocsToolWindowFactory\""))
         assertTrue(content.contains("class=\"com.authord.mkdocs.ui.intellij.StartMkdocsAction\""))
+    }
+
+    @Test
+    fun `markdown toolbar descriptor registers authord preview action in markdown toolbar`() {
+        val root = findRepoRoot()
+        val markdownDescriptorPath = root.resolve("modules/ui-plugin/src/main/resources/META-INF/markdown-toolbar.xml")
+        val content = Files.readString(markdownDescriptorPath)
+
+        assertTrue(content.contains("id=\"com.authord.mkdocs.action.markdownToolbarPreview\""))
+        assertTrue(content.contains("class=\"com.authord.mkdocs.ui.intellij.StartMkdocsAction\""))
+        assertTrue(content.contains("<add-to-group group-id=\"Markdown.Toolbar.Right\" anchor=\"first\" />"))
     }
 
     private fun findRepoRoot(): Path {

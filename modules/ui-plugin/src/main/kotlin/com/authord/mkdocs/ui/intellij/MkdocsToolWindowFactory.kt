@@ -1,9 +1,17 @@
 package com.authord.mkdocs.ui.intellij
 
+import com.authord.mkdocs.core.topic.TopicTreeMutationService
+import com.authord.mkdocs.ports.topic.MkDocsConfigDocument
+import com.authord.mkdocs.ports.topic.InstanceRegistryPort
+import com.authord.mkdocs.ports.topic.TopicGatewayResult
+import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.ui.PluginCompositionRoot
+import com.authord.mkdocs.runtime.DocsFileGatewayAdapter
+import com.authord.mkdocs.runtime.MkDocsYamlGateway
 import com.intellij.openapi.editor.Document
 import com.intellij.openapi.editor.Editor
 import com.intellij.openapi.editor.EditorFactory
+import com.intellij.openapi.editor.LogicalPosition
 import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.event.DocumentListener
 import com.intellij.openapi.editor.event.VisibleAreaEvent
@@ -20,10 +28,18 @@ import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.wm.ToolWindowFactory
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
+import com.intellij.ui.jcef.JBCefJSQuery
+import org.cef.browser.CefBrowser
+import org.cef.browser.CefFrame
+import org.cef.handler.CefLoadHandlerAdapter
 import java.awt.BorderLayout
+import java.awt.Dimension
 import java.awt.Point
+import java.net.URLDecoder
+import java.nio.file.Files
+import java.nio.file.Path
+import java.nio.charset.StandardCharsets
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JComponent
 import javax.swing.JEditorPane
@@ -31,6 +47,20 @@ import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JScrollPane
 
+private fun defaultTopicTreeUiService(project: Project): TopicTreeUiService {
+    val instanceRegistry = InstanceRegistryService()
+    project.basePath?.takeIf { it.isNotBlank() }?.let { projectRoot ->
+        instanceRegistry.discoverDefaultInstance(projectRoot)
+    }
+    val orchestrator = TopicTreeSyncOrchestratorService(
+        topicTreePort = TopicTreeMutationService(),
+        mkDocsConfigGateway = MkDocsYamlGateway(),
+        docsFileGateway = DocsFileGatewayAdapter(),
+    )
+    val applicationService = TopicTreeApplicationServiceImpl(orchestrator, instanceRegistry)
+    return TopicTreeUiServiceImpl(applicationService, instanceRegistry)
+}
+ 
 /**
  * Creates a minimal MkDocs tool window shell for plugin entry-point validation.
  */
@@ -53,6 +83,30 @@ class MkdocsToolWindowFactory(
             EditorFactory.getInstance().eventMulticaster.addVisibleAreaListener(listener, project)
         }
     },
+    private val startupReconciliationResolver: (Project) -> StartupReconciliationCoordinator = {
+        StartupReconciliationCoordinator()
+    },
+    private val defaultInstanceResolver: (String) -> TopicGatewayResult<TopicInstanceRef?> = { projectRoot ->
+        InstanceRegistryService().discoverDefaultInstance(projectRoot)
+    },
+    private val configLoader: (TopicInstanceRef) -> TopicGatewayResult<MkDocsConfigDocument> = { instance ->
+        MkDocsYamlGateway().loadConfig(instance)
+    },
+    private val startupStateListener: (Project, StartupTreeState) -> Unit = { _, _ -> },
+    private val topicTreeUiServiceResolver: (Project) -> TopicTreeUiService = {
+        defaultTopicTreeUiService(it)
+    },
+    private val actionControllerFactory: (TopicTreeUiService, TopicTreeFailureRecoveryPresenter) -> TopicTreeActionController =
+        { uiService, recoveryPresenter ->
+            TopicTreeActionController(uiService = uiService, failureRecoveryPresenter = recoveryPresenter)
+        },
+    private val dragDropControllerFactory: (TopicTreeUiService, TopicTreeFailureRecoveryPresenter) -> TopicTreeDragDropController =
+        { uiService, recoveryPresenter ->
+            TopicTreeDragDropController(uiService = uiService, failureRecoveryPresenter = recoveryPresenter)
+        },
+    private val instanceSwitchCoordinatorFactory: (TopicTreeUiService) -> InstanceSwitchCoordinator = { uiService ->
+        InstanceSwitchCoordinator(uiService = uiService)
+    },
     private val delayedInvoker: (delayMillis: Long, task: () -> Unit) -> Unit = { delayMillis, task ->
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
@@ -67,18 +121,18 @@ class MkdocsToolWindowFactory(
     },
 ) : ToolWindowFactory, DumbAware {
     private val typingRefreshDelaysMs: List<Long> = listOf(450L)
-    private val scrollFlushDelayMs: Long = 20L
     private val typingGenerationByProject = ConcurrentHashMap<String, AtomicInteger>()
-    private val pendingScrollProgressByProject = ConcurrentHashMap<String, Double>()
-    private val lastScrollProgressByProject = ConcurrentHashMap<String, Double>()
-    private val scrollFlushScheduledByProject = ConcurrentHashMap<String, AtomicBoolean>()
+    private val scrollSyncEngineByProject = ConcurrentHashMap<String, MkdocsScrollSyncEngine>()
+    private val topicTreeControllersByProject = ConcurrentHashMap<String, TopicTreeControllers>()
     /**
      * Registers minimal content inside the tool window manager.
      */
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
         val runtimeService = runtimeServiceResolver(project)
         val previewContent = previewContentFactory()
-        val panel = createShellContentPanel(project, runtimeService, previewContent)
+        wireTopicTreeControllers(project)
+        val topicTreePanel = createTopicTreePanel(project)
+        val panel = createShellContentPanel(project, runtimeService, previewContent, topicTreePanel.component)
         val contentManager = toolWindow.contentManager
         val content = contentManager.factory.createContent(panel, "", false)
         contentManager.removeAllContents(true)
@@ -93,10 +147,15 @@ class MkdocsToolWindowFactory(
             }
         }
         resultPresenter(project, initialMessage, initialResult.success)
-
         registerEditorSelectionSync(project, runtimeService, previewContent)
-        registerDocumentTypingSync(project, runtimeService, previewContent)
+        // registerDocumentTypingSync(project, runtimeService, previewContent) todo remove
         registerEditorScrollSync(project, runtimeService, previewContent)
+        registerTopicTreeReconciliationTriggers(project, topicTreePanel)
+
+        runStartupReconciliation(project)?.let { startupState ->
+            topicTreePanel.render(startupState)
+            startupStateListener(project, startupState)
+        }
     }
 
     /**
@@ -108,10 +167,12 @@ class MkdocsToolWindowFactory(
         project: Project,
         runtimeService: PluginRuntimeIntegrationService = runtimeServiceResolver(project),
         previewContent: PreviewContent = previewContentFactory(),
+        topicTreeComponent: JComponent? = null,
     ): JPanel {
         val panel = JPanel(BorderLayout())
 
-        panel.add(JLabel("MkDocs Preview Shell"), BorderLayout.NORTH)
+        panel.add(JLabel("Authord"), BorderLayout.NORTH)
+        topicTreeComponent?.let { panel.add(it, BorderLayout.WEST) }
         panel.add(previewContent.component, BorderLayout.CENTER)
 
         runtimeService.currentPreviewUrl()?.takeIf { it.isNotBlank() }?.let { url ->
@@ -176,6 +237,7 @@ class MkdocsToolWindowFactory(
         runtimeService: PluginRuntimeIntegrationService,
         previewContent: PreviewContent,
     ) {
+        val engine = syncEngine(project.locationHash)
         visibleAreaListenerRegistrar(
             project,
             /**
@@ -186,6 +248,10 @@ class MkdocsToolWindowFactory(
                  * Applies viewport-derived progress to preview scroll position.
                  */
                 override fun visibleAreaChanged(event: VisibleAreaEvent) {
+                    if (engine.isEditorEventSuppressed()) {
+                        return
+                    }
+
                     val virtualFile = FileDocumentManager.getInstance().getFile(event.editor.document) ?: return
                     val selectedPath = virtualFile.path
                     val oldRectangle = event.oldRectangle ?: return
@@ -197,13 +263,16 @@ class MkdocsToolWindowFactory(
 
                     val visibleOffsets = resolveVisibleOffsets(event.editor, newRectangle.y, newRectangle.height)
                         ?: return
+
+                    val topLine = event.editor.document.getLineNumber(visibleOffsets.startOffset)
                     scheduleScrollSync(
                         project = project,
                         runtimeService = runtimeService,
                         previewContent = previewContent,
                         selectedPath = selectedPath,
+                        topLine = topLine,
+                        document = event.editor.document,
                         rawDelta = rawDelta,
-                        documentLength = event.editor.document.textLength,
                         visibleStartOffset = visibleOffsets.startOffset,
                         visibleEndOffset = visibleOffsets.endOffset,
                     )
@@ -211,6 +280,22 @@ class MkdocsToolWindowFactory(
             },
         )
     }
+
+    private fun registerTopicTreeReconciliationTriggers(
+        project: Project,
+        topicTreePanel: TopicTreeWorkspacePanel,
+    ) {
+        project.messageBus.connect(project).subscribe(
+            FileEditorManagerListener.FILE_EDITOR_MANAGER,
+            object : FileEditorManagerListener {
+                override fun selectionChanged(event: FileEditorManagerEvent) {
+                    topicTreePanel.reconcileFromDisk()
+                }
+            },
+        )
+    }
+
+
 
     internal fun applyPreviewRoute(
         project: Project,
@@ -289,8 +374,9 @@ class MkdocsToolWindowFactory(
         runtimeService: PluginRuntimeIntegrationService,
         previewContent: PreviewContent,
         selectedPath: String,
+        topLine: Int,
+        document: Document,
         rawDelta: Int,
-        documentLength: Int,
         visibleStartOffset: Int,
         visibleEndOffset: Int,
     ): Boolean {
@@ -303,43 +389,44 @@ class MkdocsToolWindowFactory(
             return false
         }
 
-        val normalizedDocumentLength = documentLength.coerceAtLeast(1)
-        val rawProgress = calculateVisibleProgress(
-            visibleStartOffset = visibleStartOffset,
-            visibleEndOffset = visibleEndOffset,
-            documentLength = normalizedDocumentLength,
-        )
-        val projectId = project.locationHash
-        val previousProgress = lastScrollProgressByProject[projectId]
-        val targetProgress = rawProgress
-
-        if (previousProgress != null && kotlin.math.abs(targetProgress - previousProgress) < 0.001) {
+        val engine = syncEngine(project.locationHash)
+        val units = engine.resolveEffectiveUnits(document)
+        if (units.units.total <= 0) {
             return false
         }
 
-        lastScrollProgressByProject[projectId] = targetProgress
-        pendingScrollProgressByProject[projectId] = targetProgress
-
-        val scheduled = scrollFlushScheduledByProject.computeIfAbsent(projectId) { AtomicBoolean(false) }
-        if (!scheduled.compareAndSet(false, true)) {
-            return true
-        }
-
-        delayedInvoker(scrollFlushDelayMs) {
-            if (project.isDisposed) {
-                scheduled.set(false)
-                return@delayedInvoker
-            }
-
-            val progressToApply = pendingScrollProgressByProject[projectId] ?: run {
-                scheduled.set(false)
-                return@delayedInvoker
-            }
-            scheduled.set(false)
-            previewContent.scrollToProgress(progressToApply)
-        }
+        engine.onEditorScroll(
+            topLine = topLine,
+            selectedPath = selectedPath,
+            lines = units.lines,
+            units = units.units,
+            applyRatio = { ratio ->
+                // Ratio sync uses scrollToProgress
+                engine.suppressPreviewEvents()
+                previewContent.scrollToProgress(ratio)
+            },
+            applyPrecise = { y ->
+                // Precise sync uses scrollToY
+                engine.suppressPreviewEvents()
+                previewContent.scrollToY(y)
+            },
+            loadPreviewSnapshot = { callback ->
+                previewContent.requestDomSnapshot(callback)
+            },
+            loadPreviewMetrics = { callback ->
+                previewContent.requestScrollMetrics(callback)
+            },
+        )
 
         return true
+    }
+
+    private fun resolveEffectiveUnits(projectId: String, document: Document): EffectiveUnitsCache {
+        return syncEngine(projectId).resolveEffectiveUnits(document)
+    }
+
+    internal fun computeEffectiveUnits(lines: List<String>): EffectiveUnitsResult {
+        return MkdocsScrollSyncEngine(delayedInvoker = { _, _ -> }).computeEffectiveUnits(lines)
     }
 
     private fun isDocsMarkdownPath(selectedPath: String): Boolean {
@@ -374,17 +461,149 @@ class MkdocsToolWindowFactory(
         return VisibleOffsets(start, end)
     }
 
-    private fun calculateVisibleProgress(
-        visibleStartOffset: Int,
-        visibleEndOffset: Int,
-        documentLength: Int,
-    ): Double {
-        val start = visibleStartOffset.coerceAtLeast(0)
-        val windowSize = (visibleEndOffset - visibleStartOffset).coerceAtLeast(1)
-        val maxScrollableStart = (documentLength - windowSize).coerceAtLeast(1)
-        return (start.toDouble() / maxScrollableStart.toDouble()).coerceIn(0.0, 1.0)
+    private fun scrollEditorToLine(project: Project, line: Int) {
+        val editor = FileEditorManager.getInstance(project).selectedTextEditor ?: return
+        val safeLine = line.coerceIn(0, editor.document.lineCount.coerceAtLeast(1) - 1)
+        val y = editor.logicalPositionToXY(LogicalPosition(safeLine, 0)).y
+        syncEngine(project.locationHash).suppressEditorEvents()
+        editor.scrollingModel.scrollVertically(y)
     }
+
+    private fun syncEngine(projectId: String): MkdocsScrollSyncEngine {
+        return scrollSyncEngineByProject.computeIfAbsent(projectId) {
+            MkdocsScrollSyncEngine(delayedInvoker = delayedInvoker)
+        }
+    }
+
+    /**
+     * Wires US2 topic-tree action and drag/drop controllers into this tool-window lifecycle.
+     */
+    private fun wireTopicTreeControllers(project: Project) {
+        val uiService = topicTreeUiServiceResolver(project)
+        val recoveryPresenter = TopicTreeFailureRecoveryPresenter()
+        val instanceRegistryPort = (uiService as? TopicTreeUiServiceImpl)?.instanceRegistryPort
+        topicTreeControllersByProject[project.locationHash] = TopicTreeControllers(
+            actionController = actionControllerFactory(uiService, recoveryPresenter),
+            dragDropController = dragDropControllerFactory(uiService, recoveryPresenter),
+            failureRecoveryPresenter = recoveryPresenter,
+            instanceSwitchCoordinator = instanceSwitchCoordinatorFactory(uiService),
+            instanceRegistryPort = instanceRegistryPort,
+        )
+    }
+
+    /**
+     * Exposes controller wiring for tests and lifecycle diagnostics.
+     */
+    internal fun topicTreeControllers(project: Project): TopicTreeControllers? {
+        return topicTreeControllersByProject[project.locationHash]
+    }
+
+    /**
+     * Applies instance selection interaction from tool-window controls.
+     */
+    internal fun selectTopicTreeInstance(
+        project: Project,
+        instanceId: String,
+    ): TopicGatewayResult<InstanceSwitchOutcome>? {
+        val controllers = topicTreeControllers(project) ?: return null
+        return controllers.instanceSwitchCoordinator.switchActiveInstance(instanceId)
+    }
+
+    /**
+     * Runs startup reconciliation during tool-window initialization using non-destructive defaults.
+     */
+    internal fun runStartupReconciliation(project: Project): StartupTreeState? {
+        val projectRoot = project.basePath?.let { basePath ->
+            runCatching { Path.of(basePath).toAbsolutePath().normalize() }.getOrNull()
+        } ?: return null
+
+        val defaultInstance = when (val result = defaultInstanceResolver(projectRoot.toString())) {
+            is TopicGatewayResult.Success -> result.value
+            is TopicGatewayResult.Failure -> null
+        }
+
+        val docsDirPath = defaultInstance
+            ?.let { instance -> runCatching { Path.of(instance.docsDirPath).toAbsolutePath().normalize() }.getOrNull() }
+            ?: projectRoot.resolve("docs").normalize()
+
+        val configDocument = defaultInstance
+            ?.let { instance ->
+                when (val result = configLoader(instance)) {
+                    is TopicGatewayResult.Success -> result.value.copy(
+                        docsDir = docsDirPath.toString().replace('\\', '/'),
+                    )
+                    is TopicGatewayResult.Failure -> null
+                }
+            } ?: MkDocsConfigDocument(
+                docsDir = docsDirPath.toString().replace('\\', '/'),
+                nav = emptyList(),
+            )
+
+        val docsMarkdownPaths = collectDocsMarkdownPaths(docsDirPath)
+
+        return runCatching {
+            startupReconciliationResolver(project).reconcile(
+                config = configDocument,
+                docsMarkdownPaths = docsMarkdownPaths,
+                projectId = project.locationHash,
+                instanceId = defaultInstance?.instanceId ?: "default",
+            )
+        }.getOrNull()
+    }
+
+    private fun collectDocsMarkdownPaths(docsDirPath: Path): List<String> {
+        if (!Files.isDirectory(docsDirPath)) {
+            return emptyList()
+        }
+
+        val markdownPaths = mutableListOf<String>()
+        Files.walk(docsDirPath).use { stream ->
+            stream
+                .filter { Files.isRegularFile(it) }
+                .filter { it.fileName.toString().endsWith(".md") }
+                .forEach { path ->
+                    markdownPaths += path.toAbsolutePath().normalize().toString().replace('\\', '/')
+                }
+        }
+        return markdownPaths.sorted()
+    }
+
+    private fun createTopicTreePanel(project: Project): TopicTreeWorkspacePanel {
+        return TopicTreeWorkspacePanel(
+            controllersProvider = { topicTreeControllers(project) },
+            reconcileStateProvider = { runStartupReconciliation(project) },
+            startupStateListener = { state -> startupStateListener(project, state) },
+            projectRootPath = project.basePath,
+        )
+    }
+
 }
+
+/**
+ * Tool-window scoped bundle for topic-tree action, drag/drop, and failure guidance wiring.
+ */
+data class TopicTreeControllers(
+    val actionController: TopicTreeActionController,
+    val dragDropController: TopicTreeDragDropController,
+    val failureRecoveryPresenter: TopicTreeFailureRecoveryPresenter,
+    val instanceSwitchCoordinator: InstanceSwitchCoordinator,
+    val instanceRegistryPort: InstanceRegistryPort?,
+)
+
+data class PreviewScrollMetrics(
+    val scrollY: Double,
+    val maxScrollY: Double,
+)
+
+data class PreviewHeadingAnchor(
+    val text: String,
+    val y: Double,
+)
+
+data class PreviewDomSnapshot(
+    val maxScrollY: Double,
+    val headings: List<PreviewHeadingAnchor>,
+)
 
 /**
  * Contract for the preview surface embedded in the MkDocs tool window.
@@ -413,12 +632,90 @@ interface PreviewContent {
      * @param progress value within [0.0, 1.0] where 0 is top and 1 is bottom.
      */
     fun scrollToProgress(progress: Double) = Unit
+
+    /**
+     * Scrolls preview to an absolute Y coordinate in CSS pixels.
+     */
+    fun scrollToY(y: Double) = Unit
+
+    /**
+     * Requests the current preview scroll metrics.
+     */
+    fun requestScrollMetrics(callback: (PreviewScrollMetrics?) -> Unit) {
+        callback(null)
+    }
+
+    /**
+     * Requests heading anchor snapshot from the preview DOM.
+     */
+    fun requestDomSnapshot(callback: (PreviewDomSnapshot?) -> Unit) {
+        callback(null)
+    }
+
+    /**
+     * Registers preview scroll listener.
+     */
+    fun setPreviewScrollListener(listener: ((PreviewScrollMetrics) -> Unit)?) = Unit
 }
 
 private class JcefPreviewContent : PreviewContent {
     private val browser = JBCefBrowser()
+    private val scrollEventQuery = JBCefJSQuery.create(browser)
+    private val metricsQuery = JBCefJSQuery.create(browser)
+    private val domSnapshotQuery = JBCefJSQuery.create(browser)
+    @Volatile private var previewScrollListener: ((PreviewScrollMetrics) -> Unit)? = null
+    @Volatile private var pendingMetricsCallback: ((PreviewScrollMetrics?) -> Unit)? = null
+    @Volatile private var pendingDomSnapshotCallback: ((PreviewDomSnapshot?) -> Unit)? = null
 
     override val component: JComponent = browser.component
+
+    init {
+        scrollEventQuery.addHandler { payload ->
+            val parsed = parseScrollMetricsPayload(payload) ?: return@addHandler null
+            val listener = previewScrollListener ?: return@addHandler null
+            ApplicationManager.getApplication().invokeLater(
+                { listener(parsed) },
+                ModalityState.any(),
+            )
+            null
+        }
+
+        metricsQuery.addHandler { payload ->
+            val callback = pendingMetricsCallback
+            pendingMetricsCallback = null
+            callback ?: return@addHandler null
+            val parsed = parseScrollMetricsPayload(payload)
+            ApplicationManager.getApplication().invokeLater(
+                { callback(parsed) },
+                ModalityState.any(),
+            )
+            null
+        }
+
+        domSnapshotQuery.addHandler { payload ->
+            val callback = pendingDomSnapshotCallback
+            pendingDomSnapshotCallback = null
+            callback ?: return@addHandler null
+            val parsed = parseDomSnapshotPayload(payload)
+            ApplicationManager.getApplication().invokeLater(
+                { callback(parsed) },
+                ModalityState.any(),
+            )
+            null
+        }
+
+        browser.jbCefClient.addLoadHandler(
+            object : CefLoadHandlerAdapter() {
+                override fun onLoadEnd(browser: CefBrowser?, frame: CefFrame?, httpStatusCode: Int) {
+                    if (frame?.isMain == false) {
+                        return
+                    }
+                    installPreviewScrollListenerIfNeeded()
+                }
+            },
+            browser.cefBrowser,
+        )
+    }
 
     /**
      * Loads preview content in the embedded Chromium browser.
@@ -459,30 +756,216 @@ private class JcefPreviewContent : PreviewContent {
                 if (!root) return;
                 const maxScroll = Math.max(0, root.scrollHeight - window.innerHeight);
                 const target = maxScroll * targetProgress;
+                
                 const state = window.__authordPreviewSyncState || { raf: 0, target: 0 };
-                state.target = target;
-
-                if (!state.raf) {
-                    const step = function() {
-                        const current = root.scrollTop;
-                        const delta = state.target - current;
-                        if (Math.abs(delta) < 1) {
-                            root.scrollTop = state.target;
-                            state.raf = 0;
-                            window.__authordPreviewSyncState = state;
-                            return;
-                        }
-                        root.scrollTop = current + (delta * 0.35);
-                        state.raf = window.requestAnimationFrame(step);
-                        window.__authordPreviewSyncState = state;
-                    };
-                    state.raf = window.requestAnimationFrame(step);
+                if (state.raf) {
+                    window.cancelAnimationFrame(state.raf);
+                    state.raf = 0;
                 }
-
+                
+                root.scrollTop = target;
                 window.__authordPreviewSyncState = state;
             })();
         """.trimIndent()
+        executeScript(script)
+    }
+
+    /**
+     * Scrolls the embedded browser to an absolute document Y position.
+     */
+    override fun scrollToY(y: Double) {
+        val targetY = y.coerceAtLeast(0.0)
+        val script = """
+            (function() {
+                const target = Number(${targetY});
+                const root = document.scrollingElement || document.documentElement || document.body;
+                if (!root) return;
+                const maxScroll = Math.max(0, root.scrollHeight - window.innerHeight);
+                const safeTarget = Math.min(Math.max(target, 0), maxScroll);
+                
+                const state = window.__authordPreviewSyncState || { raf: 0, target: 0 };
+                if (state.raf) {
+                    window.cancelAnimationFrame(state.raf);
+                    state.raf = 0;
+                }
+
+                root.scrollTop = safeTarget;
+                window.__authordPreviewSyncState = state;
+            })();
+        """.trimIndent()
+        executeScript(script)
+    }
+
+    /**
+     * Returns live preview viewport metrics through a JS bridge callback.
+     */
+    override fun requestScrollMetrics(callback: (PreviewScrollMetrics?) -> Unit) {
+        pendingMetricsCallback = callback
+        val script = """
+            (function() {
+                const root = document.scrollingElement || document.documentElement || document.body;
+                if (!root) {
+                    const payload = "0|0";
+                    ${metricsQuery.inject("payload")};
+                    return;
+                }
+                const scrollY = Number(window.scrollY || root.scrollTop || 0);
+                const maxScroll = Math.max(
+                    0,
+                    Number(root.scrollHeight || 0) - Number(window.innerHeight || root.clientHeight || 0)
+                );
+                const payload = String(scrollY) + "|" + String(maxScroll);
+                ${metricsQuery.inject("payload")};
+            })();
+        """.trimIndent()
+        executeScript(script)
+    }
+
+    /**
+     * Returns a heading-anchor snapshot used by precise piecewise interpolation.
+     */
+    override fun requestDomSnapshot(callback: (PreviewDomSnapshot?) -> Unit) {
+        pendingDomSnapshotCallback = callback
+        val script = """
+            (function() {
+                const root = document.scrollingElement || document.documentElement || document.body;
+                if (!root) {
+                    const payload = "0";
+                    ${domSnapshotQuery.inject("payload")};
+                    return;
+                }
+
+                const currentY = Number(window.scrollY || root.scrollTop || 0);
+                const maxScroll = Math.max(
+                    0,
+                    Number(root.scrollHeight || 0) - Number(window.innerHeight || root.clientHeight || 0)
+                );
+                const headings = [];
+                const nodes = document.querySelectorAll("h1,h2,h3,h4,h5,h6");
+                for (const node of nodes) {
+                    if (!node || !node.getBoundingClientRect) continue;
+                    const rect = node.getBoundingClientRect();
+                    const style = window.getComputedStyle(node);
+                    if (!style) continue;
+                    if (style.display === "none" || style.visibility === "hidden") continue;
+                    if (rect.width <= 0 || rect.height <= 0) continue;
+
+                    const text = encodeURIComponent(String(node.textContent || "").trim());
+                    const y = Math.max(0, currentY + rect.top);
+                    headings.push(text + ":" + String(y));
+                }
+
+                const payload = [String(maxScroll)].concat(headings).join("|");
+                ${domSnapshotQuery.inject("payload")};
+            })();
+        """.trimIndent()
+        executeScript(script)
+    }
+
+    /**
+     * Subscribes to preview-side scroll events. Events are rAF-throttled in JS.
+     */
+    override fun setPreviewScrollListener(listener: ((PreviewScrollMetrics) -> Unit)?) {
+        previewScrollListener = listener
+        installPreviewScrollListenerIfNeeded()
+    }
+
+    private fun installPreviewScrollListenerIfNeeded() {
+        if (previewScrollListener == null) {
+            return
+        }
+
+        val script = """
+            (function() {
+                if (window.__authordPreviewScrollBridgeInstalled) return;
+                window.__authordPreviewScrollBridgeInstalled = true;
+
+                const emit = function() {
+                    const root = document.scrollingElement || document.documentElement || document.body;
+                    if (!root) return;
+                    const scrollY = Number(window.scrollY || root.scrollTop || 0);
+                    const maxScroll = Math.max(
+                        0,
+                        Number(root.scrollHeight || 0) - Number(window.innerHeight || root.clientHeight || 0)
+                    );
+                    const payload = String(scrollY) + "|" + String(maxScroll);
+                    ${scrollEventQuery.inject("payload")};
+                };
+
+                let rafToken = 0;
+                const onScroll = function() {
+                    if (rafToken) return;
+                    rafToken = window.requestAnimationFrame(function() {
+                        rafToken = 0;
+                        emit();
+                    });
+                };
+
+                window.addEventListener("scroll", onScroll, { passive: true });
+                window.addEventListener("resize", onScroll, { passive: true });
+                emit();
+            })();
+        """.trimIndent()
+        executeScript(script)
+    }
+
+    private fun executeScript(script: String) {
         browser.cefBrowser.executeJavaScript(script, "about:blank", 0)
+    }
+
+    private fun parseScrollMetricsPayload(payload: String?): PreviewScrollMetrics? {
+        if (payload.isNullOrBlank()) {
+            return null
+        }
+
+        val parts = payload.split('|', limit = 2)
+        if (parts.size < 2) {
+            return null
+        }
+
+        val scrollY = parts[0].toDoubleOrNull() ?: return null
+        val maxScrollY = parts[1].toDoubleOrNull() ?: return null
+        return PreviewScrollMetrics(
+            scrollY = scrollY.coerceAtLeast(0.0),
+            maxScrollY = maxScrollY.coerceAtLeast(0.0),
+        )
+    }
+
+    private fun parseDomSnapshotPayload(payload: String?): PreviewDomSnapshot? {
+        if (payload.isNullOrBlank()) {
+            return null
+        }
+
+        val segments = payload.split('|')
+        val maxScrollY = segments.firstOrNull()?.toDoubleOrNull() ?: 0.0
+        val headings = segments.drop(1).mapNotNull { item ->
+            if (item.isBlank()) {
+                return@mapNotNull null
+            }
+            val separatorIndex = item.lastIndexOf(':')
+            if (separatorIndex <= 0 || separatorIndex >= item.length - 1) {
+                return@mapNotNull null
+            }
+
+            val encodedText = item.substring(0, separatorIndex)
+            val y = item.substring(separatorIndex + 1).toDoubleOrNull() ?: return@mapNotNull null
+            val decodedText = runCatching {
+                URLDecoder.decode(encodedText, StandardCharsets.UTF_8)
+            }.getOrDefault(encodedText)
+            if (decodedText.isBlank()) {
+                return@mapNotNull null
+            }
+
+            PreviewHeadingAnchor(
+                text = decodedText,
+                y = y.coerceAtLeast(0.0),
+            )
+        }
+
+        return PreviewDomSnapshot(
+            maxScrollY = maxScrollY.coerceAtLeast(0.0),
+            headings = headings,
+        )
     }
 
     private fun withRefreshToken(url: String): String {

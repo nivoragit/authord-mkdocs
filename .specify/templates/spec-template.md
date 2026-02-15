@@ -106,6 +106,18 @@
 - **FR-006**: System MUST authenticate users via [NEEDS CLARIFICATION: auth method not specified - email/password, SSO, OAuth?]
 - **FR-007**: System MUST retain user data for [NEEDS CLARIFICATION: retention period not specified]
 
+### Navigation Sync Constraints *(mandatory when topic-tree/navigation scope exists)*
+
+<!--
+  ACTION REQUIRED: Include this section whenever the cycle touches topic-tree,
+  navigation editing, mkdocs.yml, docs_dir reconciliation, or related file generation.
+-->
+
+- **NAV-001**: `mkdocs.yml` `nav` MUST be the canonical persisted navigation source.
+- **NAV-002**: Tree/file/navigation mutations MUST be atomic, or a compensating rollback procedure MUST be defined and documented.
+- **NAV-003**: `mkdocs.yml` serialization MUST be deterministic for logically unchanged structures.
+- **NAV-004**: Startup and file-change reconciliation between `nav` and `docs_dir` MUST follow an explicit conflict handling policy.
+
 ### Public Interfaces & Versioning *(mandatory when public interfaces change)*
 
 <!--

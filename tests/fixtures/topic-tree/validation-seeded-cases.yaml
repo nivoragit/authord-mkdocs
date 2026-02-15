@@ -1,0 +1,52 @@
+version: 1
+profile: phase2-topic-tree-validation
+cases:
+  - id: broken-path-001
+    type: broken_path
+    description: Nav entry points to missing markdown file
+    nav_entry:
+      title: Missing Intro
+      path: docs/missing-intro.md
+    expected:
+      validation_code: BROKEN_PATH
+      severity: error
+
+  - id: broken-path-002
+    type: broken_path
+    description: Config references file moved outside docs_dir
+    nav_entry:
+      title: External Move
+      path: docs/relocated.md
+    expected:
+      validation_code: BROKEN_PATH
+      severity: error
+
+  - id: duplicate-ref-001
+    type: duplicate_reference
+    description: Same markdown file referenced by multiple nav nodes
+    nav_entries:
+      - title: Intro A
+        path: docs/intro.md
+      - title: Intro B
+        path: docs/intro.md
+    expected:
+      validation_code: DUPLICATE_REFERENCE
+      severity: warning
+
+  - id: malformed-link-001
+    type: malformed_link
+    description: External link has malformed URL
+    nav_entry:
+      title: Bad URL
+      url: "ht!tp://invalid url"
+    expected:
+      validation_code: MALFORMED_LINK
+      severity: error
+
+  - id: malformed-link-002
+    type: malformed_link
+    description: Markdown link target syntax invalid
+    markdown_snippet: "[broken](<>)"
+    expected:
+      validation_code: MALFORMED_LINK
+      severity: warning

@@ -5,8 +5,7 @@
 **Status**: Updated (session addendum applied 2026-02-11)  
 **Input**: User description: "Cycle goal: make current MVP runnable inside IntelliJ as a real plugin shell."
 
-## User Scenarios & Testing *(mandatory)*
-
+## User Scenarios & Testing *(mandatory)* 
 ### User Story 1 - Build and Launch Plugin Shell (Priority: P1)
 
 A plugin developer can build the plugin and launch a development IDE where the plugin loads with valid metadata.

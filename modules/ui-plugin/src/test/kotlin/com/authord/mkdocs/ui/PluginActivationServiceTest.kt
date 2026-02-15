@@ -277,4 +277,81 @@ class PluginActivationServiceTest {
             projectRoot.toFile().deleteRecursively()
         }
     }
+
+    @Test
+    fun `adds fallback site_name when mkdocs config omits required key`() {
+        val projectRoot = createTempDirectory(prefix = "plugin-activation-site-name-")
+        try {
+            Files.writeString(
+                projectRoot.resolve("mkdocs.yml"),
+                """
+                    docs_dir: docs
+                    nav: []
+                """.trimIndent() + "\n",
+            )
+            val launcher = RecordingStartLauncher(
+                ActivationHandle("p1", alive = true, startupOutputText = "Serving at http://127.0.0.1:8000/"),
+            )
+            val svc = service(
+                bootstrap = UvBootstrapService(
+                    commandRunner = { _, _ -> CommandResult(0) },
+                    uvExecutableProvider = StaticUvExecutableProvider("/tmp/custom-uv"),
+                ),
+                processManager = MkdocsProcessManager(launcher),
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertTrue(result.success)
+            val updatedConfig = Files.readAllLines(projectRoot.resolve("mkdocs.yml"))
+            assertTrue(updatedConfig.any { it.trimStart().startsWith("site_name:") })
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `preserves existing site_name without duplicating key`() {
+        val projectRoot = createTempDirectory(prefix = "plugin-activation-existing-site-name-")
+        try {
+            Files.writeString(
+                projectRoot.resolve("mkdocs.yml"),
+                """
+                    site_name: Existing Name
+                    docs_dir: docs
+                    nav: []
+                """.trimIndent() + "\n",
+            )
+            val launcher = RecordingStartLauncher(
+                ActivationHandle("p1", alive = true, startupOutputText = "Serving at http://127.0.0.1:8000/"),
+            )
+            val svc = service(
+                bootstrap = UvBootstrapService(
+                    commandRunner = { _, _ -> CommandResult(0) },
+                    uvExecutableProvider = StaticUvExecutableProvider("/tmp/custom-uv"),
+                ),
+                processManager = MkdocsProcessManager(launcher),
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertTrue(result.success)
+            val lines = Files.readAllLines(projectRoot.resolve("mkdocs.yml"))
+            val siteNameCount = lines.count { it.trimStart().startsWith("site_name:") }
+            assertEquals(1, siteNameCount)
+            assertTrue(lines.any { it.contains("site_name: Existing Name") })
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
 }
