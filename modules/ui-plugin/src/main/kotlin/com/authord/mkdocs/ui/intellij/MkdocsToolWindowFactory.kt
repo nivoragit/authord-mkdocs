@@ -61,10 +61,16 @@ import java.nio.charset.StandardCharsets
 import java.util.Base64
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
+import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JEditorPane
+import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.JScrollPane
+import javax.swing.SwingUtilities
+import kotlin.io.path.name
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 private fun defaultTopicTreeUiService(project: Project): TopicTreeUiService {
     val instanceRegistry = InstanceRegistryService()
@@ -166,6 +172,8 @@ class MkdocsToolWindowFactory(
     private val typingGenerationByProject = ConcurrentHashMap<String, AtomicInteger>()
     private val lastTypingTimestampByProject = ConcurrentHashMap<String, Long>()
     private val typingScrollGuardMs: Long = 800L
+    private val userScrollLatchByProject = ConcurrentHashMap<String, Boolean>()
+    private val lastSyncedEditorTopByProject = ConcurrentHashMap<String, Double>()
     private val topicTreePanelsByProject = ConcurrentHashMap<String, TopicTreeWorkspacePanel>()
     private val topicTreeControllersByProject = ConcurrentHashMap<String, TopicTreeControllers>()
     private val topicTreeUiServicesByProject = ConcurrentHashMap<String, TopicTreeUiService>()
@@ -232,6 +240,7 @@ class MkdocsToolWindowFactory(
         registerEditorSelectionSync(project, runtimeService, previewContent)
         registerDocumentTypingSync(project, previewContent)
         registerEditorScrollSync(project, runtimeService, previewContent)
+        registerManualScrollSync(project, previewContent)
         registerTopicTreeReconciliationTriggers(project, topicTreePanel)
 
         if (!setupMode) {
@@ -682,6 +691,15 @@ class MkdocsToolWindowFactory(
         )
     }
 
+    private fun registerManualScrollSync(
+        project: Project,
+        previewContent: PreviewContent,
+    ) {
+        previewContent.setManualScrollListener {
+            userScrollLatchByProject[project.locationHash] = true
+        }
+    }
+
     private fun registerTopicTreeReconciliationTriggers(
         project: Project,
         topicTreePanel: TopicTreeWorkspacePanel,
@@ -900,18 +918,31 @@ class MkdocsToolWindowFactory(
         if (!runtimeService.isRuntimeRunning() || !isDocsMarkdownPath(selectedPath) || rawDelta == 0) {
             return false
         }
+        if (selectedPath != activeEditorPathProvider(project)) {
+            return false
+        }
+        val projectKey = project.locationHash
+        val userActive = userScrollLatchByProject[projectKey] ?: false
+        val lastTop = lastSyncedEditorTopByProject[projectKey] ?: Double.NaN
+
+        if (userActive) {
+            // Latch Logic: If user is interacting with preview, only break the latch if editor moves significantly (> 3 lines)
+            val threshold = (lineHeightPx * 3).toDouble()
+            if (!lastTop.isNaN() && abs(editorTopPx - lastTop) < threshold) {
+                 return false
+            }
+            // Editor moved significantly, reset latch
+            userScrollLatchByProject[projectKey] = false
+        }
+
+        lastSyncedEditorTopByProject[projectKey] = editorTopPx
 
         val lastTyping = lastTypingTimestampByProject[project.locationHash] ?: 0L
         if (System.currentTimeMillis() - lastTyping < typingScrollGuardMs) {
             return false
         }
 
-        val activePath = activeEditorPathProvider(project) ?: return false
-        if (!isSamePath(activePath, selectedPath)) {
-            return false
-        }
-
-        val engine = syncEngine(project.locationHash)
+        val engine = syncEngine(projectKey)
         val scrollCommand = engine.onEditorScroll(
             document = document,
             lineHeightPx = lineHeightPx.coerceAtLeast(1),
@@ -1214,6 +1245,11 @@ interface PreviewContent {
      * Registers listener invoked when preview content is reloaded in-place.
      */
     fun setContentReloadListener(listener: (() -> Unit)?) = Unit
+
+    /**
+     * Registers listener invoked when user manually scrolls the preview.
+     */
+    fun setManualScrollListener(listener: ((Double) -> Unit)?) = Unit
 }
 
 private class JcefPreviewContent(
@@ -1223,11 +1259,13 @@ private class JcefPreviewContent(
     private val metricsQuery = JBCefJSQuery.create(browser)
     private val domSnapshotQuery = JBCefJSQuery.create(browser)
     private val domMutationQuery = JBCefJSQuery.create(browser)
+    private val manualScrollQuery = JBCefJSQuery.create(browser)
     private val setupProjectCreateQuery = JBCefJSQuery.create(browser)
     @Volatile private var pendingMetricsCallback: ((PreviewScrollMetrics?) -> Unit)? = null
     @Volatile private var pendingDomSnapshotCallback: ((PreviewDomSnapshot?) -> Unit)? = null
     @Volatile private var setupProjectCreateHandler: ((String) -> Unit)? = null
     @Volatile private var contentReloadListener: (() -> Unit)? = null
+    @Volatile private var manualScrollListener: ((Double) -> Unit)? = null
 
     override val component: JComponent = browser.component
 
@@ -1262,6 +1300,16 @@ private class JcefPreviewContent(
             null
         }
 
+        manualScrollQuery.addHandler { payload ->
+            val listener = manualScrollListener ?: return@addHandler null
+            val y = payload.toDoubleOrNull() ?: return@addHandler null
+            ApplicationManager.getApplication().invokeLater(
+                { listener(y) },
+                ModalityState.any(),
+            )
+            null
+        }
+
         setupProjectCreateQuery.addHandler { payload ->
             val handler = setupProjectCreateHandler ?: return@addHandler null
             val decoded = runCatching {
@@ -1283,6 +1331,7 @@ private class JcefPreviewContent(
                     }
                     injectScrollPersistenceScript(browser)
                     injectDomMutationObservers(browser)
+                    injectManualScrollObserver(browser)
                     val listener = contentReloadListener ?: return
                     ApplicationManager.getApplication().invokeLater(listener, ModalityState.any())
                 }
@@ -1402,6 +1451,43 @@ private class JcefPreviewContent(
         cefBrowser.executeJavaScript(script, cefBrowser.url ?: "", 0)
     }
 
+    private fun injectManualScrollObserver(cefBrowser: CefBrowser?) {
+        cefBrowser ?: return
+        val script = """
+            (function() {
+                if (window.__authordScrollObserverInstalled) {
+                    return;
+                }
+                window.__authordScrollObserverInstalled = true;
+
+                var emitScroll = function() {
+                    if (window.__authordIsSyncing) {
+                        return;
+                    }
+                    var root = document.scrollingElement || document.documentElement || document.body;
+                    if (!root) return;
+                    var y = root.scrollTop || window.scrollY || 0;
+                    ${manualScrollQuery.inject("y")};
+                };
+
+                // Debounce manual scroll events to avoid flooding the bridge
+                var timer = null;
+                window.addEventListener('scroll', function() {
+                    if (window.__authordIsSyncing) {
+                        return;
+                    }
+                    if (timer) {
+                        clearTimeout(timer);
+                    }
+                    timer = setTimeout(function() {
+                        emitScroll();
+                    }, 50);
+                }, { passive: true });
+            })();
+        """.trimIndent()
+        cefBrowser.executeJavaScript(script, cefBrowser.url ?: "", 0)
+    }
+
     /**
      * Loads preview content in the embedded Chromium browser.
      */
@@ -1415,6 +1501,10 @@ private class JcefPreviewContent(
             createProjectBridgeScript = setupProjectCreateQuery.inject("payload"),
         )
         loadHtml(html)
+    }
+
+    override fun setManualScrollListener(listener: ((Double) -> Unit)?) {
+        manualScrollListener = listener
     }
 
     /**
@@ -1442,14 +1532,15 @@ private class JcefPreviewContent(
                 
                 const target = totalHeight * targetProgress;
                 
-                const state = window.__authordPreviewSyncState || { raf: 0, target: 0 };
-                if (state.raf) {
-                    window.cancelAnimationFrame(state.raf);
-                    state.raf = 0;
+                window.__authordIsSyncing = true;
+                if (window.__authordSyncResetTimer) {
+                    clearTimeout(window.__authordSyncResetTimer);
                 }
-                
+                window.__authordSyncResetTimer = setTimeout(function() {
+                    window.__authordIsSyncing = false;
+                }, 50);
+
                 root.scrollTop = target;
-                window.__authordPreviewSyncState = state;
             })();
         """.trimIndent()
         executeScript(script)
@@ -1477,16 +1568,15 @@ private class JcefPreviewContent(
                 const maxScroll = Math.max(0, root.scrollHeight - window.innerHeight);
                 const safeTarget = Math.min(Math.max(effectiveTarget, 0), maxScroll);
                 
-                const state = window.__authordPreviewSyncState || { raf: 0, target: 0, lastToken: -1, untilMs: 0 };
-                if (state.raf) {
-                    window.cancelAnimationFrame(state.raf);
-                    state.raf = 0;
+                window.__authordIsSyncing = true;
+                if (window.__authordSyncResetTimer) {
+                    clearTimeout(window.__authordSyncResetTimer);
                 }
+                window.__authordSyncResetTimer = setTimeout(function() {
+                    window.__authordIsSyncing = false;
+                }, 50);
 
                 root.scrollTop = safeTarget;
-                state.lastToken = token;
-                state.untilMs = Date.now() + 120;
-                window.__authordPreviewSyncState = state;
             })();
         """.trimIndent()
         executeScript(script)
@@ -1689,7 +1779,8 @@ private class JcefPreviewContent(
     }
 
     private fun executeScript(script: String) {
-        browser.cefBrowser.executeJavaScript(script, "about:blank", 0)
+        val url = browser.cefBrowser.url ?: "about:blank"
+        browser.cefBrowser.executeJavaScript(script, url, 0)
     }
 
     private fun parseScrollMetricsPayload(payload: String?): PreviewScrollMetrics? {

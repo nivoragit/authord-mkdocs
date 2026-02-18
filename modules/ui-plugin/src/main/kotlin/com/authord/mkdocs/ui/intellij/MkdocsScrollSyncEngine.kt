@@ -322,7 +322,7 @@ internal class MkdocsScrollSyncEngine(
 
         val editorFocusY = editorScrollTopPx + editorViewportHeightPx * editorFocusRatio
         val mappedPreviewY = interpolate(activeState.knots, editorFocusY)
-            .coerceIn(0.0, activeState.maxPreviewScrollY)
+            .coerceIn(0.0, activeState.maxPreviewScrollY.coerceAtLeast(0.0))
 
         val lastSent = activeState.lastSentPreviewY
         if (lastSent.isFinite() && abs(mappedPreviewY - lastSent) < pixelHysteresisPx) {
@@ -358,7 +358,7 @@ internal class MkdocsScrollSyncEngine(
 
         val editorFocusY = editorScrollTopPx + editorViewportHeightPx * editorFocusRatio
         val ratio = (editorFocusY / totalEditorHeight).coerceIn(0.0, 1.0)
-        val mappedPreviewY = (ratio * current.maxPreviewScrollY).coerceIn(0.0, current.maxPreviewScrollY)
+        val mappedPreviewY = (ratio * current.maxPreviewScrollY).coerceIn(0.0, current.maxPreviewScrollY.coerceAtLeast(0.0))
         val lastSent = current.lastSentPreviewY
         if (lastSent.isFinite() && abs(mappedPreviewY - lastSent) < pixelHysteresisPx) {
             return null

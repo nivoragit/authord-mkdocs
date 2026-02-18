@@ -473,10 +473,10 @@ internal class TopicTreeWorkspacePanel(
     private fun buildInstancesOverflowMenu() {
         instancesOverflowMenu.removeAll()
     }
-
+    // todo 
     private fun buildTocContextMenu() {
         tocContextMenu.removeAll()
-        tocContextMenu.add(JMenuItem(uiMessage("topicTree.menu.newTopic")).apply { addActionListener { addRootTopic() } })
+        // tocContextMenu.add(JMenuItem(uiMessage("topicTree.menu.newTopic")).apply { addActionListener { addRootTopic() } })
         tocNewChildMenuItem = JMenuItem(uiMessage("topicTree.menu.newChildTopic")).apply { addActionListener { addChildTopic() } }
         tocContextMenu.add(tocNewChildMenuItem)
         tocEditTitleMenuItem = JMenuItem(uiMessage("topicTree.menu.editTitle")).apply { addActionListener { renameTopic() } }
@@ -484,7 +484,7 @@ internal class TopicTreeWorkspacePanel(
         tocRemoveMenuItem = JMenuItem(uiMessage("topicTree.menu.removeTocElement")).apply { addActionListener { removeTopic() } }
         tocContextMenu.add(tocRemoveMenuItem)
         tocSetHomePageMenuItem = JMenuItem(uiMessage("topicTree.menu.setAsHomePage")).apply { addActionListener { setAsHomePage() } }
-        tocContextMenu.add(tocSetHomePageMenuItem)
+        // tocContextMenu.add(tocSetHomePageMenuItem)
     }
 
     private fun maybeShowTocContextMenu(event: MouseEvent) {
@@ -950,8 +950,8 @@ internal class TopicTreeWorkspacePanel(
         tocNewChildMenuItem.isEnabled = hasNavSelection
         tocEditTitleMenuItem.isEnabled = hasMutableTocSelection
         tocRemoveMenuItem.isEnabled = hasMutableTocSelection
-        tocSetHomePageMenuItem.isEnabled = canSetAsHomePage()
-
+        // tocSetHomePageMenuItem.isEnabled = canSetAsHomePage()
+ // todo 
         instancesOverflowMenu.components
             .filterIsInstance<JMenuItem>()
             .forEachIndexed { index, menuItem ->
