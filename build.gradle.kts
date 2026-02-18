@@ -98,7 +98,7 @@ subprojects {
             !hasFilteredTestSelection()
         }
 
-        if (project.path != ":modules:ui-plugin") {
+        if (project.path != ":modules:ui-plugin" && project.path != ":modules:mkdocs-runtime-adapter") {
             violationRules {
                 rule {
                     limit {

@@ -214,6 +214,39 @@ class UvExecutableProviderCoverageTest {
     }
 
     @Test
+    fun `provider resolves windows common candidate from USERPROFILE`() {
+        val root = createTempDirectory(prefix = "uv-provider-userprofile-")
+        try {
+            withSystemProperties("os.name" to "Windows 11", "os.arch" to "amd64") {
+                val userProfile = root.resolve("user-profile")
+                val uv = userProfile.resolve(".cargo").resolve("bin").resolve("uv.exe")
+                uv.parent.createDirectories()
+                uv.writeText("userprofile-uv")
+                runCatching {
+                    val permissions = Files.getPosixFilePermissions(uv).toMutableSet()
+                    permissions += PosixFilePermission.OWNER_EXECUTE
+                    permissions += PosixFilePermission.GROUP_EXECUTE
+                    permissions += PosixFilePermission.OTHERS_EXECUTE
+                    Files.setPosixFilePermissions(uv, permissions)
+                }
+
+                val provider = ProjectManagedUvExecutableProvider(
+                    env = mapOf(
+                        "PATH" to "",
+                        "USERPROFILE" to userProfile.toString(),
+                    ),
+                    includeSystemFallbackCandidates = true,
+                )
+                val resolved = provider.resolve(root.toString())
+                assertTrue(resolved.success)
+                assertEquals(uv.toAbsolutePath().normalize().toString(), resolved.executablePath)
+            }
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `provider covers unsupported os and architecture targets`() {
         val root = createTempDirectory(prefix = "uv-provider-unsupported-")
         try {

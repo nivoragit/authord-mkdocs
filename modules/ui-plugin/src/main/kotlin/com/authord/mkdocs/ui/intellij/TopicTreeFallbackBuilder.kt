@@ -13,7 +13,7 @@ class TopicTreeFallbackBuilder(
      * Produces deterministic nav nodes from docs_dir markdown paths.
      */
     fun build(docsDir: String, docsMarkdownPaths: List<String>): List<TopicNavNode> {
-        val normalizedDocsDir = pathPolicy.normalize(docsDir).trim('/')
+        val normalizedDocsDir = pathPolicy.normalize(docsDir).trimEnd('/')
         val relativeMarkdownPaths = docsMarkdownPaths
             .mapNotNull { toRelativePath(normalizedDocsDir, it) }
             .distinctBy(pathPolicy::comparisonKey)

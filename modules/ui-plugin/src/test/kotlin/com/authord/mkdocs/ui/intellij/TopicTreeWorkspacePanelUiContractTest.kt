@@ -2,6 +2,8 @@ package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.topic.DefaultTopicSyncError
 import com.authord.mkdocs.ports.topic.InstanceRegistryPort
+import com.authord.mkdocs.ports.topic.AddChildTopicNodeCommand
+import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicInstanceRef
@@ -21,8 +23,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         val tooltips = panel.tooltipTextsForTest().toSet()
 
         listOf(
-            "Reload Configuration",
-            "New",
+            // "New", // disabled in UI
             "Delete",
             "Rename",
             "Root",
@@ -38,7 +39,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         val panel = panelWithDefaults()
 
         assertEquals(
-            listOf("New Instance", "Rename", "Delete"),
+            emptyList<String>(),
             panel.instancesOverflowMenuLabelsForTest(),
         )
         assertEquals(
@@ -56,11 +57,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         assertFalse(instanceStates.getValue("Rename"))
         assertFalse(instanceStates.getValue("Delete"))
         assertEquals(
-            listOf(
-                "New Instance" to true,
-                "Rename" to false,
-                "Delete" to false,
-            ),
+            emptyList<Pair<String, Boolean>>(),
             panel.instancesOverflowMenuStatesForTest(),
         )
 
@@ -74,7 +71,6 @@ class TopicTreeWorkspacePanelUiContractTest {
         assertTrue(tocWithSelection.getValue("Delete"))
 
         val headerVisibility = panel.headerActionVisibilityForTest()
-        assertTrue(headerVisibility.getValue("Reload Configuration"))
         assertTrue(headerVisibility.getValue("New"))
         assertTrue(headerVisibility.getValue("Collapse All"))
         assertTrue(headerVisibility.getValue("Root"))
@@ -93,7 +89,81 @@ class TopicTreeWorkspacePanelUiContractTest {
         assertTrue(uiService.dispatched.any { it is RemoveTopicNodeCommand })
     }
 
-    private fun panelWithDefaults(uiService: RecordingUiService = RecordingUiService()): TopicTreeWorkspacePanel {
+    @Test
+    fun `new child topic auto-generates markdown path when input left blank`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Install Guide", ""))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+        )
+        panel.render(sampleState())
+        assertTrue(panel.selectTreeNodeForTest("n2"))
+
+        val triggered = panel.triggerTocContextActionForTest("New Child Topic")
+
+        assertTrue(triggered)
+        val command = uiService.dispatched.filterIsInstance<AddChildTopicNodeCommand>().last()
+        assertEquals("guide/install-guide.md", command.childSourcePath)
+    }
+
+    @Test
+    fun `new root child topic auto-generates markdown path when input left blank`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Getting Started", ""))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+        )
+        panel.render(sampleState())
+        assertTrue(panel.selectTreeNodeForTest("root"))
+
+        val triggered = panel.triggerTocContextActionForTest("New Child Topic")
+
+        assertTrue(triggered)
+        val command = uiService.dispatched.filterIsInstance<AddChildTopicNodeCommand>().last()
+        assertEquals("getting-started.md", command.childSourcePath)
+    }
+
+    @Test
+    fun `fallback child topic auto-generates markdown path when input left blank`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Advanced", ""))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+        )
+        panel.render(sampleFallbackState())
+        assertTrue(panel.selectTreeNodeForTest("page:install.md"))
+
+        val triggered = panel.triggerTocContextActionForTest("New Child Topic")
+
+        assertTrue(triggered)
+        val command = uiService.dispatched.filterIsInstance<AddChildTopicNodeCommand>().last()
+        assertEquals("install/advanced.md", command.childSourcePath)
+    }
+
+    @Test
+    fun `new root topic action auto-generates markdown path when input left blank`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Getting Started", ""))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+        )
+        panel.render(sampleState())
+
+        val triggered = panel.triggerHeaderActionForTest("Root")
+
+        assertTrue(triggered)
+        val command = uiService.dispatched.filterIsInstance<AddTopicNodeCommand>().last()
+        assertEquals("getting-started.md", command.sourcePath)
+    }
+
+    private fun panelWithDefaults(
+        uiService: RecordingUiService = RecordingUiService(),
+        promptInputProvider: (title: String, message: String, initial: String?) -> String? = { _, _, _ -> null },
+    ): TopicTreeWorkspacePanel {
         val registry = RecordingInstanceRegistryPort(
             instances = mutableListOf(
                 TopicInstanceRef(
@@ -123,9 +193,10 @@ class TopicTreeWorkspacePanelUiContractTest {
         )
 
         return TopicTreeWorkspacePanel(
+            project = null,
             controllersProvider = { controllers },
             reconcileStateProvider = { sampleState() },
-            promptInputProvider = { _, _, _ -> null },
+            promptInputProvider = promptInputProvider,
         )
     }
 
@@ -150,6 +221,52 @@ class TopicTreeWorkspacePanelUiContractTest {
             destructiveChangesApplied = false,
             instanceId = "default",
         )
+    }
+
+    private fun sampleFallbackState(): StartupTreeState {
+        return StartupTreeState(
+            source = StartupTreeSource.FALLBACK,
+            nodes = listOf(
+                com.authord.mkdocs.ports.topic.TopicNavNode(
+                    nodeId = "page:index.md",
+                    title = "Index",
+                    path = "index.md",
+                ),
+                com.authord.mkdocs.ports.topic.TopicNavNode(
+                    nodeId = "page:install.md",
+                    title = "Install",
+                    path = "install.md",
+                ),
+            ),
+            navOrderedPaths = listOf("index.md", "install.md"),
+            unlinkedPaths = emptyList(),
+            validationIssues = emptyList(),
+            destructiveChangesApplied = false,
+            instanceId = "default",
+        )
+    }
+    @Test
+    fun `resolves absolute file path using active instance docs dir`() {
+        val panel = panelWithDefaults()
+        panel.render(sampleState())
+
+        val node = com.authord.mkdocs.ports.topic.TopicNavNode(
+            nodeId = "n2",
+            title = "Guide",
+            path = "guide/index.md",
+        )
+        // We need to simulate the view object being passed to resolveFilePath
+        val view = TopicTreeNodeView(
+            nodeId = node.nodeId,
+            title = node.title,
+            parentNodeId = "root",
+            path = node.path,
+        )
+
+        val resolved = panel.resolveFilePath(view)
+
+        // The default instance in panelWithDefaults has docsDirPath = "/tmp/project/docs"
+        assertEquals("/tmp/project/docs/guide/index.md", resolved)
     }
 }
 

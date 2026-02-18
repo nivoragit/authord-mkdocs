@@ -16,9 +16,6 @@ import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream
 import kotlin.io.path.exists
 import kotlin.io.path.isExecutable
 
-/** API version for `uv` executable provider seam. */
-const val UV_EXECUTABLE_PROVIDER_API_VERSION: String = "1.0.0"
-
 /**
  * Result envelope for resolving a runnable `uv` executable path.
  */
@@ -30,8 +27,6 @@ data class UvExecutableResult(
 
 /**
  * Resolves an executable `uv` binary for runtime bootstrap and command execution.
- *
- * API Version: [UV_EXECUTABLE_PROVIDER_API_VERSION]
  */
 fun interface UvExecutableProvider {
     /**
@@ -302,7 +297,7 @@ class ProjectManagedUvExecutableProvider(
     }
 
     private fun commonInstallCandidates(): List<Path> {
-        val home = env["HOME"]?.takeIf { it.isNotBlank() }
+        val home = userHomePath()
         val candidates = mutableListOf<Path>()
         val executableName = if (isWindows()) "uv.exe" else "uv"
 
@@ -318,6 +313,25 @@ class ProjectManagedUvExecutableProvider(
         }
 
         return candidates
+    }
+
+    private fun userHomePath(): String? {
+        val unixHome = env["HOME"]?.takeIf { it.isNotBlank() }
+        if (unixHome != null) {
+            return unixHome
+        }
+
+        val userProfile = env["USERPROFILE"]?.takeIf { it.isNotBlank() }
+        if (userProfile != null) {
+            return userProfile
+        }
+
+        val homeDrive = env["HOMEDRIVE"]?.takeIf { it.isNotBlank() }
+        val homePath = env["HOMEPATH"]?.takeIf { it.isNotBlank() }
+        if (homeDrive != null && homePath != null) {
+            return homeDrive + homePath
+        }
+        return null
     }
 
     private fun Path.normalizeOrNull(): Path? = runCatching { toAbsolutePath().normalize() }.getOrNull()

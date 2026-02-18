@@ -1,6 +1,7 @@
 package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.topic.InstanceRegistryPort
+import com.authord.mkdocs.ports.topic.MkDocsConfigDocument
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.ports.topic.TopicSyncOutcome
@@ -24,5 +25,18 @@ class TopicTreeApplicationServiceImpl(
 
     override fun activeInstance(): TopicGatewayResult<TopicInstanceRef?> {
         return instanceRegistryPort.activeInstance()
+    }
+
+    override fun hydrateTreeFromConfig(
+        treeId: String,
+        instanceId: String,
+        config: MkDocsConfigDocument,
+    ): TopicGatewayResult<Unit> {
+        (orchestrator as? TopicTreeSyncOrchestratorService)?.hydrateAggregateFromConfig(
+            treeId = treeId,
+            instanceId = instanceId,
+            config = config,
+        )
+        return TopicGatewayResult.Success(Unit)
     }
 }

@@ -11,7 +11,7 @@ import kotlin.test.fail
 
 class DeleteSemanticsPolicyTest {
     @Test
-    fun `recoverable delete moves markdown file into recovery location`() {
+    fun `recoverable delete with default trash strategy removes markdown safely`() {
         val projectRoot = Files.createTempDirectory("delete-policy")
         val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
         val filePath = docsDir.resolve("guide/page.md")
@@ -20,6 +20,53 @@ class DeleteSemanticsPolicyTest {
 
         val instance = TopicInstanceRef("default", projectRoot.resolve("mkdocs.yml").toString(), docsDir.toString())
         val gateway = DocsFileGatewayAdapter()
+
+        val deletePath = requireSuccess(
+            gateway.deleteMarkdownFile(instance, "guide/page.md", TopicDeleteMode.RECOVERABLE),
+        )
+
+        assertFalse(Files.exists(filePath))
+        if (deletePath.startsWith(".recovery/")) {
+            assertTrue(Files.exists(docsDir.resolve(deletePath)))
+        } else {
+            assertTrue(deletePath.endsWith("guide/page.md"))
+        }
+    }
+
+    @Test
+    fun `recoverable delete uses system trash path when available`() {
+        val projectRoot = Files.createTempDirectory("delete-policy")
+        val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
+        val filePath = docsDir.resolve("guide/page.md")
+        Files.createDirectories(filePath.parent)
+        Files.writeString(filePath, "# page")
+
+        val instance = TopicInstanceRef("default", projectRoot.resolve("mkdocs.yml").toString(), docsDir.toString())
+        val gateway = DocsFileGatewayAdapter(
+            trashMover = { path ->
+                Files.delete(path)
+                true
+            },
+        )
+
+        val deletedPath = requireSuccess(
+            gateway.deleteMarkdownFile(instance, "guide/page.md", TopicDeleteMode.RECOVERABLE),
+        )
+
+        assertFalse(Files.exists(filePath))
+        assertTrue(deletedPath.endsWith("guide/page.md"))
+    }
+
+    @Test
+    fun `recoverable delete falls back to recovery location when system trash unavailable`() {
+        val projectRoot = Files.createTempDirectory("delete-policy")
+        val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
+        val filePath = docsDir.resolve("guide/page.md")
+        Files.createDirectories(filePath.parent)
+        Files.writeString(filePath, "# page")
+
+        val instance = TopicInstanceRef("default", projectRoot.resolve("mkdocs.yml").toString(), docsDir.toString())
+        val gateway = DocsFileGatewayAdapter(trashMover = { false })
 
         val recoveryPath = requireSuccess(
             gateway.deleteMarkdownFile(instance, "guide/page.md", TopicDeleteMode.RECOVERABLE),
@@ -39,7 +86,7 @@ class DeleteSemanticsPolicyTest {
         Files.writeString(filePath, "# page")
 
         val instance = TopicInstanceRef("default", projectRoot.resolve("mkdocs.yml").toString(), docsDir.toString())
-        val gateway = DocsFileGatewayAdapter()
+        val gateway = DocsFileGatewayAdapter(trashMover = { false })
 
         val returnedPath = requireSuccess(
             gateway.deleteMarkdownFile(instance, "guide/page.md", TopicDeleteMode.NAV_ONLY),

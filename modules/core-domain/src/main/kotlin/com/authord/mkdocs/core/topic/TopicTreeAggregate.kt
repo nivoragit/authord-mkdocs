@@ -10,6 +10,8 @@ import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RenameTopicNodeCommand
 import com.authord.mkdocs.ports.topic.ReorderTopicNodesCommand
 import com.authord.mkdocs.ports.topic.ReparentTopicNodeCommand
+import com.authord.mkdocs.ports.topic.TopicNavNode
+import com.authord.mkdocs.ports.topic.TopicTreeAggregateBootstrapPort
 import com.authord.mkdocs.ports.topic.TopicTreeCommand
 import com.authord.mkdocs.ports.topic.TopicTreeCommandResult
 import com.authord.mkdocs.ports.topic.TopicTreeCommandStatus
@@ -77,6 +79,56 @@ class TopicTreeAggregate(
      * Returns a point-in-time node snapshot.
      */
     fun snapshot(): List<TopicNode> = nodes.values.toList()
+
+    /**
+     * Bootstraps aggregate state from MkDocs nav content when the aggregate is still root-only.
+     */
+    fun bootstrapFromNav(nav: List<TopicNavNode>) {
+        if (nodes.size != 1) {
+            return
+        }
+
+        fun visit(parentNodeId: String, children: List<TopicNavNode>) {
+            children.forEachIndexed { index, navNode ->
+                if (navNode.nodeId == rootNodeId) {
+                    visit(rootNodeId, navNode.children)
+                    return@forEachIndexed
+                }
+                if (nodes.containsKey(navNode.nodeId)) {
+                    return@forEachIndexed
+                }
+
+                val normalizedPath = navNode.path
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+                    ?.replace('\\', '/')
+                    ?.trimStart('/')
+                val normalizedExternal = navNode.externalUrl
+                    ?.trim()
+                    ?.takeIf { it.isNotEmpty() }
+
+                val kind = when {
+                    normalizedExternal != null -> TopicNodeKind.EXTERNAL_LINK
+                    normalizedPath == null -> TopicNodeKind.SECTION
+                    else -> TopicNodeKind.PAGE
+                }
+
+                nodes[navNode.nodeId] = TopicNode(
+                    nodeId = navNode.nodeId,
+                    parentNodeId = parentNodeId,
+                    title = navNode.title,
+                    orderIndex = index,
+                    kind = kind,
+                    sourcePath = if (kind == TopicNodeKind.PAGE) normalizedPath else null,
+                    externalUrl = if (kind == TopicNodeKind.EXTERNAL_LINK) normalizedExternal else null,
+                )
+
+                visit(navNode.nodeId, navNode.children)
+            }
+        }
+
+        visit(rootNodeId, nav)
+    }
 
     /**
      * Executes one mutation/validation command and returns the result envelope.
@@ -413,12 +465,20 @@ class TopicTreeAggregate(
  */
 class TopicTreeMutationService(
     private val aggregateByTreeId: MutableMap<String, TopicTreeAggregate> = mutableMapOf(),
-) : TopicTreePort {
+) : TopicTreePort, TopicTreeAggregateBootstrapPort {
     /**
      * Executes command against a tree aggregate, creating aggregate state on first access.
      */
     override fun execute(command: TopicTreeCommand): TopicTreeCommandResult {
         val aggregate = aggregateByTreeId.getOrPut(command.treeId) { TopicTreeAggregate(command.treeId) }
         return aggregate.apply(command)
+    }
+
+    /**
+     * Seeds one aggregate from persisted nav when the aggregate is not yet initialized.
+     */
+    override fun bootstrapTreeFromNav(treeId: String, nav: List<TopicNavNode>) {
+        val aggregate = aggregateByTreeId.getOrPut(treeId) { TopicTreeAggregate(treeId) }
+        aggregate.bootstrapFromNav(nav)
     }
 }

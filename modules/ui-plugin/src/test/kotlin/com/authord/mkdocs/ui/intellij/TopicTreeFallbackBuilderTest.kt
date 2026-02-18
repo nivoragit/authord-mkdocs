@@ -37,4 +37,21 @@ class TopicTreeFallbackBuilderTest {
         val guide = tree.first { it.title == "Guide" }
         assertEquals(listOf("guide/advanced.md", "guide/install.md"), guide.children.map { it.path })
     }
+
+    @Test
+    fun `supports absolute docs dir with absolute markdown paths`() {
+        val builder = TopicTreeFallbackBuilder()
+        val tree = builder.build(
+            docsDir = "/tmp/project/docs",
+            docsMarkdownPaths = listOf(
+                "/tmp/project/docs/index.md",
+                "/tmp/project/docs/guide/install.md",
+            ),
+        )
+
+        assertEquals(listOf("Guide", "Index"), tree.map { it.title })
+        assertEquals(listOf("guide/install.md", "index.md"), tree.flatMap { node ->
+            if (node.path != null) listOf(node.path!!) else node.children.mapNotNull { it.path }
+        })
+    }
 }

@@ -41,7 +41,7 @@ class PartialSyncZeroStateIntegrationTest {
         val orchestrator = TopicTreeSyncOrchestratorService(
             topicTreePort = SuccessfulTopicTreePortForIntegration(),
             mkDocsConfigGateway = MkDocsYamlGateway(),
-            docsFileGateway = DocsFileGatewayAdapter(),
+            docsFileGateway = DocsFileGatewayAdapter(trashMover = { false }),
         )
 
         val transaction = TopicSyncTransaction(

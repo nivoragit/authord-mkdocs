@@ -35,12 +35,14 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
 
             val map = (root as? Map<*, *>) ?: emptyMap<String, Any>()
             val docsDir = map["docs_dir"]?.toString()?.trim().orEmpty().ifBlank { "docs" }
+            val navPresent = map.containsKey("nav")
             val nav = parseNav(map["nav"], "n")
             val notInNav = parseStringList(map["not_in_nav"])
             MkDocsConfigDocument(
                 docsDir = docsDir,
                 nav = nav,
                 notInNav = notInNav,
+                navPresent = navPresent,
             )
         }.fold(
             onSuccess = { TopicGatewayResult.Success(it) },
@@ -92,9 +94,11 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
             // Use linked insertion order so equivalent logical content serializes with stable key
             // ordering across repeated save cycles.
             val root = linkedMapOf<String, Any>(
-                "docs_dir" to document.docsDir,
-                "nav" to serializeNav(document.nav),
+                "docs_dir" to "docs",
             )
+            if (document.navPresent) {
+                root["nav"] = serializeNav(document.nav)
+            }
             if (document.notInNav.isNotEmpty()) {
                 // Normalize + sort to avoid churn from path separator or input ordering variance.
                 root["not_in_nav"] = document.notInNav

@@ -1,26 +1,14 @@
 package com.authord.mkdocs.runtime
 
-import org.yaml.snakeyaml.Yaml
 import java.nio.file.Files
 import java.nio.file.Path
+import java.security.MessageDigest
 import kotlin.io.path.exists
 
-/** API version for runtime command-runner seam. */
-const val COMMAND_RUNNER_API_VERSION: String = "1.0.0"
-
 /**
- * Command runner contract used by runtime bootstrap orchestration.
- *
- * API Version: [COMMAND_RUNNER_API_VERSION]
+ * Runs a process command in a given working directory.
  */
 fun interface CommandRunner {
-    /**
-     * Runs a process command in the given working directory path.
-     *
-     * @param command tokenized command list.
-     * @param workingDir absolute or project-relative working directory string.
-     * @return process execution details.
-     */
     fun run(command: List<String>, workingDir: String): CommandResult
 }
 
@@ -48,6 +36,10 @@ data class BootstrapResult(
 /**
  * Bootstraps a plugin-managed runtime using `uv` and installs `mkdocs`.
  *
+ * Uses `mkdocs get-deps` to automatically discover and install all
+ * dependencies declared in the project's `mkdocs.yml`, eliminating
+ * the need for manual package name mappings.
+ *
  * Usage:
  * - Call once per activation attempt.
  * - Repeated calls for same project path skip duplicate setup.
@@ -56,10 +48,6 @@ class UvBootstrapService(
     private val commandRunner: CommandRunner,
     private val uvExecutableProvider: UvExecutableProvider,
 ) {
-    companion object {
-        private val builtinPluginNames = setOf("search")
-    }
-
     /**
      * Backward-compatible constructor that defaults to shell `uv` resolution.
      */
@@ -68,10 +56,16 @@ class UvBootstrapService(
         uvExecutableProvider = StaticUvExecutableProvider(),
     )
 
-    private val bootstrappedProjectPackages = mutableMapOf<String, Set<String>>()
+    private val bootstrappedProjectHashes = mutableMapOf<String, String>()
 
     /**
      * Ensures project runtime exists and required packages are installed.
+     *
+     * The bootstrap process:
+     * 1. Creates a virtual environment (if needed).
+     * 2. Installs `mkdocs` (base package) and any `requirements.txt`.
+     * 3. Runs `mkdocs get-deps` to discover all dependencies from `mkdocs.yml`.
+     * 4. Installs the discovered dependencies.
      *
      * @param projectPath root project path.
      * @return bootstrap status, executed commands, and error details on failure.
@@ -91,10 +85,11 @@ class UvBootstrapService(
             )
         }
         val uvExecutable = uvResolution.executablePath
-        val requiredPackages = resolveRequiredPackages(projectPath)
-        val cachedPackages = bootstrappedProjectPackages[projectPath]
 
-        if (cachedPackages != null && cachedPackages.containsAll(requiredPackages)) {
+        // Check cache: skip if config hasn't changed
+        val currentHash = computeConfigHash(projectPath)
+        val cachedHash = bootstrappedProjectHashes[projectPath]
+        if (cachedHash != null && cachedHash == currentHash && runtimeDirectory.exists()) {
             return BootstrapResult(
                 success = true,
                 runtimePath = runtimePath,
@@ -104,12 +99,9 @@ class UvBootstrapService(
             )
         }
 
-        val installCommand = buildList {
-            addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath))
-            addAll(requiredPackages)
-        }
         val executed = mutableListOf<List<String>>()
 
+        // Step 1: Create venv if needed
         if (!runtimeDirectory.exists()) {
             val setupCommand = listOf(uvExecutable, "venv", runtimePath)
             val setupResult = commandRunner.run(setupCommand, projectPath)
@@ -126,20 +118,65 @@ class UvBootstrapService(
             }
         }
 
-        val installResult = commandRunner.run(installCommand, projectPath)
-        executed += installCommand
-        if (installResult.exitCode != 0) {
+        // Step 2: Install mkdocs base package (+ requirements.txt if present)
+        val baseInstallCommand = buildList {
+            addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath, "mkdocs"))
+            val requirementsFile = resolveRequirementsPath(projectPath)
+            if (requirementsFile != null) {
+                add("-r")
+                add(requirementsFile.toString())
+            }
+        }
+        val baseInstallResult = commandRunner.run(baseInstallCommand, projectPath)
+        executed += baseInstallCommand
+        if (baseInstallResult.exitCode != 0) {
             return BootstrapResult(
                 success = false,
                 runtimePath = runtimePath,
                 uvExecutablePath = uvExecutable,
                 executedCommands = executed,
                 skipped = false,
-                errorMessage = installResult.stderr.ifBlank { "Failed to install mkdocs" },
+                errorMessage = baseInstallResult.stderr.ifBlank { "Failed to install mkdocs" },
             )
         }
 
-        bootstrappedProjectPackages[projectPath] = requiredPackages.toSet()
+        // Step 3: Run `mkdocs get-deps` to discover all required packages
+        val pythonPath = resolveVenvPython(runtimeDirectory)
+        val getDepsCommand = listOf(pythonPath, "-m", "mkdocs", "get-deps")
+        val getDepsResult = commandRunner.run(getDepsCommand, projectPath)
+        executed += getDepsCommand
+
+        // Step 4: Install discovered dependencies (if any)
+        if (getDepsResult.exitCode == 0) {
+            val discoveredDeps = getDepsResult.stdout
+                .lines()
+                .map { it.trim() }
+                .filter { it.isNotBlank() }
+                .distinct()
+
+            if (discoveredDeps.isNotEmpty()) {
+                val depsInstallCommand = buildList {
+                    addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath))
+                    addAll(discoveredDeps)
+                }
+                val depsInstallResult = commandRunner.run(depsInstallCommand, projectPath)
+                executed += depsInstallCommand
+                if (depsInstallResult.exitCode != 0) {
+                    return BootstrapResult(
+                        success = false,
+                        runtimePath = runtimePath,
+                        uvExecutablePath = uvExecutable,
+                        executedCommands = executed,
+                        skipped = false,
+                        errorMessage = depsInstallResult.stderr.ifBlank { "Failed to install mkdocs dependencies" },
+                    )
+                }
+            }
+        }
+        // If get-deps fails (e.g., bad config), we still succeed with just mkdocs installed.
+        // The user will see the MkDocs error when they try to serve.
+
+        bootstrappedProjectHashes[projectPath] = currentHash
         return BootstrapResult(
             success = true,
             runtimePath = runtimePath,
@@ -158,86 +195,36 @@ class UvBootstrapService(
         return "virtual environment already exists" in normalized || "already exists at" in normalized
     }
 
-    private fun resolveRequiredPackages(projectPath: String): List<String> {
-        val packages = mutableListOf("mkdocs")
-        val config = loadMkdocsConfig(projectPath)
-        if (usesMaterialTheme(config)) {
-            packages += "mkdocs-material"
+    private fun resolveVenvPython(runtimeDirectory: Path): String {
+        // On Windows, python is at <venv>/Scripts/python.exe
+        val winPython = runtimeDirectory.resolve("Scripts").resolve("python.exe")
+        if (winPython.exists()) {
+            return winPython.toString()
         }
-        packages += resolvePluginPackages(config)
-        return packages.distinct()
+        // On macOS/Linux (or fallback), python is at <venv>/bin/python
+        return runtimeDirectory.resolve("bin").resolve("python").toString()
     }
 
-    private fun loadMkdocsConfig(projectPath: String): Map<*, *>? {
-        val configPath = resolveMkdocsConfigPath(projectPath) ?: return null
-        return runCatching {
-            Files.newBufferedReader(configPath).use { reader ->
-                Yaml().load<Any?>(reader)
-            } as? Map<*, *>
-        }.getOrNull()
+    private fun resolveRequirementsPath(projectPath: String): Path? {
+        val requirements = Path.of(projectPath).resolve("requirements.txt")
+        return if (requirements.exists()) requirements else null
     }
 
-    private fun usesMaterialTheme(config: Map<*, *>?): Boolean {
-        val rawTheme = config?.get("theme") ?: return false
-        return when (rawTheme) {
-            is String -> isMaterialValue(rawTheme)
-            is Map<*, *> -> isMaterialValue(rawTheme["name"]?.toString().orEmpty())
-            else -> false
+    /**
+     * Computes a hash of the project's mkdocs config and requirements to
+     * determine if a re-bootstrap is needed.
+     */
+    private fun computeConfigHash(projectPath: String): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+        val configPath = resolveMkdocsConfigPath(projectPath)
+        if (configPath != null && Files.isRegularFile(configPath)) {
+            digest.update(Files.readAllBytes(configPath))
         }
-    }
-
-    private fun resolvePluginPackages(config: Map<*, *>?): List<String> {
-        val pluginNames = extractPluginNames(config?.get("plugins"))
-        return pluginNames.mapNotNull(::pluginPackageFor).distinct()
-    }
-
-    private fun extractPluginNames(rawPlugins: Any?): List<String> {
-        return when (rawPlugins) {
-            null -> emptyList()
-            is String -> listOfNotNull(normalizePluginName(rawPlugins))
-            is List<*> -> rawPlugins.flatMap { entry ->
-                when (entry) {
-                    is String -> listOfNotNull(normalizePluginName(entry))
-                    is Map<*, *> -> entry.keys.mapNotNull { key -> normalizePluginName(key?.toString().orEmpty()) }
-                    else -> emptyList()
-                }
-            }
-
-            is Map<*, *> -> rawPlugins.keys.mapNotNull { key -> normalizePluginName(key?.toString().orEmpty()) }
-            else -> emptyList()
+        val requirementsPath = resolveRequirementsPath(projectPath)
+        if (requirementsPath != null && Files.isRegularFile(requirementsPath)) {
+            digest.update(Files.readAllBytes(requirementsPath))
         }
-    }
-
-    private fun pluginPackageFor(pluginName: String): String? {
-        val normalizedName = pluginName.replace('_', '-')
-        if (normalizedName in builtinPluginNames) {
-            return null
-        }
-        if (normalizedName.startsWith("mkdocs-")) {
-            return normalizedName
-        }
-        return "mkdocs-$normalizedName"
-    }
-
-    private fun isMaterialValue(rawValue: String): Boolean {
-        val normalized = rawValue
-            .removePrefix("\"")
-            .removeSuffix("\"")
-            .removePrefix("'")
-            .removeSuffix("'")
-            .trim()
-        return normalized == "material"
-    }
-
-    private fun normalizePluginName(rawValue: String): String? {
-        val normalized = rawValue
-            .removePrefix("\"")
-            .removeSuffix("\"")
-            .removePrefix("'")
-            .removeSuffix("'")
-            .trim()
-            .lowercase()
-        return normalized.ifBlank { null }
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
     }
 
     private fun resolveMkdocsConfigPath(projectPath: String): Path? {

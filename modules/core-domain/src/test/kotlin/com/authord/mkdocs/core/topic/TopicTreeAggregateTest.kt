@@ -6,6 +6,7 @@ import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RenameTopicNodeCommand
 import com.authord.mkdocs.ports.topic.ReorderTopicNodesCommand
 import com.authord.mkdocs.ports.topic.ReparentTopicNodeCommand
+import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.authord.mkdocs.ports.topic.TopicTreeCommandStatus
 import com.authord.mkdocs.ports.topic.ValidateTopicTreeCommand
 import kotlin.test.Test
@@ -350,6 +351,142 @@ class TopicTreeAggregateTest {
         )
 
         assertEquals(TopicTreeCommandStatus.SUCCESS, result.status)
+    }
+
+    @Test
+    fun `mutation service bootstrap seeds persisted nav nodes for existing-topic mutations`() {
+        val service = TopicTreeMutationService()
+        service.bootstrapTreeFromNav(
+            treeId = "tree-bootstrap",
+            nav = listOf(
+                TopicNavNode(
+                    nodeId = "n-existing",
+                    title = "Existing",
+                    path = "existing.md",
+                ),
+            ),
+        )
+
+        val rename = service.execute(
+            RenameTopicNodeCommand(
+                commandId = "rename-existing",
+                treeId = "tree-bootstrap",
+                nodeId = "n-existing",
+                newTitle = "Existing Updated",
+            ),
+        )
+
+        assertEquals(TopicTreeCommandStatus.SUCCESS, rename.status)
+    }
+
+    @Test
+    fun `mutation service bootstrap is idempotent once aggregate has active nodes`() {
+        val service = TopicTreeMutationService()
+        service.bootstrapTreeFromNav(
+            treeId = "tree-bootstrap-idempotent",
+            nav = listOf(
+                TopicNavNode(
+                    nodeId = "n-existing",
+                    title = "Existing",
+                    path = "existing.md",
+                ),
+            ),
+        )
+        val created = service.execute(
+            AddTopicNodeCommand(
+                commandId = "add-session-node",
+                treeId = "tree-bootstrap-idempotent",
+                parentNodeId = "root",
+                nodeId = "n-session",
+                title = "Session Node",
+                orderIndex = 1,
+            ),
+        )
+        assertEquals(TopicTreeCommandStatus.SUCCESS, created.status)
+
+        service.bootstrapTreeFromNav(
+            treeId = "tree-bootstrap-idempotent",
+            nav = listOf(
+                TopicNavNode(
+                    nodeId = "n-other",
+                    title = "Other",
+                    path = "other.md",
+                ),
+            ),
+        )
+
+        val renameSession = service.execute(
+            RenameTopicNodeCommand(
+                commandId = "rename-session-node",
+                treeId = "tree-bootstrap-idempotent",
+                nodeId = "n-session",
+                newTitle = "Session Node Updated",
+            ),
+        )
+        assertEquals(TopicTreeCommandStatus.SUCCESS, renameSession.status)
+    }
+
+    @Test
+    fun `aggregate bootstrap maps section page and external nodes from nav`() {
+        val aggregate = TopicTreeAggregate("tree-bootstrap-kind-matrix")
+
+        aggregate.bootstrapFromNav(
+            nav = listOf(
+                TopicNavNode(
+                    nodeId = "root",
+                    title = "Root Wrapper",
+                    children = listOf(
+                        TopicNavNode(
+                            nodeId = "section-node",
+                            title = "Section",
+                            children = listOf(
+                                TopicNavNode(
+                                    nodeId = "page-node",
+                                    title = "Page",
+                                    path = "guides/page.md",
+                                ),
+                                TopicNavNode(
+                                    nodeId = "external-node",
+                                    title = "External",
+                                    externalUrl = "https://example.com/docs",
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val snapshot = aggregate.snapshot().associateBy { it.nodeId }
+        assertEquals(TopicNodeKind.SECTION, snapshot.getValue("section-node").kind)
+        assertEquals(TopicNodeKind.PAGE, snapshot.getValue("page-node").kind)
+        assertEquals("guides/page.md", snapshot.getValue("page-node").sourcePath)
+        assertEquals(TopicNodeKind.EXTERNAL_LINK, snapshot.getValue("external-node").kind)
+        assertEquals("https://example.com/docs", snapshot.getValue("external-node").externalUrl)
+    }
+
+    @Test
+    fun `aggregate bootstrap ignores duplicate nav node ids`() {
+        val aggregate = TopicTreeAggregate("tree-bootstrap-duplicates")
+
+        aggregate.bootstrapFromNav(
+            nav = listOf(
+                TopicNavNode(
+                    nodeId = "dup-node",
+                    title = "First",
+                    path = "first.md",
+                ),
+                TopicNavNode(
+                    nodeId = "dup-node",
+                    title = "Second",
+                    path = "second.md",
+                ),
+            ),
+        )
+
+        val duplicateNodes = aggregate.snapshot().filter { it.nodeId == "dup-node" }
+        assertEquals(1, duplicateNodes.size)
+        assertEquals("First", duplicateNodes.single().title)
     }
 
     @Suppress("UNCHECKED_CAST")

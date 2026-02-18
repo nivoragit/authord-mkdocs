@@ -84,12 +84,11 @@ class TopicTreeStartupLoader(
     }
 
     private fun toRelativePath(docsDir: String, docsPath: String): String? {
-        val normalizedDocsDir = pathPolicy.normalize(docsDir).trim('/')
+        val normalizedDocsDir = pathPolicy.normalize(docsDir).trimEnd('/')
         val normalizedPath = pathPolicy.normalize(docsPath)
         val prefix = "$normalizedDocsDir/"
         return when {
             normalizedPath.startsWith(prefix) -> normalizedPath.removePrefix(prefix)
-            normalizedPath.startsWith("$normalizedDocsDir\\") -> normalizedPath.removePrefix("$normalizedDocsDir\\")
             normalizedPath.endsWith(".md") && !normalizedPath.contains('/') -> normalizedPath
             else -> null
         }

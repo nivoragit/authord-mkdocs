@@ -19,6 +19,7 @@ import com.authord.mkdocs.ports.topic.TopicFileOperation
 import com.authord.mkdocs.ports.topic.TopicFileOperationKind
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicNavNode
+import com.authord.mkdocs.ports.topic.TopicTreeAggregateBootstrapPort
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
 import com.authord.mkdocs.ports.topic.TopicSyncOutcome
 import com.authord.mkdocs.ports.topic.TopicSyncTransaction
@@ -54,6 +55,16 @@ class TopicTreeSyncOrchestratorService(
      * Applies one topic-sync transaction and returns apply/rollback/compensation metadata.
      */
     override fun apply(transaction: TopicSyncTransaction): TopicGatewayResult<TopicSyncOutcome> {
+        val config = when (val loaded = configDocumentFor(transaction)) {
+            is TopicGatewayResult.Success -> loaded.value
+            is TopicGatewayResult.Failure -> return loaded
+        }
+        hydrateAggregateFromConfig(
+            treeId = transaction.command.treeId,
+            instanceId = transaction.instance.instanceId,
+            config = config,
+        )
+
         val commandResult = topicTreePort.execute(transaction.command)
         if (commandResult.status != TopicTreeCommandStatus.SUCCESS) {
             val code = if (commandResult.status == TopicTreeCommandStatus.REJECTED) {
@@ -65,28 +76,27 @@ class TopicTreeSyncOrchestratorService(
                 DefaultTopicSyncError(code, "Topic command failed: ${commandResult.message}"),
             )
         }
-
-        val config = when (val loaded = configDocumentFor(transaction)) {
-            is TopicGatewayResult.Success -> loaded.value
-            is TopicGatewayResult.Failure -> return loaded
-        }
         val mutation = when (val mutated = applyCommandToConfig(config, transaction.command)) {
             is TopicGatewayResult.Success -> mutated.value
             is TopicGatewayResult.Failure -> return mutated
         }
 
-        // Keep nav/config persistence ahead of file mutations so a file operation failure can be
-        // compensated without losing canonical navigation intent.
-        when (val write = mkDocsConfigGateway.writeConfig(transaction.instance, mutation.document)) {
-            is TopicGatewayResult.Failure -> return write
-            is TopicGatewayResult.Success -> Unit
+        // In no-nav mode we treat filesystem hierarchy as the source of truth and avoid writing
+        // synthetic nav content into mkdocs.yml.
+        if (config.navPresent) {
+            // Keep nav/config persistence ahead of file mutations so a file operation failure can
+            // be compensated without losing canonical navigation intent.
+            when (val write = mkDocsConfigGateway.writeConfig(transaction.instance, mutation.document)) {
+                is TopicGatewayResult.Failure -> return write
+                is TopicGatewayResult.Success -> Unit
+            }
         }
         configStateByInstanceId[transaction.instance.instanceId] = mutation.document
 
         // Compensation is pushed in execution order and popped in reverse order (LIFO), mirroring
         // transaction semantics for create/rename/move undo paths.
         val compensationStack = ArrayDeque<() -> TopicGatewayResult<*>>()
-        val allFileOperations = transaction.fileOperations + mutation.fileOperations
+        val allFileOperations = (transaction.fileOperations + mutation.fileOperations).distinct()
         for (operation in allFileOperations) {
             when (val applyResult = applyFileOperation(transaction, operation)) {
                 is TopicGatewayResult.Success -> compensationStack.addFirst(compensationFor(transaction, operation))
@@ -114,6 +124,18 @@ class TopicTreeSyncOrchestratorService(
         )
         transactionOutcomes[transaction.transactionId] = outcome
         return TopicGatewayResult.Success(outcome)
+    }
+
+    internal fun hydrateAggregateFromConfig(
+        treeId: String,
+        instanceId: String,
+        config: MkDocsConfigDocument,
+    ) {
+        configStateByInstanceId[instanceId] = config
+        (topicTreePort as? TopicTreeAggregateBootstrapPort)?.bootstrapTreeFromNav(
+            treeId = treeId,
+            nav = config.nav,
+        )
     }
 
     /**
@@ -172,15 +194,15 @@ class TopicTreeSyncOrchestratorService(
         document: MkDocsConfigDocument,
         command: AddTopicNodeCommand,
     ): TopicGatewayResult<ConfigMutationResult> {
+        val resolvedPath = normalizePath(command.sourcePath)
+            ?: derivePathForNewNode(document, command.parentNodeId, command.title)
         val node = TopicNavNode(
             nodeId = command.nodeId,
             title = command.title,
-            path = normalizePath(command.sourcePath),
+            path = resolvedPath,
         )
         val updated = insertNode(document, command.parentNodeId, node, command.orderIndex)
-        val derivedOps = node.path?.let { path ->
-            listOf(TopicFileOperation(TopicFileOperationKind.CREATE, path))
-        } ?: emptyList()
+        val derivedOps = listOf(TopicFileOperation(TopicFileOperationKind.CREATE, resolvedPath))
         return when (updated) {
             is TopicGatewayResult.Success -> successMutation(updated.value, derivedOps)
             is TopicGatewayResult.Failure -> updated
@@ -221,28 +243,45 @@ class TopicTreeSyncOrchestratorService(
         document: MkDocsConfigDocument,
         command: AddChildTopicNodeCommand,
     ): TopicGatewayResult<ConfigMutationResult> {
+        val noNavFolderHierarchy = !document.navPresent
         val target = findNode(document.nav, command.targetNodeId)
             ?: return configFailure("Cannot locate target node '${command.targetNodeId}' in config nav")
         if (target.node.externalUrl != null) {
             return configFailure("Cannot add child under external link '${target.node.nodeId}'")
         }
 
-        val resolvedPath = normalizePath(command.childSourcePath) ?: deriveChildPathFromParent(target.node, command.childTitle)
+        val resolvedPath = normalizePath(command.childSourcePath)
+            ?: derivePathForNewNode(document, target.node.nodeId, command.childTitle)
         val newChild = TopicNavNode(
             nodeId = command.childNodeId,
             title = command.childTitle,
             path = resolvedPath,
         )
         val targetChildren = target.node.children.toMutableList()
+        val extraOps = mutableListOf<TopicFileOperation>()
         val updatedTarget = if (target.node.path == null) {
             targetChildren.addAt(command.childOrderIndex, newChild)
             target.node.copy(children = targetChildren.toList())
         } else {
+            val originalTargetPath = normalizePath(target.node.path)
+            val preservedPagePath = if (noNavFolderHierarchy && originalTargetPath != null) {
+                val sectionIndexPath = ensureUniquePath(
+                    basePath = joinPath(deriveNoNavDirectoryFromPagePath(originalTargetPath), "index.md"),
+                    existingPaths = collectAllPaths(document.nav) - originalTargetPath,
+                )
+                if (sectionIndexPath != originalTargetPath) {
+                    extraOps += TopicFileOperation(TopicFileOperationKind.MOVE, originalTargetPath, sectionIndexPath)
+                    extraOps += TopicFileOperation(TopicFileOperationKind.REWRITE_LINKS, originalTargetPath, sectionIndexPath)
+                }
+                sectionIndexPath
+            } else {
+                target.node.path
+            }
             val preservedNodeId = nextPreservedPageNodeId(target.node)
             val preservedPage = TopicNavNode(
                 nodeId = preservedNodeId,
                 title = target.node.title,
-                path = target.node.path,
+                path = preservedPagePath,
             )
             val reindexed = mutableListOf<TopicNavNode>()
             reindexed += preservedPage
@@ -258,7 +297,10 @@ class TopicTreeSyncOrchestratorService(
 
         return when (val replaced = replaceNode(document, updatedTarget)) {
             is TopicGatewayResult.Success -> {
-                val ops = resolvedPath?.let { listOf(TopicFileOperation(TopicFileOperationKind.CREATE, it)) }.orEmpty()
+                val ops = buildList {
+                    addAll(extraOps)
+                    add(TopicFileOperation(TopicFileOperationKind.CREATE, resolvedPath))
+                }
                 successMutation(replaced.value, ops)
             }
 
@@ -272,8 +314,24 @@ class TopicTreeSyncOrchestratorService(
     ): TopicGatewayResult<ConfigMutationResult> {
         val node = findNode(document.nav, command.nodeId)?.node
             ?: return configFailure("Cannot locate node '${command.nodeId}' for rename")
-        return when (val replaced = replaceNode(document, node.copy(title = command.newTitle))) {
-            is TopicGatewayResult.Success -> successMutation(replaced.value)
+        val currentPath = normalizePath(node.path)
+        val renamedPath = currentPath?.let { deriveRenamedPath(document, it, command.newTitle) }
+        val updatedNode = node.copy(
+            title = command.newTitle,
+            path = renamedPath ?: node.path,
+        )
+        return when (val replaced = replaceNode(document, updatedNode)) {
+            is TopicGatewayResult.Success -> {
+                val operations = if (currentPath != null && renamedPath != null && currentPath != renamedPath) {
+                    listOf(
+                        TopicFileOperation(TopicFileOperationKind.RENAME, currentPath, renamedPath),
+                        TopicFileOperation(TopicFileOperationKind.REWRITE_LINKS, currentPath, renamedPath),
+                    )
+                } else {
+                    emptyList()
+                }
+                successMutation(replaced.value, operations)
+            }
             is TopicGatewayResult.Failure -> replaced
         }
     }
@@ -286,7 +344,10 @@ class TopicTreeSyncOrchestratorService(
         if (removed == null) {
             return configFailure("Cannot locate node '${command.nodeId}' for removal")
         }
-        return successMutation(document.copy(nav = updatedNodes))
+        val fileOperations = collectPaths(removed)
+            .distinct()
+            .map { path -> TopicFileOperation(TopicFileOperationKind.DELETE, path) }
+        return successMutation(document.copy(nav = updatedNodes), fileOperations)
     }
 
     private fun reorderNodesInConfig(
@@ -312,11 +373,39 @@ class TopicTreeSyncOrchestratorService(
         newParentNodeId: String,
         newOrderIndex: Int,
     ): TopicGatewayResult<ConfigMutationResult> {
+        val sourceContext = findNode(document.nav, nodeId)
+            ?: return configFailure("Cannot locate node '$nodeId' for move")
         val (withoutSource, removedNode) = removeNode(document.nav, nodeId)
         val movingNode = removedNode ?: return configFailure("Cannot locate node '$nodeId' for move")
+        val currentPath = normalizePath(sourceContext.node.path)
+        val updatedPath = currentPath?.let { existingPath ->
+            val targetDirectory = resolveDirectoryForParent(
+                nodes = withoutSource,
+                parentNodeId = newParentNodeId,
+                noNavFolderHierarchy = !document.navPresent,
+            )
+            val targetFileName = existingPath.substringAfterLast('/')
+            val baseTargetPath = joinPath(targetDirectory, targetFileName)
+            ensureUniquePath(baseTargetPath, collectAllPaths(withoutSource))
+        }
+        val nodeToInsert = if (updatedPath != null) {
+            movingNode.copy(path = updatedPath)
+        } else {
+            movingNode
+        }
         val sourceDocument = document.copy(nav = withoutSource)
-        return when (val inserted = insertNode(sourceDocument, newParentNodeId, movingNode, newOrderIndex)) {
-            is TopicGatewayResult.Success -> successMutation(inserted.value)
+        return when (val inserted = insertNode(sourceDocument, newParentNodeId, nodeToInsert, newOrderIndex)) {
+            is TopicGatewayResult.Success -> {
+                val operations = if (currentPath != null && updatedPath != null && currentPath != updatedPath) {
+                    listOf(
+                        TopicFileOperation(TopicFileOperationKind.MOVE, currentPath, updatedPath),
+                        TopicFileOperation(TopicFileOperationKind.REWRITE_LINKS, currentPath, updatedPath),
+                    )
+                } else {
+                    emptyList()
+                }
+                successMutation(inserted.value, operations)
+            }
             is TopicGatewayResult.Failure -> inserted
         }
     }
@@ -443,17 +532,6 @@ class TopicTreeSyncOrchestratorService(
         return candidate
     }
 
-    private fun deriveChildPathFromParent(parent: TopicNavNode, childTitle: String): String? {
-        val parentPath = normalizePath(parent.path) ?: return null
-        val parentDirectory = parentPath.substringBeforeLast('/', "")
-        val slug = slugifyTitle(childTitle)
-        return if (parentDirectory.isEmpty()) {
-            "$slug.md"
-        } else {
-            "$parentDirectory/$slug.md"
-        }
-    }
-
     private fun slugifyTitle(title: String): String {
         return title
             .trim()
@@ -469,6 +547,153 @@ class TopicTreeSyncOrchestratorService(
             ?.takeIf { it.isNotEmpty() }
             ?.replace('\\', '/')
             ?.trimStart('/')
+    }
+
+    private fun derivePathForNewNode(
+        document: MkDocsConfigDocument,
+        parentNodeId: String,
+        title: String,
+    ): String {
+        val parentDirectory = resolveDirectoryForParent(
+            nodes = document.nav,
+            parentNodeId = parentNodeId,
+            noNavFolderHierarchy = !document.navPresent,
+        )
+        val candidate = joinPath(parentDirectory, "${slugifyTitle(title)}.md")
+        return ensureUniquePath(candidate, collectAllPaths(document.nav))
+    }
+
+    private fun deriveRenamedPath(
+        document: MkDocsConfigDocument,
+        currentPath: String,
+        title: String,
+    ): String {
+        val currentDirectory = currentPath.substringBeforeLast('/', "")
+        val renamedCandidate = joinPath(currentDirectory, "${slugifyTitle(title)}.md")
+        val existing = collectAllPaths(document.nav) - currentPath
+        return ensureUniquePath(renamedCandidate, existing)
+    }
+
+    private fun resolveDirectoryForParent(
+        nodes: List<TopicNavNode>,
+        parentNodeId: String,
+        noNavFolderHierarchy: Boolean = false,
+    ): String {
+        if (parentNodeId == ROOT_NODE_ID) {
+            return ""
+        }
+
+        val parent = findNode(nodes, parentNodeId) ?: return ""
+        if (noNavFolderHierarchy) {
+            sectionDirectoryFromNodeId(parent.node.nodeId)?.let { return it }
+        }
+        val directPath = normalizePath(parent.node.path)
+        if (directPath != null) {
+            return if (noNavFolderHierarchy) {
+                deriveNoNavDirectoryFromPagePath(directPath)
+            } else {
+                directPath.substringBeforeLast('/', "")
+            }
+        }
+
+        val childPath = firstPathInSubtree(parent.node.children)
+        if (childPath != null) {
+            return childPath.substringBeforeLast('/', "")
+        }
+
+        val ancestorId = parent.parentNodeId ?: return ""
+        return resolveDirectoryForParent(
+            nodes = nodes,
+            parentNodeId = ancestorId,
+            noNavFolderHierarchy = noNavFolderHierarchy,
+        )
+    }
+
+    private fun sectionDirectoryFromNodeId(nodeId: String): String? {
+        val prefix = "section:"
+        if (!nodeId.startsWith(prefix)) {
+            return null
+        }
+        return normalizePath(nodeId.removePrefix(prefix))
+    }
+
+    private fun deriveNoNavDirectoryFromPagePath(pagePath: String): String {
+        val normalized = normalizePath(pagePath) ?: return ""
+        val directory = normalized.substringBeforeLast('/', "")
+        val fileName = normalized.substringAfterLast('/')
+        val stem = fileName.substringBeforeLast('.', fileName)
+        return if (stem.equals("index", ignoreCase = true)) {
+            directory
+        } else {
+            joinPath(directory, stem)
+        }
+    }
+
+    private fun firstPathInSubtree(nodes: List<TopicNavNode>): String? {
+        nodes.forEach { node ->
+            val direct = normalizePath(node.path)
+            if (direct != null) {
+                return direct
+            }
+            val nested = firstPathInSubtree(node.children)
+            if (nested != null) {
+                return nested
+            }
+        }
+        return null
+    }
+
+    private fun collectAllPaths(nodes: List<TopicNavNode>): Set<String> {
+        val collected = linkedSetOf<String>()
+
+        fun visit(node: TopicNavNode) {
+            normalizePath(node.path)?.let(collected::add)
+            node.children.forEach(::visit)
+        }
+
+        nodes.forEach(::visit)
+        return collected
+    }
+
+    private fun collectPaths(node: TopicNavNode): List<String> {
+        val collected = mutableListOf<String>()
+
+        fun visit(current: TopicNavNode) {
+            normalizePath(current.path)?.let(collected::add)
+            current.children.forEach(::visit)
+        }
+
+        visit(node)
+        return collected
+    }
+
+    private fun ensureUniquePath(basePath: String, existingPaths: Set<String>): String {
+        val normalizedBase = normalizePath(basePath) ?: "topic.md"
+        if (!existingPaths.contains(normalizedBase)) {
+            return normalizedBase
+        }
+
+        val directory = normalizedBase.substringBeforeLast('/', "")
+        val fileName = normalizedBase.substringAfterLast('/')
+        val stem = fileName.substringBeforeLast('.', fileName)
+        val extension = fileName.substringAfterLast('.', "md")
+        var suffix = 2
+
+        while (true) {
+            val candidate = joinPath(directory, "$stem-$suffix.$extension")
+            if (!existingPaths.contains(candidate)) {
+                return candidate
+            }
+            suffix += 1
+        }
+    }
+
+    private fun joinPath(directory: String, fileName: String): String {
+        return if (directory.isBlank()) {
+            fileName
+        } else {
+            "${directory.trimEnd('/')}/$fileName"
+        }
     }
 
     private fun <T> MutableList<T>.addAt(index: Int, value: T) {

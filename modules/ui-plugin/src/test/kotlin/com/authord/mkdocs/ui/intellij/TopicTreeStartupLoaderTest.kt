@@ -60,4 +60,25 @@ class TopicTreeStartupLoaderTest {
         assertEquals(listOf("n2", "n1"), state.nodes.map { it.nodeId })
         assertEquals(listOf("guide.md", "index.md"), state.navOrderedPaths)
     }
+
+    @Test
+    fun `loads fallback tree when docs dir is absolute path`() {
+        val loader = TopicTreeStartupLoader()
+        val config = MkDocsConfigDocument(
+            docsDir = "/tmp/project/docs",
+            nav = emptyList(),
+            navPresent = false,
+        )
+
+        val state = loader.load(
+            config = config,
+            docsMarkdownPaths = listOf(
+                "/tmp/project/docs/index.md",
+                "/tmp/project/docs/guide/install.md",
+            ),
+        )
+
+        assertEquals(StartupTreeSource.FALLBACK, state.source)
+        assertEquals(listOf("guide/install.md", "index.md"), state.navOrderedPaths)
+    }
 }

@@ -28,6 +28,7 @@ import com.authord.mkdocs.ui.intellij.TopicTreeApplicationService
 import com.authord.mkdocs.ui.intellij.TopicTreeUiService
 import com.intellij.openapi.components.service
 import com.intellij.openapi.project.Project
+import java.nio.file.Path
 
 /**
  * Composition root that wires default command bus and Phase 2 topic-tree service seams.
@@ -192,10 +193,12 @@ private class InMemoryInstanceRegistryPort : InstanceRegistryPort {
     private var activeInstanceId: String? = null
 
     override fun discoverDefaultInstance(projectRootPath: String): TopicGatewayResult<TopicInstanceRef?> {
+        val projectRoot = runCatching { Path.of(projectRootPath).toAbsolutePath().normalize() }
+            .getOrElse { Path.of(projectRootPath) }
         val defaultInstance = TopicInstanceRef(
             instanceId = "default",
-            configPath = "$projectRootPath/mkdocs.yml",
-            docsDirPath = "$projectRootPath/docs",
+            configPath = projectRoot.resolve("mkdocs.yml").toString(),
+            docsDirPath = projectRoot.resolve("docs").toString(),
         )
         instances.putIfAbsent(defaultInstance.instanceId, defaultInstance)
         if (activeInstanceId == null) {

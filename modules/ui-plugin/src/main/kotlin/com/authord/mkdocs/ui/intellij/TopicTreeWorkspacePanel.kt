@@ -4,6 +4,7 @@ import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.intellij.icons.AllIcons
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.ui.JBColor
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.JBSplitter
@@ -45,13 +46,15 @@ import javax.swing.tree.TreeSelectionModel
 
 private const val ROOT_NODE_ID: String = "root"
 
-private enum class TopicTreeNodeKind {
+private fun uiMessage(key: String, vararg params: Any): String = AuthordUiBundle.message(key, *params)
+
+internal enum class TopicTreeNodeKind {
     ROOT,
     NAV,
     INFO,
 }
 
-private data class TopicTreeNodeView(
+internal data class TopicTreeNodeView(
     val nodeId: String,
     val title: String,
     val parentNodeId: String?,
@@ -77,7 +80,7 @@ private data class TopicTreeNodeView(
     companion object {
         fun root(): TopicTreeNodeView = TopicTreeNodeView(
             nodeId = ROOT_NODE_ID,
-            title = "Topic Tree",
+            title = uiMessage("topicTree.root.title"),
             parentNodeId = null,
             kind = TopicTreeNodeKind.ROOT,
         )
@@ -98,6 +101,7 @@ private class TopicTreeNodeTransferable(
 }
 
 internal class TopicTreeWorkspacePanel(
+    private val project: com.intellij.openapi.project.Project?, // Inject Project
     private val controllersProvider: () -> TopicTreeControllers?,
     private val reconcileStateProvider: () -> StartupTreeState?,
     private val startupStateListener: (StartupTreeState) -> Unit = {},
@@ -122,13 +126,12 @@ internal class TopicTreeWorkspacePanel(
     private val instanceModel = DefaultListModel<TopicInstanceRef>()
     private val instanceList = JBList(instanceModel)
     private var suppressInstanceSelectionEvents: Boolean = false
-    private val status = JBLabel("Topic tree not loaded")
+    private val status = JBLabel(uiMessage("topicTree.status.notLoaded"))
     private val details = JBTextArea()
     private val unlinkedModel = DefaultListModel<String>()
     private val validationModel = DefaultListModel<String>()
     private val unlinkedList = JBList(unlinkedModel)
     private val validationList = JBList(validationModel)
-    private lateinit var reloadConfigurationButton: JButton
     private lateinit var newInstanceButton: JButton
     private lateinit var instancesOverflowButton: JButton
     private lateinit var collapseAllButton: JButton
@@ -183,6 +186,19 @@ internal class TopicTreeWorkspacePanel(
         tree.addTreeSelectionListener {
             renderSelectionDetails()
             refreshActionEnablement()
+            
+            // Open file in editor on selection
+            val selectedNode = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
+            val userObject = selectedNode?.userObject
+            if (project != null && userObject is TopicTreeNodeView && userObject.isNav) {
+                val absolutePath = resolveFilePath(userObject)
+                if (!absolutePath.isNullOrBlank()) {
+                    val virtualFile = com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(absolutePath)
+                    if (virtualFile != null) {
+                        FileEditorManager.getInstance(project).openFile(virtualFile, true)
+                    }
+                }
+            }
         }
         tree.addMouseListener(
             object : MouseAdapter() {
@@ -206,7 +222,7 @@ internal class TopicTreeWorkspacePanel(
         details.wrapStyleWord = true
         details.border = JBUI.Borders.empty(8)
         details.background = tree.background
-        details.text = "Select a topic to inspect details."
+        details.text = uiMessage("topicTree.details.select")
 
         instanceList.selectionMode = ListSelectionModel.SINGLE_SELECTION
         instanceList.cellRenderer = object : javax.swing.ListCellRenderer<TopicInstanceRef> {
@@ -222,7 +238,7 @@ internal class TopicTreeWorkspacePanel(
                     ""
                 } else {
                     if (value.instanceId == currentState?.instanceId) {
-                        "${value.instanceId} (active)"
+                        uiMessage("topicTree.instance.active", value.instanceId)
                     } else {
                         value.instanceId
                     }
@@ -258,7 +274,7 @@ internal class TopicTreeWorkspacePanel(
                 DefaultMutableTreeNode(
                     TopicTreeNodeView(
                         nodeId = "info-empty",
-                        title = "No topics found",
+                        title = uiMessage("topicTree.info.empty"),
                         parentNodeId = ROOT_NODE_ID,
                         kind = TopicTreeNodeKind.INFO,
                     ),
@@ -278,7 +294,13 @@ internal class TopicTreeWorkspacePanel(
             .map { "${it.type}: ${it.reference}" }
             .forEach(validationModel::addElement)
 
-        status.text = "Source: ${state.source.name.lowercase()} | Topics: ${state.navOrderedPaths.size} | Unlinked: ${state.unlinkedPaths.size} | Issues: ${state.validationIssues.size}"
+        status.text = uiMessage(
+            "topicTree.status.summary",
+            state.source.name.lowercase(),
+            state.navOrderedPaths.size,
+            state.unlinkedPaths.size,
+            state.validationIssues.size,
+        )
         model.reload()
         if (root.childCount > 0) {
             tree.expandPath(TreePath(root.path))
@@ -289,10 +311,10 @@ internal class TopicTreeWorkspacePanel(
     }
 
     private fun buildHeader(): JComponent {
-        val title = JBLabel("Authord").apply {
+        val title = JBLabel(uiMessage("topicTree.header.brand")).apply {
             font = JBFont.label().deriveFont(JBFont.label().size + 2f)
         }
-        val subtitle = JBLabel("instances and table of contents").apply {
+        val subtitle = JBLabel(uiMessage("topicTree.header.subtitle")).apply {
             foreground = JBUI.CurrentTheme.ContextHelp.FOREGROUND
             border = JBUI.Borders.emptyTop(2)
         }
@@ -305,20 +327,14 @@ internal class TopicTreeWorkspacePanel(
     }
 
     private fun buildCenter(): JComponent {
-        reloadConfigurationButton = iconActionButton(
-            icon = AllIcons.Actions.Refresh,
-            tooltip = "Reload Configuration",
-        ) { reconcileFromDisk() }
-        newInstanceButton = iconActionButton(icon = AllIcons.General.Add, tooltip = "New") { createNewInstance() }
+        newInstanceButton = iconActionButton(icon = AllIcons.General.Add, tooltip = uiMessage("topicTree.tooltip.new")) { createNewInstance() }
         instancesOverflowButton = overflowActionButton { showInstancesOverflowMenu() }
         val instancesHeaderActions = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.RIGHT, 2, 0)).apply {
-            add(reloadConfigurationButton)
-            add(newInstanceButton)
             add(instancesOverflowButton)
         }
 
-        instanceRenameButton = iconActionButton(icon = AllIcons.Actions.Edit, tooltip = "Rename") { renameInstance() }
-        instanceDeleteButton = iconActionButton(icon = AllIcons.General.Remove, tooltip = "Delete") { deleteInstance() }
+        instanceRenameButton = iconActionButton(icon = AllIcons.Actions.Edit, tooltip = uiMessage("topicTree.tooltip.rename")) { renameInstance() }
+        instanceDeleteButton = iconActionButton(icon = AllIcons.General.Remove, tooltip = uiMessage("topicTree.tooltip.delete")) { deleteInstance() }
         instanceRowActionsPanel = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.RIGHT, 2, 2)).apply {
             add(instanceRenameButton)
             add(instanceDeleteButton)
@@ -331,21 +347,21 @@ internal class TopicTreeWorkspacePanel(
             add(instanceRowActionsPanel, BorderLayout.SOUTH)
         }
         val instancesSection = buildCollapsibleSection(
-            title = "instances",
+            title = uiMessage("topicTree.section.instances"),
             headerActions = instancesHeaderActions,
             body = instancesSectionBody,
             initiallyCollapsed = false,
         )
 
-        collapseAllButton = iconActionButton(icon = AllIcons.Actions.Collapseall, tooltip = "Collapse All") { collapseAllTopics() }
-        addRootTopicButton = iconActionButton(icon = AllIcons.General.Add, tooltip = "Root") { addRootTopic() }
+        collapseAllButton = iconActionButton(icon = AllIcons.Actions.Collapseall, tooltip = uiMessage("topicTree.tooltip.collapseAll")) { collapseAllTopics() }
+        addRootTopicButton = iconActionButton(icon = AllIcons.General.Add, tooltip = uiMessage("topicTree.tooltip.root")) { addRootTopic() }
         val tocHeaderActions = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.RIGHT, 2, 0)).apply {
             add(collapseAllButton)
             add(addRootTopicButton)
         }
 
-        tocChildButton = iconActionButton(icon = AllIcons.General.Add, tooltip = "Child") { addChildTopic() }
-        tocDeleteButton = iconActionButton(icon = AllIcons.General.Remove, tooltip = "Delete") { removeTopic() }
+        tocChildButton = iconActionButton(icon = AllIcons.General.Add, tooltip = uiMessage("topicTree.tooltip.child")) { addChildTopic() }
+        tocDeleteButton = iconActionButton(icon = AllIcons.General.Remove, tooltip = uiMessage("topicTree.tooltip.delete")) { removeTopic() }
         tocRowActionsPanel = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.RIGHT, 2, 2)).apply {
             add(tocChildButton)
             add(tocDeleteButton)
@@ -354,9 +370,9 @@ internal class TopicTreeWorkspacePanel(
         }
 
         val diagnosticsTabs = JTabbedPane().apply {
-            addTab("Details", JBScrollPane(details))
-            addTab("Unlinked", JBScrollPane(unlinkedList))
-            addTab("Validation", JBScrollPane(validationList))
+            addTab(uiMessage("topicTree.tab.details"), JBScrollPane(details))
+            addTab(uiMessage("topicTree.tab.unlinked"), JBScrollPane(unlinkedList))
+            addTab(uiMessage("topicTree.tab.validation"), JBScrollPane(validationList))
         }
 
         val split = JBSplitter(true, 0.70f).apply {
@@ -370,7 +386,7 @@ internal class TopicTreeWorkspacePanel(
             add(tocRowActionsPanel, BorderLayout.SOUTH)
         }
         val tocSection = buildCollapsibleSection(
-            title = "table of contents",
+            title = uiMessage("topicTree.section.tableOfContents"),
             headerActions = tocHeaderActions,
             body = tocSectionBody,
             initiallyCollapsed = false,
@@ -392,19 +408,8 @@ internal class TopicTreeWorkspacePanel(
             add(body, BorderLayout.CENTER)
             isVisible = !initiallyCollapsed
         }
-        val toggleButton = JButton(if (initiallyCollapsed) "+" else "-").apply {
-            margin = JBUI.insets(0, 6)
-            isFocusable = false
-            addActionListener {
-                bodyContainer.isVisible = !bodyContainer.isVisible
-                text = if (bodyContainer.isVisible) "-" else "+"
-                component.revalidate()
-                component.repaint()
-            }
-        }
 
         val leftHeader = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-            add(toggleButton)
             add(JBLabel(title).apply { font = JBFont.label().deriveFont(JBFont.label().size + 1f) })
         }
 
@@ -441,7 +446,7 @@ internal class TopicTreeWorkspacePanel(
 
     private fun overflowActionButton(action: () -> Unit): JButton {
         return JButton("...").apply {
-            toolTipText = "More"
+            toolTipText = uiMessage("topicTree.tooltip.more")
             margin = JBUI.insets(2, 6)
             isFocusable = false
             addActionListener { action() }
@@ -450,35 +455,18 @@ internal class TopicTreeWorkspacePanel(
 
     private fun buildInstancesOverflowMenu() {
         instancesOverflowMenu.removeAll()
-        instancesOverflowMenu.add(
-            JMenuItem("New Instance").apply {
-                addActionListener { createNewInstance() }
-            },
-        )
-        instancesOverflowMenu.add(
-            JMenuItem("Rename").apply {
-                isEnabled = false
-                addActionListener { renameInstance() }
-            },
-        )
-        instancesOverflowMenu.add(
-            JMenuItem("Delete").apply {
-                isEnabled = false
-                addActionListener { deleteInstance() }
-            },
-        )
     }
 
     private fun buildTocContextMenu() {
         tocContextMenu.removeAll()
-        tocContextMenu.add(JMenuItem("New Topic").apply { addActionListener { addRootTopic() } })
-        tocNewChildMenuItem = JMenuItem("New Child Topic").apply { addActionListener { addChildTopic() } }
+        tocContextMenu.add(JMenuItem(uiMessage("topicTree.menu.newTopic")).apply { addActionListener { addRootTopic() } })
+        tocNewChildMenuItem = JMenuItem(uiMessage("topicTree.menu.newChildTopic")).apply { addActionListener { addChildTopic() } }
         tocContextMenu.add(tocNewChildMenuItem)
-        tocEditTitleMenuItem = JMenuItem("Edit Title").apply { addActionListener { renameTopic() } }
+        tocEditTitleMenuItem = JMenuItem(uiMessage("topicTree.menu.editTitle")).apply { addActionListener { renameTopic() } }
         tocContextMenu.add(tocEditTitleMenuItem)
-        tocRemoveMenuItem = JMenuItem("Remove TOC Element").apply { addActionListener { removeTopic() } }
+        tocRemoveMenuItem = JMenuItem(uiMessage("topicTree.menu.removeTocElement")).apply { addActionListener { removeTopic() } }
         tocContextMenu.add(tocRemoveMenuItem)
-        tocSetHomePageMenuItem = JMenuItem("Set as Home Page").apply { addActionListener { setAsHomePage() } }
+        tocSetHomePageMenuItem = JMenuItem(uiMessage("topicTree.menu.setAsHomePage")).apply { addActionListener { setAsHomePage() } }
         tocContextMenu.add(tocSetHomePageMenuItem)
     }
 
@@ -537,12 +525,12 @@ internal class TopicTreeWorkspacePanel(
         val switchResult = controllers.instanceSwitchCoordinator.switchActiveInstance(selectedInstance.instanceId)
         when (switchResult) {
             is TopicGatewayResult.Success -> {
-                publishStatus("Switched active instance to '${switchResult.value.selectedInstance.instanceId}'")
+                publishStatus(uiMessage("topicTree.status.switchedInstance", switchResult.value.selectedInstance.instanceId))
                 reconcileFromDisk()
             }
 
             is TopicGatewayResult.Failure -> {
-                val recovery = controllers.failureRecoveryPresenter.present("Switch instance", switchResult.error)
+                val recovery = controllers.failureRecoveryPresenter.present(uiMessage("topicTree.operation.switchInstance"), switchResult.error)
                 publishStatus(recovery.summary)
                 details.text = "${recovery.summary}\n${recovery.guidance}"
             }
@@ -553,17 +541,27 @@ internal class TopicTreeWorkspacePanel(
     private fun createNewInstance() {
         val controllers = controllersOrNull() ?: return
         val instanceRegistry = controllers.instanceRegistryPort ?: run {
-            publishStatus("Instance registration is unavailable")
+            publishStatus(uiMessage("topicTree.status.instanceRegistrationUnavailable"))
             refreshActionEnablement()
             return
         }
-        val instanceId = prompt("New Instance", "Instance ID") ?: return
-        val configInput = prompt("New Instance", "Config path (mkdocs.yml or mkdocs.yaml)", defaultMkdocsConfigPath()) ?: return
+        val instanceId = prompt(
+            uiMessage("topicTree.prompt.newInstance.title"),
+            uiMessage("topicTree.prompt.newInstance.instanceId"),
+        ) ?: return
+        val configInput = prompt(
+            uiMessage("topicTree.prompt.newInstance.title"),
+            uiMessage("topicTree.prompt.newInstance.configPath"),
+            defaultMkdocsConfigPath(),
+        ) ?: return
         val configPath = resolveConfigPathForRegistration(configInput)
         val defaultDocsDir = runCatching {
             Path.of(configPath).toAbsolutePath().normalize().parent.resolve("docs").toString()
         }.getOrDefault("docs")
-        val docsDirPath = promptOptional("New Instance", "Docs directory path (optional)") ?: defaultDocsDir
+        val docsDirPath = promptOptional(
+            uiMessage("topicTree.prompt.newInstance.title"),
+            uiMessage("topicTree.prompt.newInstance.docsDirPath"),
+        ) ?: defaultDocsDir
         val registration = instanceRegistry.registerInstance(
             TopicInstanceRef(
                 instanceId = instanceId,
@@ -575,11 +573,11 @@ internal class TopicTreeWorkspacePanel(
             is TopicGatewayResult.Success -> {
                 refreshInstances(activeInstanceId = instanceId)
                 onInstanceSelectionChanged()
-                publishStatus("Registered instance '$instanceId'")
+                publishStatus(uiMessage("topicTree.status.instanceRegistered", instanceId))
             }
 
             is TopicGatewayResult.Failure -> {
-                val recovery = controllers.failureRecoveryPresenter.present("Register instance", registration.error)
+                val recovery = controllers.failureRecoveryPresenter.present(uiMessage("topicTree.operation.registerInstance"), registration.error)
                 publishStatus(recovery.summary)
                 details.text = "${recovery.summary}\n${recovery.guidance}"
             }
@@ -590,16 +588,28 @@ internal class TopicTreeWorkspacePanel(
     private fun resolveConfigPathForRegistration(configInput: String): String {
         val trimmed = configInput.trim()
         val baseRoot = defaultConfigBaseDir()
-        val expanded = if (trimmed.startsWith("~/")) {
-            Path.of(System.getProperty("user.home")).toAbsolutePath().normalize().toString() + trimmed.removePrefix("~")
-        } else {
-            trimmed
-        }
+        val expanded = expandUserHomePath(trimmed)
         val rawPath = runCatching { Path.of(expanded) }.getOrNull() ?: return expanded
         if (rawPath.isAbsolute) {
             return rawPath.normalize().toString()
         }
         return baseRoot.resolve(rawPath).normalize().toString()
+    }
+
+    private fun expandUserHomePath(path: String): String {
+        if (path == "~") {
+            return userHomeDir().toString()
+        }
+        if (!path.startsWith("~/") && !path.startsWith("~\\")) {
+            return path
+        }
+
+        val home = userHomeDir()
+        val relative = path.substring(2)
+        if (relative.isBlank()) {
+            return home.toString()
+        }
+        return home.resolve(relative).normalize().toString()
     }
 
     private fun defaultMkdocsConfigPath(): String {
@@ -613,22 +623,30 @@ internal class TopicTreeWorkspacePanel(
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
             ?.let { runCatching { Path.of(it).toAbsolutePath().normalize() }.getOrNull() }
-        return projectBase ?: Path.of(System.getProperty("user.home")).toAbsolutePath().normalize()
+        return projectBase ?: userHomeDir()
+    }
+
+    private fun userHomeDir(): Path {
+        return runCatching {
+            Path.of(System.getProperty("user.home")).toAbsolutePath().normalize()
+        }.getOrElse {
+            Path.of(".").toAbsolutePath().normalize()
+        }
     }
 
     private fun renameInstance() {
-        publishStatus("Instance rename is not available in current contracts")
+        publishStatus(uiMessage("topicTree.status.instanceRenameUnavailable"))
     }
 
     private fun deleteInstance() {
-        publishStatus("Instance delete is not available in current contracts")
+        publishStatus(uiMessage("topicTree.status.instanceDeleteUnavailable"))
     }
 
     private fun collapseAllTopics() {
         for (row in tree.rowCount - 1 downTo 1) {
             tree.collapseRow(row)
         }
-        publishStatus("Collapsed all topics")
+        publishStatus(uiMessage("topicTree.status.collapsedAll"))
     }
 
     private fun addRootTopic() {
@@ -638,39 +656,29 @@ internal class TopicTreeWorkspacePanel(
     fun reconcileFromDisk() {
         val state = reconcileStateProvider()
         if (state == null) {
-            publishStatus("Reconciliation unavailable (missing project/base config)")
+            publishStatus(uiMessage("topicTree.status.reconcileUnavailable"))
             refreshActionEnablement()
             return
         }
         render(state)
         startupStateListener(state)
-        details.text = "Reconciliation completed from mkdocs config + docs_dir scan."
+        details.text = uiMessage("topicTree.details.reconcileComplete")
         refreshActionEnablement()
-    }
-
-    private fun switchInstance() {
-        val targetInstanceId = prompt("Switch Instance", "Instance ID", activeTreeId()) ?: return
-        val controllers = controllersOrNull() ?: return
-        val switchResult = controllers.instanceSwitchCoordinator.switchActiveInstance(targetInstanceId)
-        when (switchResult) {
-            is TopicGatewayResult.Success -> {
-                publishStatus("Switched active instance to '${switchResult.value.selectedInstance.instanceId}'")
-                reconcileFromDisk()
-            }
-
-            is TopicGatewayResult.Failure -> {
-                val recovery = controllers.failureRecoveryPresenter.present("Switch instance", switchResult.error)
-                publishStatus(recovery.summary)
-                details.text = "${recovery.summary}\n${recovery.guidance}"
-            }
-        }
     }
 
     private fun addTopic(parentOverride: DefaultMutableTreeNode? = null) {
         val parentNode = parentOverride ?: selectedNavNode() ?: root
         val parent = parentNode.userObject as? TopicTreeNodeView ?: TopicTreeNodeView.root()
-        val title = prompt("Add Topic", "Topic title") ?: return
-        val sourcePath = promptOptional("Add Topic", "Relative markdown path (optional)")
+        val title = prompt(
+            uiMessage("topicTree.prompt.addTopic.title"),
+            uiMessage("topicTree.prompt.addTopic.topicTitle"),
+        ) ?: return
+        val suggestedPath = suggestedMarkdownPath(title, parentNode)
+        val sourcePath = promptOptional(
+            title = uiMessage("topicTree.prompt.addTopic.title"),
+            message = uiMessage("topicTree.prompt.addTopic.relativePathOptional"),
+            initial = suggestedPath,
+        )?.let(::normalizeMarkdownPathWithExtension) ?: suggestedPath
         val nodeId = "ui-node-${UUID.randomUUID()}"
         val controllers = controllersOrNull() ?: return
         val result = controllers.actionController.createTopic(
@@ -681,13 +689,13 @@ internal class TopicTreeWorkspacePanel(
             sourcePath = sourcePath,
             nodeId = nodeId,
         )
-        handleDispatchResult(result, "Created topic '$title'") {
+        handleDispatchResult(result, uiMessage("topicTree.status.createdTopic", title)) {
             val uiNode = DefaultMutableTreeNode(
                 TopicTreeNodeView(
                     nodeId = nodeId,
                     title = title,
                     parentNodeId = parent.nodeId,
-                    path = normalizeOptionalPath(sourcePath),
+                    path = sourcePath,
                 ),
             )
             model.insertNodeInto(uiNode, parentNode, parentNode.childCount)
@@ -699,12 +707,20 @@ internal class TopicTreeWorkspacePanel(
     private fun addChildTopic() {
         val targetNode = selectedNavNode()
         if (targetNode == null) {
-            publishStatus("Select a topic first to add a child")
+            publishStatus(uiMessage("topicTree.status.selectTopicForChild"))
             return
         }
         val target = targetNode.userObject as? TopicTreeNodeView ?: return
-        val title = prompt("Add Child Topic", "Child topic title") ?: return
-        val sourcePath = promptOptional("Add Child Topic", "Relative markdown path (optional)")
+        val title = prompt(
+            uiMessage("topicTree.prompt.addChildTopic.title"),
+            uiMessage("topicTree.prompt.addChildTopic.topicTitle"),
+        ) ?: return
+        val suggestedPath = suggestedMarkdownPath(title, targetNode)
+        val sourcePath = promptOptional(
+            title = uiMessage("topicTree.prompt.addChildTopic.title"),
+            message = uiMessage("topicTree.prompt.addTopic.relativePathOptional"),
+            initial = suggestedPath,
+        )?.let(::normalizeMarkdownPathWithExtension) ?: suggestedPath
         val nodeId = "ui-node-${UUID.randomUUID()}"
         val controllers = controllersOrNull() ?: return
         val result = controllers.actionController.addChildTopic(
@@ -715,13 +731,13 @@ internal class TopicTreeWorkspacePanel(
             sourcePath = sourcePath,
             childNodeId = nodeId,
         )
-        handleDispatchResult(result, "Added child topic '$title'") {
+        handleDispatchResult(result, uiMessage("topicTree.status.addedChildTopic", title)) {
             val uiNode = DefaultMutableTreeNode(
                 TopicTreeNodeView(
                     nodeId = nodeId,
                     title = title,
                     parentNodeId = target.nodeId,
-                    path = normalizeOptionalPath(sourcePath),
+                    path = sourcePath,
                 ),
             )
             model.insertNodeInto(uiNode, targetNode, targetNode.childCount)
@@ -731,80 +747,24 @@ internal class TopicTreeWorkspacePanel(
         }
     }
 
-    private fun addExistingFile() {
-        val parentNode = selectedNavNode() ?: root
-        val parent = parentNode.userObject as? TopicTreeNodeView ?: TopicTreeNodeView.root()
-        val title = prompt("Add Existing File", "Display title") ?: return
-        val relativePath = prompt("Add Existing File", "Relative markdown path (example: guide/index.md)") ?: return
-        val nodeId = "ui-node-${UUID.randomUUID()}"
-        val controllers = controllersOrNull() ?: return
-        val result = controllers.actionController.addExistingFile(
-            treeId = activeTreeId(),
-            parentNodeId = parent.nodeId,
-            title = title,
-            relativePath = relativePath,
-            orderIndex = parentNode.childCount,
-            nodeId = nodeId,
-        )
-        handleDispatchResult(result, "Added existing file '$relativePath'") {
-            val uiNode = DefaultMutableTreeNode(
-                TopicTreeNodeView(
-                    nodeId = nodeId,
-                    title = title,
-                    parentNodeId = parent.nodeId,
-                    path = normalizeOptionalPath(relativePath),
-                ),
-            )
-            model.insertNodeInto(uiNode, parentNode, parentNode.childCount)
-            tree.selectionPath = TreePath(uiNode.path)
-            tree.scrollPathToVisible(TreePath(uiNode.path))
-        }
-    }
-
-    private fun addExternalLink() {
-        val parentNode = selectedNavNode() ?: root
-        val parent = parentNode.userObject as? TopicTreeNodeView ?: TopicTreeNodeView.root()
-        val title = prompt("Add External Link", "Display title") ?: return
-        val url = prompt("Add External Link", "URL (https://...)") ?: return
-        val nodeId = "ui-node-${UUID.randomUUID()}"
-        val controllers = controllersOrNull() ?: return
-        val result = controllers.actionController.addExternalLink(
-            treeId = activeTreeId(),
-            parentNodeId = parent.nodeId,
-            title = title,
-            externalUrl = url,
-            orderIndex = parentNode.childCount,
-            nodeId = nodeId,
-        )
-        handleDispatchResult(result, "Added external link '$title'") {
-            val uiNode = DefaultMutableTreeNode(
-                TopicTreeNodeView(
-                    nodeId = nodeId,
-                    title = title,
-                    parentNodeId = parent.nodeId,
-                    externalUrl = url.trim(),
-                ),
-            )
-            model.insertNodeInto(uiNode, parentNode, parentNode.childCount)
-            tree.selectionPath = TreePath(uiNode.path)
-            tree.scrollPathToVisible(TreePath(uiNode.path))
-        }
-    }
-
     private fun renameTopic() {
         val selectedNode = selectedMutableNode() ?: run {
-            publishStatus("Select a mutable topic first")
+            publishStatus(uiMessage("topicTree.status.selectMutableTopic"))
             return
         }
         val selected = selectedNode.userObject as? TopicTreeNodeView ?: return
-        val newTitle = prompt("Rename Topic", "New title", selected.title) ?: return
+        val newTitle = prompt(
+            uiMessage("topicTree.prompt.renameTopic.title"),
+            uiMessage("topicTree.prompt.renameTopic.newTitle"),
+            selected.title,
+        ) ?: return
         val controllers = controllersOrNull() ?: return
         val result = controllers.actionController.renameTopic(
             treeId = activeTreeId(),
             nodeId = selected.nodeId,
             newTitle = newTitle,
         )
-        handleDispatchResult(result, "Renamed topic to '$newTitle'") {
+        handleDispatchResult(result, uiMessage("topicTree.status.renamedTopic", newTitle)) {
             selectedNode.userObject = selected.copy(title = newTitle)
             model.nodeChanged(selectedNode)
         }
@@ -812,7 +772,7 @@ internal class TopicTreeWorkspacePanel(
 
     private fun removeTopic() {
         val selectedNode = selectedMutableNode() ?: run {
-            publishStatus("Select a mutable topic first")
+            publishStatus(uiMessage("topicTree.status.selectMutableTopic"))
             return
         }
         val selected = selectedNode.userObject as? TopicTreeNodeView ?: return
@@ -821,77 +781,23 @@ internal class TopicTreeWorkspacePanel(
             treeId = activeTreeId(),
             nodeId = selected.nodeId,
         )
-        handleDispatchResult(result, "Removed topic '${selected.title}'") {
+        handleDispatchResult(result, uiMessage("topicTree.status.removedTopic", selected.title)) {
             val parent = selectedNode.parent as? DefaultMutableTreeNode ?: return@handleDispatchResult
             model.removeNodeFromParent(selectedNode)
             tree.selectionPath = TreePath(parent.path)
         }
     }
 
-    private fun moveByReorder(direction: Int) {
-        val selectedNode = selectedMutableNode() ?: run {
-            publishStatus("Select a mutable topic to reorder")
-            return
-        }
-        val selected = selectedNode.userObject as? TopicTreeNodeView ?: return
-        val parentNode = selectedNode.parent as? DefaultMutableTreeNode ?: return
-        val parent = parentNode.userObject as? TopicTreeNodeView ?: return
-
-        val siblings = (0 until parentNode.childCount)
-            .mapNotNull { index -> parentNode.getChildAt(index) as? DefaultMutableTreeNode }
-            .mapNotNull { node ->
-                val view = node.userObject as? TopicTreeNodeView ?: return@mapNotNull null
-                if (!view.isMutable) {
-                    null
-                } else {
-                    view.nodeId to node
-                }
-            }
-
-        val currentIndex = siblings.indexOfFirst { (nodeId, _) -> nodeId == selected.nodeId }
-        if (currentIndex == -1) {
-            return
-        }
-        val targetIndex = currentIndex + direction
-        if (targetIndex !in siblings.indices) {
-            return
-        }
-
-        val orderedNodeIds = siblings.map { (nodeId, _) -> nodeId }.toMutableList()
-        val movingId = orderedNodeIds.removeAt(currentIndex)
-        orderedNodeIds.add(targetIndex, movingId)
-
-        val controllers = controllersOrNull() ?: return
-        val result = controllers.dragDropController.reorderTopics(
-            treeId = activeTreeId(),
-            parentNodeId = parent.nodeId,
-            orderedNodeIds = orderedNodeIds,
-        )
-        handleDispatchResult(result, "Reordered topics under '${parent.title}'") {
-            val byId = siblings.associateBy({ it.first }, { it.second })
-            parentNode.removeAllChildren()
-            orderedNodeIds.forEach { nodeId ->
-                parentNode.add(byId.getValue(nodeId))
-            }
-            model.reload(parentNode)
-            val movedNode = byId[movingId]
-            if (movedNode != null) {
-                tree.selectionPath = TreePath(movedNode.path)
-                tree.scrollPathToVisible(TreePath(movedNode.path))
-            }
-        }
-    }
-
     private fun setAsHomePage() {
         val selectedNode = selectedMutableNode() ?: run {
-            publishStatus("Select a mutable topic first")
+            publishStatus(uiMessage("topicTree.status.selectMutableTopic"))
             return
         }
         val selected = selectedNode.userObject as? TopicTreeNodeView ?: return
         val parentNode = selectedNode.parent as? DefaultMutableTreeNode ?: return
         val parent = parentNode.userObject as? TopicTreeNodeView ?: return
         if (parent.nodeId != ROOT_NODE_ID) {
-            publishStatus("Home page can only be set for root-level topics")
+            publishStatus(uiMessage("topicTree.status.homePageRootOnly"))
             return
         }
 
@@ -902,13 +808,13 @@ internal class TopicTreeWorkspacePanel(
                 if (view.isMutable) view.nodeId to node else null
             }
         if (siblings.isEmpty()) {
-            publishStatus("No reorderable root topics available")
+            publishStatus(uiMessage("topicTree.status.noReorderableRootTopics"))
             return
         }
 
         val currentIndex = siblings.indexOfFirst { (nodeId, _) -> nodeId == selected.nodeId }
         if (currentIndex <= 0) {
-            publishStatus("Selected topic is already the home page")
+            publishStatus(uiMessage("topicTree.status.alreadyHomePage"))
             return
         }
 
@@ -922,7 +828,7 @@ internal class TopicTreeWorkspacePanel(
             parentNodeId = ROOT_NODE_ID,
             orderedNodeIds = orderedNodeIds,
         )
-        handleDispatchResult(result, "Set '${selected.title}' as home page") {
+        handleDispatchResult(result, uiMessage("topicTree.status.setAsHomePage", selected.title)) {
             val byId = siblings.associateBy({ it.first }, { it.second })
             parentNode.removeAllChildren()
             orderedNodeIds.forEach { nodeId ->
@@ -951,19 +857,25 @@ internal class TopicTreeWorkspacePanel(
 
         return when (result.result) {
             is TopicGatewayResult.Success -> {
+                val outcome = result.result.value
+                if (!outcome.applied) {
+                    publishStatus(uiMessage("topicTree.status.dragDropFailedSafely"))
+                    details.text = uiMessage("topicTree.details.dragDropFailedSafely", outcome.message)
+                    return false
+                }
                 moveNodeInTree(draggedNode, targetParent, newOrderIndex)
-                details.text = "Drag-drop applied for node '$draggedNodeId'."
+                details.text = uiMessage("topicTree.details.dragDropApplied", draggedNodeId)
                 true
             }
 
             is TopicGatewayResult.Failure -> {
                 val recovery = result.recovery
                 details.text = buildString {
-                    append(recovery?.summary ?: "Drag-drop failed")
+                    append(recovery?.summary ?: uiMessage("topicTree.status.dragDropFailed"))
                     append('\n')
-                    append(recovery?.guidance ?: "No additional guidance available.")
+                    append(recovery?.guidance ?: uiMessage("topicTree.details.dragDropNoGuidance"))
                 }
-                publishStatus(recovery?.summary ?: "Drag-drop failed")
+                publishStatus(recovery?.summary ?: uiMessage("topicTree.status.dragDropFailed"))
                 false
             }
         }
@@ -1012,7 +924,7 @@ internal class TopicTreeWorkspacePanel(
 
     private fun refreshActionEnablement() {
         val controllers = controllersProvider()
-        val hasInstanceSelection = instanceList.selectedValue != null
+        val hasInstanceSelection = false
         val hasNavSelection = selectedNavNode() != null
         val hasMutableTocSelection = selectedMutableNode() != null
 
@@ -1067,7 +979,7 @@ internal class TopicTreeWorkspacePanel(
     private fun controllersOrNull(): TopicTreeControllers? {
         val controllers = controllersProvider()
         if (controllers == null) {
-            publishStatus("Topic-tree controllers are not available")
+            publishStatus(uiMessage("topicTree.status.controllersUnavailable"))
         }
         return controllers
     }
@@ -1079,19 +991,30 @@ internal class TopicTreeWorkspacePanel(
     ) {
         when (dispatch.result) {
             is TopicGatewayResult.Success -> {
+                val outcome = dispatch.result.value
+                if (!outcome.applied) {
+                    val summary = uiMessage("topicTree.summary.operationFailedSafely")
+                    publishStatus(summary)
+                    details.text = buildString {
+                        append(summary)
+                        append('\n')
+                        append(outcome.message)
+                    }
+                    return
+                }
                 onSuccess()
                 publishStatus(successMessage)
-                details.text = "Success: $successMessage"
+                details.text = uiMessage("topicTree.details.success", successMessage)
             }
 
             is TopicGatewayResult.Failure -> {
                 val recovery = dispatch.recovery
-                val summary = recovery?.summary ?: "Operation failed"
+                val summary = recovery?.summary ?: uiMessage("topicTree.summary.operationFailed")
                 publishStatus(summary)
                 details.text = buildString {
                     append(summary)
                     append('\n')
-                    append(recovery?.guidance ?: "No recovery guidance available.")
+                    append(recovery?.guidance ?: uiMessage("topicTree.details.noRecoveryGuidance"))
                 }
             }
         }
@@ -1100,15 +1023,19 @@ internal class TopicTreeWorkspacePanel(
     private fun renderSelectionDetails() {
         val selected = selectedNavNode()?.userObject as? TopicTreeNodeView
         if (selected == null) {
-            details.text = "Select a topic to inspect details."
+            details.text = uiMessage("topicTree.details.select")
             return
         }
         details.text = buildString {
-            append("Title: ${selected.title}\n")
-            append("Node ID: ${selected.nodeId}\n")
-            append("Parent ID: ${selected.parentNodeId ?: "-"}\n")
-            append("Path: ${selected.path ?: "-"}\n")
-            append("External URL: ${selected.externalUrl ?: "-"}")
+            append(uiMessage("topicTree.details.title", selected.title))
+            append('\n')
+            append(uiMessage("topicTree.details.nodeId", selected.nodeId))
+            append('\n')
+            append(uiMessage("topicTree.details.parentId", selected.parentNodeId ?: "-"))
+            append('\n')
+            append(uiMessage("topicTree.details.path", selected.path ?: "-"))
+            append('\n')
+            append(uiMessage("topicTree.details.externalUrl", selected.externalUrl ?: "-"))
         }
     }
 
@@ -1122,8 +1049,8 @@ internal class TopicTreeWorkspacePanel(
             ?.takeIf { it.isNotEmpty() }
     }
 
-    private fun promptOptional(title: String, message: String): String? {
-        val value = promptInputProvider(title, message, null)
+    private fun promptOptional(title: String, message: String, initial: String? = null): String? {
+        val value = promptInputProvider(title, message, initial)
             ?.trim()
             ?: return null
         return value.takeIf { it.isNotEmpty() }
@@ -1137,6 +1064,117 @@ internal class TopicTreeWorkspacePanel(
             ?.takeIf { it.isNotEmpty() }
             ?.replace('\\', '/')
             ?.trimStart('/')
+    }
+
+    private fun normalizeMarkdownPathWithExtension(path: String): String {
+        val normalized = normalizeOptionalPath(path).orEmpty()
+        return if (normalized.endsWith(".md", ignoreCase = true)) {
+            normalized
+        } else {
+            "$normalized.md"
+        }
+    }
+
+    private fun suggestedMarkdownPath(title: String, parentNode: DefaultMutableTreeNode): String {
+        val parentDirectory = resolveDirectoryForParent(parentNode)
+        return joinPath(parentDirectory, "${slugifyTitle(title)}.md")
+    }
+
+    private fun resolveDirectoryForParent(parentNode: DefaultMutableTreeNode): String {
+        val parentView = parentNode.userObject as? TopicTreeNodeView ?: return ""
+        if (parentView.nodeId == ROOT_NODE_ID) {
+            return ""
+        }
+
+        val noNavFolderHierarchy = currentState?.source == StartupTreeSource.FALLBACK
+        if (noNavFolderHierarchy) {
+            sectionDirectoryFromNodeId(parentView.nodeId)?.let { return it }
+        }
+
+        val directPath = normalizeOptionalPath(parentView.path)
+        if (directPath != null) {
+            return if (noNavFolderHierarchy) {
+                deriveNoNavDirectoryFromPagePath(directPath)
+            } else {
+                directPath.substringBeforeLast('/', "")
+            }
+        }
+
+        val childPath = firstPathInSubtree(parentNode)
+        if (childPath != null) {
+            return childPath.substringBeforeLast('/', "")
+        }
+
+        val ancestorNode = parentNode.parent as? DefaultMutableTreeNode ?: return ""
+        return resolveDirectoryForParent(ancestorNode)
+    }
+
+    private fun sectionDirectoryFromNodeId(nodeId: String): String? {
+        val prefix = "section:"
+        if (!nodeId.startsWith(prefix)) {
+            return null
+        }
+        return normalizeOptionalPath(nodeId.removePrefix(prefix))
+    }
+
+    private fun deriveNoNavDirectoryFromPagePath(pagePath: String): String {
+        val normalized = normalizeOptionalPath(pagePath) ?: return ""
+        val directory = normalized.substringBeforeLast('/', "")
+        val fileName = normalized.substringAfterLast('/')
+        val stem = fileName.substringBeforeLast('.', fileName)
+        return if (stem.equals("index", ignoreCase = true)) {
+            directory
+        } else {
+            joinPath(directory, stem)
+        }
+    }
+
+    internal fun resolveFilePath(node: TopicTreeNodeView): String? {
+        val relativePath = node.path ?: return null
+        val controllers = controllersProvider() ?: return null
+        val activeInstanceId = activeTreeId()
+
+        // Try getting active instance first
+        val instanceResult = controllers.instanceRegistryPort?.selectActiveInstance(activeInstanceId)
+        val instance = when (instanceResult) {
+            is TopicGatewayResult.Success -> instanceResult.value
+            else -> null
+        }
+
+        val docsDir = instance?.docsDirPath ?: return null
+        return Path.of(docsDir).resolve(relativePath).normalize().toString()
+    }
+
+    private fun firstPathInSubtree(node: DefaultMutableTreeNode): String? {
+        for (index in 0 until node.childCount) {
+            val childNode = node.getChildAt(index) as? DefaultMutableTreeNode ?: continue
+            val childView = childNode.userObject as? TopicTreeNodeView
+            val normalizedPath = normalizeOptionalPath(childView?.path)
+            if (normalizedPath != null) {
+                return normalizedPath
+            }
+            val descendant = firstPathInSubtree(childNode)
+            if (descendant != null) {
+                return descendant
+            }
+        }
+        return null
+    }
+
+    private fun slugifyTitle(title: String): String {
+        return title
+            .trim()
+            .lowercase()
+            .replace(Regex("[^a-z0-9]+"), "-")
+            .trim('-')
+            .ifBlank { "topic" }
+    }
+
+    private fun joinPath(directory: String, fileName: String): String {
+        return when {
+            directory.isBlank() -> fileName
+            else -> "${directory.trimEnd('/')}/$fileName"
+        }
     }
 
     private fun toTreeNode(
@@ -1212,11 +1250,25 @@ internal class TopicTreeWorkspacePanel(
 
     internal fun headerActionVisibilityForTest(): Map<String, Boolean> {
         return mapOf(
-            "Reload Configuration" to (reloadConfigurationButton.isShowing || reloadConfigurationButton.isVisible),
             "New" to (newInstanceButton.isShowing || newInstanceButton.isVisible),
             "Collapse All" to (collapseAllButton.isShowing || collapseAllButton.isVisible),
             "Root" to (addRootTopicButton.isShowing || addRootTopicButton.isVisible),
         )
+    }
+
+    internal fun triggerHeaderActionForTest(label: String): Boolean {
+        refreshActionEnablement()
+        val button = when (label) {
+            "New" -> newInstanceButton
+            "Collapse All" -> collapseAllButton
+            "Root" -> addRootTopicButton
+            else -> return false
+        }
+        if (!button.isEnabled) {
+            return false
+        }
+        button.doClick()
+        return true
     }
 
     internal fun selectTreeNodeForTest(nodeId: String): Boolean {

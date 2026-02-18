@@ -96,7 +96,7 @@ class RuntimeAdapterCoverageEdgeCasesTest {
             configPath = root.resolve("mkdocs.yml").toString(),
             docsDirPath = docs.toString(),
         )
-        val gateway = DocsFileGatewayAdapter()
+        val gateway = DocsFileGatewayAdapter(trashMover = { false })
         try {
             assertFailure(gateway.createMarkdownFile(instance, "invalid.txt", "x"), "VALIDATION")
             assertFailure(gateway.createMarkdownFile(instance, "../escape.md", "x"), "INSTANCE_SCOPE")
@@ -161,7 +161,7 @@ class RuntimeAdapterCoverageEdgeCasesTest {
     }
 
     @Test
-    fun `uv bootstrap service covers plugin map-list and unsupported plugin branches`() {
+    fun `uv bootstrap service covers two-phase install with get-deps`() {
         val root = Files.createTempDirectory("uv-bootstrap-branch")
         try {
             val configPath = root.resolve("mkdocs.yml")
@@ -169,7 +169,7 @@ class RuntimeAdapterCoverageEdgeCasesTest {
                 configPath,
                 """
                 site_name: Demo
-                theme: 42
+                theme: material
                 plugins:
                   - search
                   - glightbox: {}
@@ -179,37 +179,30 @@ class RuntimeAdapterCoverageEdgeCasesTest {
             val commands = mutableListOf<List<String>>()
             val service = UvBootstrapService { command, _ ->
                 commands += command
-                CommandResult(exitCode = 0)
+                // Simulate mkdocs get-deps returning dependency list
+                if (command.contains("get-deps")) {
+                    CommandResult(exitCode = 0, stdout = "mkdocs-material\nmkdocs-glightbox\n")
+                } else {
+                    CommandResult(exitCode = 0)
+                }
             }
             val result = service.bootstrap(root.toString())
             val runtimePath = root.resolve(".mkdocs-plugin-venv").toString()
             assertTrue(result.success)
-            assertEquals(
-                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs", "mkdocs-glightbox"),
-                commands.last(),
-            )
-
-            Files.writeString(
-                configPath,
-                """
-                site_name: Demo
-                plugins:
-                  - search
-                  - 42
-                """.trimIndent() + "\n",
-            )
-            val secondCommands = mutableListOf<List<String>>()
-            val secondService = UvBootstrapService { command, _ ->
-                secondCommands += command
-                CommandResult(exitCode = 0)
-            }
-            val second = secondService.bootstrap(root.toString())
-            assertTrue(second.success)
+            // Verify base install
             assertEquals(
                 listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs"),
-                secondCommands.last(),
+                commands[1],
+            )
+            // Verify get-deps was called
+            assertTrue(commands[2].contains("get-deps"))
+            // Verify discovered deps were installed
+            assertEquals(
+                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs-material", "mkdocs-glightbox"),
+                commands[3],
             )
 
+            // When get-deps fails, bootstrap still succeeds with base mkdocs
             Files.writeString(
                 configPath,
                 """
@@ -217,17 +210,158 @@ class RuntimeAdapterCoverageEdgeCasesTest {
                 plugins: 42
                 """.trimIndent() + "\n",
             )
-            val thirdCommands = mutableListOf<List<String>>()
-            val thirdService = UvBootstrapService { command, _ ->
-                thirdCommands += command
+            val secondCommands = mutableListOf<List<String>>()
+            val secondService = UvBootstrapService { command, _ ->
+                secondCommands += command
+                if (command.contains("get-deps")) {
+                    CommandResult(exitCode = 1, stderr = "bad config")
+                } else {
+                    CommandResult(exitCode = 0)
+                }
+            }
+            val second = secondService.bootstrap(root.toString())
+            assertTrue(second.success)
+            // Only 3 commands: venv + base install + get-deps (failed)
+            assertEquals(3, secondCommands.size)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `uv bootstrap detects mkdocs yaml file variant`() {
+        val root = Files.createTempDirectory("uv-bootstrap-yaml-variant")
+        try {
+            // Use .yaml extension instead of .yml
+            Files.writeString(root.resolve("mkdocs.yaml"), "site_name: Demo\n")
+            Files.createDirectories(root.resolve(".mkdocs-plugin-venv"))
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
                 CommandResult(exitCode = 0)
             }
-            val third = thirdService.bootstrap(root.toString())
-            assertTrue(third.success)
+            val result = service.bootstrap(root.toString())
+            assertTrue(result.success)
+            assertFalse(result.skipped)
+
+            // Second call should skip (cached)
+            val second = service.bootstrap(root.toString())
+            assertTrue(second.success)
+            assertTrue(second.skipped)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `uv bootstrap uses windows python path when unix path does not exist`() {
+        val root = Files.createTempDirectory("uv-bootstrap-win-python")
+        try {
+            val venv = root.resolve(".mkdocs-plugin-venv")
+            Files.createDirectories(venv)
+            // Create a Windows-style python path instead of Unix-style
+            val scriptsDir = venv.resolve("Scripts")
+            Files.createDirectories(scriptsDir)
+            Files.writeString(scriptsDir.resolve("python.exe"), "fake")
+            Files.writeString(root.resolve("mkdocs.yml"), "site_name: Demo\n")
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                CommandResult(exitCode = 0)
+            }
+            val result = service.bootstrap(root.toString())
+            assertTrue(result.success)
+            // get-deps command should use Windows python path
+            val getDepsCmd = commands.find { it.contains("get-deps") }
+            assertTrue(getDepsCmd != null)
+            assertTrue(getDepsCmd!!.first().contains("Scripts"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `uv bootstrap deduplicates discovered dependencies`() {
+        val root = Files.createTempDirectory("uv-bootstrap-dedup")
+        try {
+            Files.writeString(root.resolve("mkdocs.yml"), "site_name: Demo\n")
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                if (command.contains("get-deps")) {
+                    // Simulate duplicate entries from get-deps
+                    CommandResult(exitCode = 0, stdout = "mkdocs-material\nmkdocs-material\npymdown-extensions\n")
+                } else {
+                    CommandResult(exitCode = 0)
+                }
+            }
+            val result = service.bootstrap(root.toString())
+            assertTrue(result.success)
+            // Verify deps are deduplicated
+            val depsCmd = commands.last()
+            val runtimePath = root.resolve(".mkdocs-plugin-venv").toString()
             assertEquals(
-                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs"),
-                thirdCommands.last(),
+                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs-material", "pymdown-extensions"),
+                depsCmd,
             )
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `uv bootstrap handles unreadable config file gracefully`() {
+        val root = Files.createTempDirectory("uv-bootstrap-unreadable-config")
+        try {
+            // Create mkdocs.yml as a directory (causes readAllBytes to throw)
+            Files.createDirectories(root.resolve("mkdocs.yml"))
+            // Also create requirements.txt as a directory
+            Files.createDirectories(root.resolve("requirements.txt"))
+            Files.createDirectories(root.resolve(".mkdocs-plugin-venv"))
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                CommandResult(exitCode = 0)
+            }
+            val result = service.bootstrap(root.toString())
+            assertTrue(result.success)
+            assertFalse(result.skipped)
+
+            // Second call should skip (hash is stable even with unreadable files)
+            val second = service.bootstrap(root.toString())
+            assertTrue(second.success)
+            assertTrue(second.skipped)
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `uv bootstrap uses fallback python path when venv has no python binary`() {
+        val root = Files.createTempDirectory("uv-bootstrap-no-python")
+        try {
+            // Create venv directory but WITHOUT any python binary inside
+            val venv = root.resolve(".mkdocs-plugin-venv")
+            Files.createDirectories(venv)
+            Files.writeString(root.resolve("mkdocs.yml"), "site_name: Demo\n")
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                CommandResult(exitCode = 0)
+            }
+            val result = service.bootstrap(root.toString())
+            assertTrue(result.success)
+
+            // get-deps command should use the fallback unix-style path
+            val getDepsCmd = commands.find { it.contains("get-deps") }
+            assertTrue(getDepsCmd != null)
+            val pythonPath = getDepsCmd!!.first()
+            assertTrue(pythonPath.contains("bin/python"), "Expected fallback unix python path, got: $pythonPath")
         } finally {
             root.toFile().deleteRecursively()
         }

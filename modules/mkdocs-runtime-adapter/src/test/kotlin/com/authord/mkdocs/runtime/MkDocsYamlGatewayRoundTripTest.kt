@@ -42,6 +42,7 @@ class MkDocsYamlGatewayRoundTripTest {
         assertEquals(2, loaded.nav.size)
         assertEquals("index.md", loaded.nav.first().path)
         assertEquals(2, loaded.notInNav.size)
+        assertTrue(loaded.navPresent)
 
         val first = requireSuccess(gateway.serializeDeterministically(loaded))
         val second = requireSuccess(gateway.serializeDeterministically(loaded))
@@ -49,6 +50,34 @@ class MkDocsYamlGatewayRoundTripTest {
         assertTrue(first.contains("docs_dir: docs"))
         assertTrue(first.contains("nav:"))
         assertTrue(first.contains("not_in_nav:"))
+    }
+
+    @Test
+    fun `load and serialize without nav preserves no-nav mode`() {
+        val projectRoot = Files.createTempDirectory("mkdocs-no-nav")
+        val configPath = projectRoot.resolve("mkdocs.yml")
+        Files.writeString(
+            configPath,
+            """
+            docs_dir: docs
+            """.trimIndent() + "\n",
+        )
+
+        val instance = TopicInstanceRef(
+            instanceId = "default",
+            configPath = configPath.toString(),
+            docsDirPath = projectRoot.resolve("docs").toString(),
+        )
+        val gateway = MkDocsYamlGateway()
+
+        val loaded = requireSuccess(gateway.loadConfig(instance))
+        assertEquals("docs", loaded.docsDir)
+        assertTrue(loaded.nav.isEmpty())
+        assertTrue(!loaded.navPresent)
+
+        val serialized = requireSuccess(gateway.serializeDeterministically(loaded))
+        assertTrue(serialized.contains("docs_dir: docs"))
+        assertTrue(!serialized.contains("\nnav:"))
     }
 
     @Test

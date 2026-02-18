@@ -14,7 +14,9 @@ import com.authord.mkdocs.ui.PluginActivationService
 import com.authord.mkdocs.ui.PreviewNavigationFailureHandler
 import com.authord.mkdocs.ui.PreviewPaneCoordinator
 import com.authord.mkdocs.core.navigation.RouteMappingService
+import java.nio.file.Files
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -101,6 +103,70 @@ class PluginRuntimeIntegrationServiceTest {
 
         assertTrue(service.stopPreview())
         assertFalse(service.isRuntimeRunning())
+    }
+
+    @Test
+    fun `startPreview reloads mkdocs config changes by restarting runtime`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-config-reload-")
+        try {
+            Files.writeString(
+                projectRoot.resolve("mkdocs.yml"),
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                    nav: []
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString())
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            val previewPane = PreviewPaneCoordinator()
+
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "ready at https://preview.example/" },
+            )
+
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+
+            val first = service.startPreview()
+            assertTrue(first.success)
+            assertEquals(1, launcher.launchCount)
+
+            Files.writeString(
+                projectRoot.resolve("mkdocs.yml"),
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                    theme:
+                      name: material
+                    nav: []
+                """.trimIndent() + "\n",
+            )
+
+            val second = service.startPreview()
+            assertTrue(second.success)
+            assertEquals(2, launcher.launchCount)
+            assertTrue(second.message != "Preview already running.")
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
     }
 
     @Test

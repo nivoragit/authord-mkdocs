@@ -1,13 +1,13 @@
 package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
+import java.nio.file.Path
 import kotlin.io.path.createDirectories
 import kotlin.io.path.createTempDirectory
 import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
-import kotlin.test.assertTrue
 
 class InstanceRegistryDiscoveryTest {
     @Test
@@ -23,8 +23,8 @@ class InstanceRegistryDiscoveryTest {
         val instance = discovered.value
         assertNotNull(instance)
         assertEquals("default", instance.instanceId)
-        assertTrue(instance.configPath.endsWith("/mkdocs.yml"))
-        assertTrue(instance.docsDirPath.endsWith("/docs"))
+        assertEquals("mkdocs.yml", Path.of(instance.configPath).fileName.toString())
+        assertEquals("docs", Path.of(instance.docsDirPath).fileName.toString())
     }
 
     @Test

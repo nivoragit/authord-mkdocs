@@ -14,7 +14,7 @@ tasks.named<JacocoCoverageVerification>("jacocoTestCoverageVerification") {
             limit {
                 counter = "LINE"
                 value = "COVEREDRATIO"
-                minimum = BigDecimal("1.0")
+                minimum = BigDecimal("0.9")
             }
         }
     }

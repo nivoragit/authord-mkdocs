@@ -2,6 +2,7 @@ package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicInstanceRef
+import com.authord.mkdocs.ports.topic.MkDocsConfigDocument
 import com.authord.mkdocs.ports.topic.TopicSyncOutcome
 import com.authord.mkdocs.ports.topic.TopicSyncTransaction
 
@@ -48,4 +49,15 @@ interface TopicTreeApplicationService {
      * Errors/failure modes: instance-scope resolution failures from registry ports.
      */
     fun activeInstance(): TopicGatewayResult<TopicInstanceRef?>
+
+    /**
+     * Hydrates in-memory aggregate state from persisted config when startup reconciliation runs.
+     */
+    fun hydrateTreeFromConfig(
+        treeId: String,
+        instanceId: String,
+        config: MkDocsConfigDocument,
+    ): TopicGatewayResult<Unit> {
+        return TopicGatewayResult.Success(Unit)
+    }
 }

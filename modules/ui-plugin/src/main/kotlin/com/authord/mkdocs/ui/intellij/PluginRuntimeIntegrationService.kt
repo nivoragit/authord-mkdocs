@@ -18,10 +18,12 @@ import com.authord.mkdocs.ui.PluginActivationService
 import com.authord.mkdocs.ui.PreviewNavigationFailureHandler
 import com.authord.mkdocs.ui.PreviewPaneCoordinator
 import com.authord.mkdocs.core.navigation.RouteMappingService
+import com.intellij.ui.JBColor
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.util.Key
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.atomic.AtomicInteger
 
@@ -87,6 +89,7 @@ data class RuntimeIntegrationDependencies(
                     baseUrlDetector = com.authord.mkdocs.runtime.BaseUrlDetector(),
                     previewPaneCoordinator = previewPaneCoordinator,
                     errorPresenter = ActivationErrorPresenter(),
+                    isDarkIdeTheme = { !JBColor.isBright() },
                 ),
                 processManager = processManager,
                 previewPaneCoordinator = previewPaneCoordinator,
@@ -112,6 +115,7 @@ class PluginRuntimeIntegrationService(
     private val project: Project,
 ) : Disposable {
     private var dependencies: RuntimeIntegrationDependencies = RuntimeIntegrationDependencies.createDefault()
+    private var lastMkdocsConfigFingerprint: String? = null
 
     /**
      * Overrides runtime integration dependencies for unit tests.
@@ -151,6 +155,10 @@ class PluginRuntimeIntegrationService(
             )
 
         val projectId = project.locationHash
+        val configChanged = hasMkdocsConfigChanged(projectPath)
+        if (dependencies.processManager.isRunning(projectId) && configChanged) {
+            return restartPreview(trigger)
+        }
         val existingPreviewUrl = dependencies.previewPaneCoordinator.currentUrl(projectId)
         if (dependencies.processManager.isRunning(projectId) && existingPreviewUrl != null) {
             return ActivationResult(
@@ -160,12 +168,16 @@ class PluginRuntimeIntegrationService(
             )
         }
 
-        return dependencies.activationService.activate(
+        val activationResult = dependencies.activationService.activate(
             projectId = projectId,
             projectPath = projectPath,
             startupOutput = dependencies.startupOutputProvider.startupOutput(project, trigger),
             featureFlags = dependencies.featureFlagPolicyService.current(),
         )
+        if (activationResult.success) {
+            syncMkdocsConfigFingerprint(projectPath)
+        }
+        return activationResult
     }
 
     /**
@@ -184,6 +196,12 @@ class PluginRuntimeIntegrationService(
      * If runtime is not currently running, this method starts preview instead.
      */
     fun restartPreview(trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION): ActivationResult {
+        val projectPath = project.basePath
+            ?: return ActivationResult(
+                success = false,
+                reason = ActivationFailureReason.START_FAILED,
+                message = "Project base path is not available for runtime restart.",
+            )
         val projectId = project.locationHash
         val previousRoute = dependencies.previewPaneCoordinator.currentState(projectId)?.currentRoute
         if (dependencies.processManager.isRunning(projectId)) {
@@ -198,6 +216,7 @@ class PluginRuntimeIntegrationService(
             dependencies.previewPaneCoordinator.navigate(projectId, previousRoute)
         }
 
+        syncMkdocsConfigFingerprint(projectPath)
         return restarted.copy(previewUrl = currentPreviewUrl().orEmpty())
     }
 
@@ -245,6 +264,36 @@ class PluginRuntimeIntegrationService(
      */
     override fun dispose() {
         dependencies.processManager.dispose(project.locationHash)
+        lastMkdocsConfigFingerprint = null
+    }
+
+    private fun hasMkdocsConfigChanged(projectPath: String): Boolean {
+        val current = currentMkdocsConfigFingerprint(projectPath)
+        return current != lastMkdocsConfigFingerprint
+    }
+
+    private fun syncMkdocsConfigFingerprint(projectPath: String) {
+        lastMkdocsConfigFingerprint = currentMkdocsConfigFingerprint(projectPath)
+    }
+
+    private fun currentMkdocsConfigFingerprint(projectPath: String): String? {
+        val configPath = resolveMkdocsConfigPath(projectPath) ?: return null
+        val normalizedPath = configPath.toAbsolutePath().normalize()
+        val content = runCatching { Files.readString(normalizedPath) }.getOrNull() ?: return null
+        return "${normalizedPath}::${content.hashCode()}"
+    }
+
+    private fun resolveMkdocsConfigPath(projectPath: String): Path? {
+        val root = Path.of(projectPath)
+        val yml = root.resolve("mkdocs.yml")
+        if (Files.exists(yml)) {
+            return yml
+        }
+        val yaml = root.resolve("mkdocs.yaml")
+        if (Files.exists(yaml)) {
+            return yaml
+        }
+        return null
     }
 
     private fun projectRelativePath(selectedPath: String): String? {

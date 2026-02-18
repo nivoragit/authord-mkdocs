@@ -2,6 +2,7 @@ package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.topic.DefaultTopicSyncError
 import com.authord.mkdocs.ports.topic.InstanceRegistryPort
+import com.authord.mkdocs.ports.topic.MkDocsConfigDocument
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
@@ -18,6 +19,18 @@ class TopicTreeUiServiceImpl(
     val instanceRegistryPort: InstanceRegistryPort,
     private val scopeGuard: TopicTreeScopeGuard = TopicTreeScopeGuard(instanceRegistryPort),
 ) : TopicTreeUiService {
+    internal fun hydrateTreeFromConfig(
+        treeId: String,
+        instanceId: String,
+        config: MkDocsConfigDocument,
+    ): TopicGatewayResult<Unit> {
+        return applicationService.hydrateTreeFromConfig(
+            treeId = treeId,
+            instanceId = instanceId,
+            config = config,
+        )
+    }
+
     override fun dispatch(command: TopicTreeCommand): TopicGatewayResult<TopicSyncOutcome> {
         val instance = when (val scoped = scopeGuard.ensureCommandScope(command)) {
             is TopicGatewayResult.Success -> scoped.value

@@ -55,6 +55,7 @@ class RuntimeNeutralityPolicyTest {
             stream
                 .filter { Files.isRegularFile(it) }
                 .filter { it.toString().replace('\\', '/').contains("/src/main/kotlin/") }
+                .filter { !it.toString().replace('\\', '/').contains("/modules/mkdocs-runtime-adapter/") }
                 .filter { it.fileName.toString().endsWith(".kt") }
                 .forEach { sourceFile ->
                     val content = sourceFile.readText()

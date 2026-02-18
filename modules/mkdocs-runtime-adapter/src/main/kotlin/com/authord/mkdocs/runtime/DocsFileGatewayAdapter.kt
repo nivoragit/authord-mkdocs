@@ -6,6 +6,7 @@ import com.authord.mkdocs.ports.topic.TopicDeleteMode
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
+import java.awt.Desktop
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
@@ -16,6 +17,7 @@ import java.nio.file.StandardCopyOption
  */
 class DocsFileGatewayAdapter(
     private val markdownLinkRewriter: MarkdownLinkRewriter = MarkdownLinkRewriter(),
+    private val trashMover: (Path) -> Boolean = ::moveToSystemTrash,
 ) : DocsFileGateway {
     override fun createMarkdownFile(
         instance: TopicInstanceRef,
@@ -64,12 +66,11 @@ class DocsFileGatewayAdapter(
         }
 
         return runCatching {
-            val docsDir = docsDir(instance)
-            val recoveryDir = docsDir.resolve(".recovery")
-            Files.createDirectories(recoveryDir)
-            val recoveryPath = recoveryDir.resolve("${absolutePath.fileName}-${System.currentTimeMillis()}")
-            Files.move(absolutePath, recoveryPath, StandardCopyOption.REPLACE_EXISTING)
-            toRelative(instance, recoveryPath)
+            if (trashMover(absolutePath)) {
+                toRelative(instance, absolutePath)
+            } else {
+                moveToRecovery(instance, absolutePath)
+            }
         }.fold(
             onSuccess = { TopicGatewayResult.Success(it) },
             onFailure = {
@@ -155,11 +156,29 @@ class DocsFileGatewayAdapter(
 
     private fun docsDir(instance: TopicInstanceRef): Path = Paths.get(instance.docsDirPath).normalize()
 
+    private fun moveToRecovery(instance: TopicInstanceRef, absolutePath: Path): String {
+        val docsDir = docsDir(instance)
+        val recoveryDir = docsDir.resolve(".recovery")
+        Files.createDirectories(recoveryDir)
+        val recoveryPath = recoveryDir.resolve("${absolutePath.fileName}-${System.currentTimeMillis()}")
+        Files.move(absolutePath, recoveryPath, StandardCopyOption.REPLACE_EXISTING)
+        return toRelative(instance, recoveryPath)
+    }
+
     private fun normalizeRelative(path: String): String {
         return path.replace('\\', '/').trim().trimStart('/')
     }
 
     private fun toRelative(instance: TopicInstanceRef, path: Path): String {
         return docsDir(instance).relativize(path).toString().replace('\\', '/')
+    }
+
+    private companion object {
+        private fun moveToSystemTrash(path: Path): Boolean {
+            val desktop = runCatching { Desktop.getDesktop() }.getOrNull()
+            return desktop
+                ?.takeIf { Desktop.isDesktopSupported() && it.isSupported(Desktop.Action.MOVE_TO_TRASH) }
+                ?.let { systemDesktop -> runCatching { systemDesktop.moveToTrash(path.toFile()) }.getOrDefault(false) } == true
+        }
     }
 }

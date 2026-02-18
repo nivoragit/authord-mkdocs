@@ -21,7 +21,7 @@ class DocsFileGatewayAdapterMutationTest {
             docsDirPath = docsDir.toString(),
         )
 
-        val gateway = DocsFileGatewayAdapter()
+        val gateway = DocsFileGatewayAdapter(trashMover = { false })
 
         val created = requireSuccess(gateway.createMarkdownFile(instance, "guide/new.md", "# new"))
         assertEquals("guide/new.md", created)

@@ -5,6 +5,7 @@ import com.authord.mkdocs.runtime.BaseUrlDetector
 import com.authord.mkdocs.runtime.MkdocsProcessManager
 import com.authord.mkdocs.runtime.RuntimeServerConfig
 import com.authord.mkdocs.runtime.UvBootstrapService
+import java.net.ServerSocket
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
@@ -30,8 +31,11 @@ class PluginActivationService(
     private val baseUrlDetector: BaseUrlDetector,
     private val previewPaneCoordinator: PreviewPaneCoordinator,
     private val errorPresenter: ActivationErrorPresenter,
+    private val isDarkIdeTheme: () -> Boolean = { false },
 ) {
     private val siteNameKeyRegex = Regex("""^\s*site_name\s*:""")
+    private val themeKeyRegex = Regex("""^(?:theme|["']theme["'])\s*:""")
+    private val fallbackThemeConfigFileName = ".authord-mkdocs.theme.yml"
 
     /**
      * Activates plugin runtime for a project.
@@ -137,6 +141,16 @@ class PluginActivationService(
         ensureSiteNameRequiredByMkDocs(projectPath)
         val scriptPath = ensureParentGuardScript(projectPath)
         val parentPid = ProcessHandle.current().pid().toString()
+        val fallbackThemeConfigPath = ensureFallbackThemeConfig(projectPath)
+        val fallbackThemeConfigArgs = if (fallbackThemeConfigPath != null) {
+            listOf("-f", fallbackThemeConfigPath.toString())
+        } else {
+            emptyList()
+        }
+        val hostBindingArgs = allocateLoopbackPort()?.let { port ->
+            val host = java.net.InetAddress.getLoopbackAddress().hostAddress
+            listOf("-a", "$host:$port")
+        } ?: emptyList()
 
         return listOf(
             uvExecutablePath,
@@ -152,9 +166,54 @@ class PluginActivationService(
             "--",
             "mkdocs",
             "serve",
+        ) + hostBindingArgs + fallbackThemeConfigArgs + listOf(
             "--livereload",
             "--dirty",
         )
+    }
+
+    private fun ensureFallbackThemeConfig(projectPath: String): Path? {
+        if (!shouldUseDefaultThemeOverrides(projectPath)) {
+            return null
+        }
+
+        val baseConfigPath = resolveMkdocsConfigPath(projectPath) ?: return null
+        val resolvedBaseConfigPath = baseConfigPath.toAbsolutePath().normalize().toString()
+        val projectRootDir = Path.of(projectPath)
+        val fallbackThemeConfigPath = projectRootDir.resolve(fallbackThemeConfigFileName)
+        val fallbackColorMode = if (runCatching { isDarkIdeTheme() }.getOrDefault(false)) "dark" else "light"
+        val fallbackConfig = buildString {
+            append("INHERIT: '")
+            append(escapeSingleQuotedYaml(resolvedBaseConfigPath))
+            append("'\n")
+            append("theme:\n")
+            append("  name: mkdocs\n")
+            append("  color_mode: $fallbackColorMode\n")
+            append("  user_color_mode_toggle: true\n")
+        }
+
+        val wroteFallbackConfig = runCatching {
+            Files.writeString(
+                fallbackThemeConfigPath,
+                fallbackConfig,
+                StandardOpenOption.CREATE,
+                StandardOpenOption.TRUNCATE_EXISTING,
+                StandardOpenOption.WRITE,
+            )
+        }.isSuccess
+
+        return if (wroteFallbackConfig) fallbackThemeConfigPath else null
+    }
+
+    private fun shouldUseDefaultThemeOverrides(projectPath: String): Boolean {
+        val configPath = resolveMkdocsConfigPath(projectPath) ?: return true
+        val existing = runCatching { Files.readString(configPath) }.getOrNull() ?: return true
+        return existing.lineSequence().none { line ->
+            val trimmed = line.trimStart()
+            trimmed.isNotEmpty() &&
+                !trimmed.startsWith("#") &&
+                themeKeyRegex.containsMatchIn(trimmed)
+        }
     }
 
     private fun ensureSiteNameRequiredByMkDocs(projectPath: String) {
@@ -207,8 +266,19 @@ class PluginActivationService(
 
     private fun escapeSingleQuotedYaml(value: String): String = value.replace("'", "''")
 
+    private fun allocateLoopbackPort(): Int? {
+        return runCatching {
+            ServerSocket(0).use { socket ->
+                socket.reuseAddress = true
+                socket.localPort.takeIf { it > 0 }
+            }
+        }.getOrNull()
+    }
+
+    private fun pluginRuntimeDir(projectPath: String): Path = Path.of(projectPath).resolve(".mkdocs-plugin-runtime")
+
     private fun ensureParentGuardScript(projectPath: String): Path {
-        val runtimeDir = Path.of(projectPath).resolve(".mkdocs-plugin-runtime")
+        val runtimeDir = pluginRuntimeDir(projectPath)
         val scriptPath = runtimeDir.resolve("serve_with_parent_guard.py")
         val script = """
             import argparse

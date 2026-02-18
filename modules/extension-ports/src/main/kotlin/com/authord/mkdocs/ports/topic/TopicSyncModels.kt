@@ -27,6 +27,7 @@ data class MkDocsConfigDocument(
     val docsDir: String,
     val nav: List<TopicNavNode>,
     val notInNav: List<String> = emptyList(),
+    val navPresent: Boolean = true,
 )
 
 /**

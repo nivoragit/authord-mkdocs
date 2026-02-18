@@ -114,6 +114,14 @@ class ExtensionPortsCoverageRemediationTest {
         assertEquals("docs", configWithDefaultNotInNav.docsDir)
         assertEquals(1, configWithDefaultNotInNav.nav.size)
         assertTrue(configWithDefaultNotInNav.notInNav.isEmpty())
+        assertTrue(configWithDefaultNotInNav.navPresent)
+
+        val configWithoutNav = MkDocsConfigDocument(
+            docsDir = "docs",
+            nav = emptyList(),
+            navPresent = false,
+        )
+        assertTrue(!configWithoutNav.navPresent)
 
         assertEquals(
             setOf("CREATE", "DELETE", "RENAME", "MOVE", "REWRITE_LINKS"),

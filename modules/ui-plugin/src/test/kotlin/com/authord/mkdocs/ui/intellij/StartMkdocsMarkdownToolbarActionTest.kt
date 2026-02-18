@@ -1,0 +1,100 @@
+package com.authord.mkdocs.ui.intellij
+
+import com.intellij.openapi.actionSystem.ActionUpdateThread
+import kotlin.test.Test
+import kotlin.test.assertEquals
+import kotlin.test.assertFalse
+import kotlin.test.assertTrue
+
+class StartMkdocsMarkdownToolbarActionTest {
+    @Test
+    fun `toolbar action update thread is background thread`() {
+        val action = StartMkdocsMarkdownToolbarAction()
+
+        assertEquals(ActionUpdateThread.BGT, action.actionUpdateThread)
+    }
+
+    @Test
+    fun `update is visible and enabled in markdown context when preview can start`() {
+        val project = IntellijTestFixtures.project()
+        val service = PluginRuntimeIntegrationService(project)
+        val delegate = StartMkdocsAction(runtimeServiceResolver = { service })
+        val action = StartMkdocsMarkdownToolbarAction(delegate = delegate)
+        val event = IntellijTestFixtures.actionEvent(
+            action = action,
+            project = project,
+            virtualFilePath = "/tmp/project/docs/index.md",
+        )
+
+        action.update(event)
+
+        assertTrue(event.presentation.isVisible)
+        assertTrue(event.presentation.isEnabled)
+    }
+
+    @Test
+    fun `update is hidden and disabled in non-markdown context`() {
+        val project = IntellijTestFixtures.project()
+        val service = PluginRuntimeIntegrationService(project)
+        val delegate = StartMkdocsAction(runtimeServiceResolver = { service })
+        val action = StartMkdocsMarkdownToolbarAction(delegate = delegate)
+        val event = IntellijTestFixtures.actionEvent(
+            action = action,
+            project = project,
+            virtualFilePath = "/tmp/project/README.txt",
+        )
+
+        action.update(event)
+
+        assertFalse(event.presentation.isVisible)
+        assertFalse(event.presentation.isEnabled)
+    }
+
+    @Test
+    fun `actionPerformed delegates to existing start pipeline for markdown context`() {
+        val project = IntellijTestFixtures.project()
+        val service = PluginRuntimeIntegrationService(project)
+        service.setStartupOutputForNextRun("ready at https://preview.example/docs/")
+        val delegate = StartMkdocsAction(runtimeServiceResolver = { service })
+        var toolWindowOpened = 0
+        val action = StartMkdocsMarkdownToolbarAction(delegate = delegate)
+        val event = IntellijTestFixtures.actionEvent(
+            action = action,
+            project = project,
+            virtualFilePath = "/tmp/project/docs/index.md",
+        )
+
+        val actionWithOpener = StartMkdocsMarkdownToolbarAction(
+            delegate = delegate,
+            toolWindowOpener = { toolWindowOpened += 1 },
+        )
+        actionWithOpener.actionPerformed(event)
+
+        assertTrue(service.isRuntimeRunning())
+        assertEquals("https://preview.example/docs/", service.currentPreviewUrl())
+        assertEquals(1, toolWindowOpened)
+    }
+
+    @Test
+    fun `actionPerformed is no-op outside markdown context`() {
+        val project = IntellijTestFixtures.project()
+        val service = PluginRuntimeIntegrationService(project)
+        val delegate = StartMkdocsAction(runtimeServiceResolver = { service })
+        var toolWindowOpened = 0
+        val action = StartMkdocsMarkdownToolbarAction(delegate = delegate)
+        val event = IntellijTestFixtures.actionEvent(
+            action = action,
+            project = project,
+            virtualFilePath = "/tmp/project/README.txt",
+        )
+
+        val actionWithOpener = StartMkdocsMarkdownToolbarAction(
+            delegate = delegate,
+            toolWindowOpener = { toolWindowOpened += 1 },
+        )
+        actionWithOpener.actionPerformed(event)
+
+        assertFalse(service.isRuntimeRunning())
+        assertEquals(0, toolWindowOpened)
+    }
+}

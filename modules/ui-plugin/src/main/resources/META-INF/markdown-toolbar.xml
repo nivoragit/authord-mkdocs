@@ -2,7 +2,7 @@
     <actions>
         <action
             id="com.authord.mkdocs.action.markdownToolbarPreview"
-            class="com.authord.mkdocs.ui.intellij.StartMkdocsAction"
+            class="com.authord.mkdocs.ui.intellij.StartMkdocsMarkdownToolbarAction"
             text="Authord Preview"
             description="Start Authord MkDocs Preview for this project"
         >

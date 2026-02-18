@@ -18,6 +18,8 @@ import com.intellij.openapi.util.ActionCallback
 import com.intellij.openapi.util.Key
 import com.intellij.openapi.wm.ToolWindow
 import com.intellij.openapi.extensions.PluginId
+import com.intellij.openapi.vfs.VirtualFile
+import com.intellij.testFramework.LightVirtualFile
 import com.intellij.ui.content.Content
 import com.intellij.ui.content.ContentFactory
 import com.intellij.ui.content.ContentManager
@@ -76,9 +78,14 @@ object IntellijTestFixtures {
         override fun getKeyboardShortcut(actionId: String): KeyboardShortcut? = null
     }
 
-    fun actionEvent(action: AnAction, project: Project?): AnActionEvent {
+    fun actionEvent(action: AnAction, project: Project?, virtualFilePath: String? = null): AnActionEvent {
+        val virtualFile = virtualFilePath?.let(::virtualFile)
         val context = DataContext { dataId ->
-            if (CommonDataKeys.PROJECT.`is`(dataId)) project else null
+            when {
+                CommonDataKeys.PROJECT.`is`(dataId) -> project
+                CommonDataKeys.VIRTUAL_FILE.`is`(dataId) -> virtualFile
+                else -> null
+            }
         }
         return AnActionEvent(
             null,
@@ -88,6 +95,14 @@ object IntellijTestFixtures {
             actionManagerFixture,
             0,
         )
+    }
+
+    private fun virtualFile(path: String): VirtualFile {
+        val normalizedPath = path.replace('\\', '/')
+        val name = normalizedPath.substringAfterLast('/')
+        return object : LightVirtualFile(name) {
+            override fun getPath(): String = normalizedPath
+        }
     }
 
     fun project(
