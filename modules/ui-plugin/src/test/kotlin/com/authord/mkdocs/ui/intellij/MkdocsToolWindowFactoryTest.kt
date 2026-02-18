@@ -369,7 +369,7 @@ class MkdocsToolWindowFactoryTest {
     }
 
     @Test
-    fun `topic tree toggle action collapses and restores tree panel`() {
+    fun `shell layout mode switches between preview tree and combined views`() {
         val project = IntellijTestFixtures.project()
         val previewContent = RecordingPreviewContent()
         val topicTreeComponent = JPanel()
@@ -391,11 +391,18 @@ class MkdocsToolWindowFactoryTest {
             ?.takeIf { it.isNotBlank() }
             ?: project.name
 
-        factory.toggleTopicTreePanel(projectKey, splitter)
+        factory.setShellLayoutMode(projectKey, splitter, ShellLayoutMode.PREVIEW)
         assertFalse(topicTreeComponent.isVisible)
+        assertTrue(previewContent.component.isVisible)
         assertEquals(1.0f, splitter.proportion)
 
-        factory.toggleTopicTreePanel(projectKey, splitter)
+        factory.setShellLayoutMode(projectKey, splitter, ShellLayoutMode.TREEVIEW)
+        assertTrue(topicTreeComponent.isVisible)
+        assertFalse(previewContent.component.isVisible)
+        assertEquals(0.0f, splitter.proportion)
+
+        factory.setShellLayoutMode(projectKey, splitter, ShellLayoutMode.PREVIEW_AND_TREEVIEW)
+        assertTrue(previewContent.component.isVisible)
         assertTrue(topicTreeComponent.isVisible)
         assertTrue(splitter.proportion in 0.69f..0.71f)
     }

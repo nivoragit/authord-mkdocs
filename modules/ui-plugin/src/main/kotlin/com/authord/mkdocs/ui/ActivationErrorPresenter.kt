@@ -13,11 +13,11 @@ enum class ActivationFailureReason {
 /**
  * Formats user-facing activation failure messages.
  */
-class ActivationErrorPresenter {
+open class ActivationErrorPresenter {
     /**
      * Builds a message for a failure reason and optional detail text.
      */
-    fun present(reason: ActivationFailureReason, details: String = ""): String {
+    open fun present(reason: ActivationFailureReason, details: String = ""): String {
         val base = when (reason) {
             ActivationFailureReason.MVP_DISABLED -> "MVP activation is disabled by feature flags."
             ActivationFailureReason.BOOTSTRAP_FAILED -> "Runtime bootstrap failed."

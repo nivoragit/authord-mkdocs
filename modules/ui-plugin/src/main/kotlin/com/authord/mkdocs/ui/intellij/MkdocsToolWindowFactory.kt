@@ -79,7 +79,25 @@ private fun defaultTopicTreeUiService(project: Project): TopicTreeUiService {
     val applicationService = TopicTreeApplicationServiceImpl(orchestrator, instanceRegistry)
     return TopicTreeUiServiceImpl(applicationService, instanceRegistry)
 }
- 
+
+internal enum class ShellLayoutMode(
+    val label: String,
+    val description: String,
+) {
+    PREVIEW(
+        label = "Preview",
+        description = "Show only the preview panel",
+    ),
+    PREVIEW_AND_TREEVIEW(
+        label = "Preview and Treeview",
+        description = "Show preview and topic tree panels",
+    ),
+    TREEVIEW(
+        label = "Treeview",
+        description = "Show only the topic tree panel",
+    ),
+}
+
 /**
  * Creates a minimal MkDocs tool window shell for plugin entry-point validation.
  */
@@ -142,6 +160,7 @@ class MkdocsToolWindowFactory(
     },
 ) : ToolWindowFactory, DumbAware {
     private val expandedTreeProportionByProject = ConcurrentHashMap<String, Float>()
+    private val shellLayoutModeByProject = ConcurrentHashMap<String, ShellLayoutMode>()
     private val scrollSyncEngineByProject = ConcurrentHashMap<String, MkdocsScrollSyncEngine>()
     private val typingRefreshDelaysMs: List<Long> = listOf(2000L)
     private val typingGenerationByProject = ConcurrentHashMap<String, AtomicInteger>()
@@ -170,7 +189,7 @@ class MkdocsToolWindowFactory(
 
         val setupMode = !mkdocsConfigPresenceResolver(project)
         if (setupMode) {
-            splitter?.let { setTopicTreePanelVisible(projectKey(project), it, visible = false) }
+            splitter?.let { setShellLayoutMode(projectKey(project), it, ShellLayoutMode.PREVIEW) }
             if (splitter != null && previewContent is JcefPreviewContent) {
                 val setupPanel = SetupPanel { requestedName ->
                     handleSetupProjectCreate(
@@ -211,7 +230,7 @@ class MkdocsToolWindowFactory(
         }
         registerPreviewAnchorInvalidation(project, runtimeService, previewContent)
         registerEditorSelectionSync(project, runtimeService, previewContent)
-        registerDocumentTypingSync(project, runtimeService, previewContent)
+        registerDocumentTypingSync(project, previewContent)
         registerEditorScrollSync(project, runtimeService, previewContent)
         registerTopicTreeReconciliationTriggers(project, topicTreePanel)
 
@@ -257,6 +276,11 @@ class MkdocsToolWindowFactory(
         } else {
             null
         }
+        val projectKey = projectKey(project)
+        splitter?.let { shellSplitter ->
+            val initialMode = shellLayoutModeByProject[projectKey] ?: ShellLayoutMode.PREVIEW_AND_TREEVIEW
+            setShellLayoutMode(projectKey, shellSplitter, initialMode)
+        }
         val content = splitter ?: previewContent.component
 
         val panel = JPanel(BorderLayout())
@@ -297,7 +321,9 @@ class MkdocsToolWindowFactory(
 
         val actionGroup = DefaultActionGroup().apply {
             add(createRestartPluginAction(project, runtimeService, previewContent))
-            add(createToggleTopicTreeAction(project, splitter))
+            add(createSetShellLayoutModeAction(project, splitter, ShellLayoutMode.PREVIEW))
+            add(createSetShellLayoutModeAction(project, splitter, ShellLayoutMode.PREVIEW_AND_TREEVIEW))
+            add(createSetShellLayoutModeAction(project, splitter, ShellLayoutMode.TREEVIEW))
         }
         val toolbarComponent = runCatching {
             val toolbar = ActionManager.getInstance().createActionToolbar("AuthordMkdocsShellToolbar", actionGroup, true)
@@ -364,31 +390,36 @@ class MkdocsToolWindowFactory(
         }
     }
 
-    internal fun createToggleTopicTreeAction(project: Project, splitter: OnePixelSplitter?): AnAction {
+    internal fun createSetShellLayoutModeAction(
+        project: Project,
+        splitter: OnePixelSplitter?,
+        mode: ShellLayoutMode,
+    ): AnAction {
         val projectKey = projectKey(project)
         return object : com.intellij.openapi.project.DumbAwareAction(
-            "Hide Tree",
-            "Show or hide the topic tree",
-            AllIcons.Actions.Collapseall,
+            mode.label,
+            mode.description,
+            null,
         ) {
+            override fun getActionUpdateThread(): com.intellij.openapi.actionSystem.ActionUpdateThread =
+                com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
+
             override fun actionPerformed(event: AnActionEvent) {
                 val shellSplitter = splitter ?: return
-                toggleTopicTreePanel(projectKey, shellSplitter)
+                setShellLayoutMode(projectKey, shellSplitter, mode)
             }
 
             override fun update(event: AnActionEvent) {
                 val treeComponent = splitter?.secondComponent
                 val hasTree = treeComponent != null
                 event.presentation.isVisible = hasTree
-                event.presentation.isEnabled = hasTree
                 if (!hasTree) {
+                    event.presentation.isEnabled = false
                     return
                 }
 
-                val collapsed = treeComponent?.isVisible == false
-                event.presentation.text = if (collapsed) "Show Tree" else "Hide Tree"
-                event.presentation.description =
-                    if (collapsed) "Expand the topic tree panel" else "Collapse the topic tree panel"
+                val shellSplitter = splitter ?: return
+                event.presentation.isEnabled = resolveShellLayoutMode(projectKey, shellSplitter) != mode
             }
         }
     }
@@ -400,27 +431,49 @@ class MkdocsToolWindowFactory(
             ?: project.name
     }
 
-    internal fun toggleTopicTreePanel(projectKey: String, splitter: OnePixelSplitter) {
-        val treeComponent = splitter.secondComponent ?: return
-        if (treeComponent.isVisible) {
-            expandedTreeProportionByProject[projectKey] = splitter.proportion.coerceIn(0.05f, 0.95f)
-            treeComponent.isVisible = false
-            splitter.proportion = 1.0f
-        } else {
-            treeComponent.isVisible = true
-            val restoredProportion = expandedTreeProportionByProject[projectKey] ?: 0.7f
-            splitter.proportion = restoredProportion.coerceIn(0.05f, 0.95f)
+    private fun resolveShellLayoutMode(projectKey: String, splitter: OnePixelSplitter): ShellLayoutMode {
+        shellLayoutModeByProject[projectKey]?.let { return it }
+        val previewVisible = splitter.firstComponent?.isVisible != false
+        val treeVisible = splitter.secondComponent?.isVisible != false
+        val inferred = when {
+            previewVisible && treeVisible -> ShellLayoutMode.PREVIEW_AND_TREEVIEW
+            previewVisible -> ShellLayoutMode.PREVIEW
+            treeVisible -> ShellLayoutMode.TREEVIEW
+            else -> ShellLayoutMode.PREVIEW_AND_TREEVIEW
         }
-        splitter.revalidate()
-        splitter.repaint()
+        shellLayoutModeByProject[projectKey] = inferred
+        return inferred
     }
 
-    private fun setTopicTreePanelVisible(projectKey: String, splitter: OnePixelSplitter, visible: Boolean) {
+    internal fun setShellLayoutMode(projectKey: String, splitter: OnePixelSplitter, mode: ShellLayoutMode) {
+        val previewComponent = splitter.firstComponent ?: return
         val treeComponent = splitter.secondComponent ?: return
-        if (treeComponent.isVisible == visible) {
-            return
+        if (mode != ShellLayoutMode.PREVIEW_AND_TREEVIEW && previewComponent.isVisible && treeComponent.isVisible) {
+            expandedTreeProportionByProject[projectKey] = splitter.proportion.coerceIn(0.05f, 0.95f)
         }
-        toggleTopicTreePanel(projectKey, splitter)
+        when (mode) {
+            ShellLayoutMode.PREVIEW -> {
+                previewComponent.isVisible = true
+                treeComponent.isVisible = false
+                splitter.proportion = 1.0f
+            }
+
+            ShellLayoutMode.PREVIEW_AND_TREEVIEW -> {
+                previewComponent.isVisible = true
+                treeComponent.isVisible = true
+                val restoredProportion = expandedTreeProportionByProject[projectKey] ?: 0.7f
+                splitter.proportion = restoredProportion.coerceIn(0.05f, 0.95f)
+            }
+
+            ShellLayoutMode.TREEVIEW -> {
+                previewComponent.isVisible = false
+                treeComponent.isVisible = true
+                splitter.proportion = 0.0f
+            }
+        }
+        shellLayoutModeByProject[projectKey] = mode
+        splitter.revalidate()
+        splitter.repaint()
     }
 
     private fun handleSetupProjectCreate(
@@ -455,7 +508,7 @@ class MkdocsToolWindowFactory(
 
                 splitter?.let {
                     it.firstComponent = previewContent.component
-                    setTopicTreePanelVisible(projectKey(project), it, visible = true)
+                    setShellLayoutMode(projectKey(project), it, ShellLayoutMode.PREVIEW_AND_TREEVIEW)
                 }
                 topicTreePanel.reconcileFromDisk()
                 runStartupReconciliation(project)?.let { startupState ->
@@ -515,7 +568,6 @@ class MkdocsToolWindowFactory(
 
     private fun registerDocumentTypingSync(
         project: Project,
-        runtimeService: PluginRuntimeIntegrationService,
         previewContent: PreviewContent,
     ) {
         typingListenerRegistrar(
@@ -635,14 +687,6 @@ class MkdocsToolWindowFactory(
         topicTreePanel: TopicTreeWorkspacePanel,
     ) {
         val connection = project.messageBus.connect(project)
-        connection.subscribe(
-            FileEditorManagerListener.FILE_EDITOR_MANAGER,
-            object : FileEditorManagerListener {
-                override fun selectionChanged(event: FileEditorManagerEvent) {
-                    topicTreePanel.reconcileFromDisk()
-                }
-            },
-        )
         connection.subscribe(
             VirtualFileManager.VFS_CHANGES,
             object : BulkFileListener {

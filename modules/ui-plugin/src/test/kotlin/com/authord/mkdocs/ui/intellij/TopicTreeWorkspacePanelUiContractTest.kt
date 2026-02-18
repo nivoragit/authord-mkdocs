@@ -160,9 +160,50 @@ class TopicTreeWorkspacePanelUiContractTest {
         assertEquals("getting-started.md", command.sourcePath)
     }
 
+    @Test
+    fun `duplicate markdown path suggests incremented filename and uses it on confirm`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Index", ""))
+        val duplicatePrompts = mutableListOf<Pair<String, String>>()
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+            duplicatePathPrompt = { requested, suggested ->
+                duplicatePrompts += requested to suggested
+                true
+            },
+        )
+        panel.render(sampleState())
+
+        val triggered = panel.triggerHeaderActionForTest("Root")
+
+        assertTrue(triggered)
+        val command = uiService.dispatched.filterIsInstance<AddTopicNodeCommand>().last()
+        assertEquals("index-2.md", command.sourcePath)
+        assertEquals(listOf("index.md" to "index-2.md"), duplicatePrompts)
+    }
+
+    @Test
+    fun `duplicate markdown path cancels create when suggestion is rejected`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Index", ""))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+            duplicatePathPrompt = { _, _ -> false },
+        )
+        panel.render(sampleState())
+
+        val triggered = panel.triggerHeaderActionForTest("Root")
+
+        assertTrue(triggered)
+        assertTrue(uiService.dispatched.filterIsInstance<AddTopicNodeCommand>().isEmpty())
+    }
+
     private fun panelWithDefaults(
         uiService: RecordingUiService = RecordingUiService(),
         promptInputProvider: (title: String, message: String, initial: String?) -> String? = { _, _, _ -> null },
+        duplicatePathPrompt: (requestedPath: String, suggestedPath: String) -> Boolean = { _, _ -> true },
     ): TopicTreeWorkspacePanel {
         val registry = RecordingInstanceRegistryPort(
             instances = mutableListOf(
@@ -197,6 +238,7 @@ class TopicTreeWorkspacePanelUiContractTest {
             controllersProvider = { controllers },
             reconcileStateProvider = { sampleState() },
             promptInputProvider = promptInputProvider,
+            duplicatePathPrompt = duplicatePathPrompt,
         )
     }
 
@@ -267,6 +309,52 @@ class TopicTreeWorkspacePanelUiContractTest {
 
         // The default instance in panelWithDefaults has docsDirPath = "/tmp/project/docs"
         assertEquals("/tmp/project/docs/guide/index.md", resolved)
+    }
+
+    @Test
+    fun `resolves folder selection to section index markdown`() {
+        val panel = panelWithDefaults()
+        panel.render(sampleFallbackSectionState())
+
+        val folderView = TopicTreeNodeView(
+            nodeId = "section:install",
+            title = "Install",
+            parentNodeId = "root",
+            path = null,
+        )
+
+        val resolved = panel.resolveFilePath(folderView)
+
+        assertEquals("/tmp/project/docs/install/index.md", resolved)
+    }
+
+    private fun sampleFallbackSectionState(): StartupTreeState {
+        return StartupTreeState(
+            source = StartupTreeSource.FALLBACK,
+            nodes = listOf(
+                com.authord.mkdocs.ports.topic.TopicNavNode(
+                    nodeId = "section:install",
+                    title = "Install",
+                    children = listOf(
+                        com.authord.mkdocs.ports.topic.TopicNavNode(
+                            nodeId = "page:install/index.md",
+                            title = "Install",
+                            path = "install/index.md",
+                        ),
+                        com.authord.mkdocs.ports.topic.TopicNavNode(
+                            nodeId = "page:install/a1.md",
+                            title = "A1",
+                            path = "install/a1.md",
+                        ),
+                    ),
+                ),
+            ),
+            navOrderedPaths = listOf("install/index.md", "install/a1.md"),
+            unlinkedPaths = emptyList(),
+            validationIssues = emptyList(),
+            destructiveChangesApplied = false,
+            instanceId = "default",
+        )
     }
 }
 

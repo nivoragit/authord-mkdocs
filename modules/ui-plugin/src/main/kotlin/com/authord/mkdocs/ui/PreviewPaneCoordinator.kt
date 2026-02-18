@@ -13,11 +13,11 @@ data class PreviewPaneState(
 /**
  * Tracks and updates preview pane routing state for each project.
  */
-class PreviewPaneCoordinator {
+open class PreviewPaneCoordinator {
     private val sessions = mutableMapOf<String, PreviewPaneState>()
 
     /** Opens preview state for a project with a detected base URL. */
-    fun open(projectId: String, baseUrl: String): PreviewPaneState {
+    open fun open(projectId: String, baseUrl: String): PreviewPaneState {
         val state = PreviewPaneState(
             projectId = projectId,
             baseUrl = baseUrl,

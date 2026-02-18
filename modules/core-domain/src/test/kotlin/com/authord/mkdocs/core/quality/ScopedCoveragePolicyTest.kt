@@ -5,6 +5,7 @@ import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertTrue
 
+
 class ScopedCoveragePolicyTest {
     @Test
     fun `root build defines scoped coverage gate over required modules`() {

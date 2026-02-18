@@ -80,6 +80,9 @@ class ProcessBuilderSystemProcessFactory : SystemProcessFactory {
         val processBuilder = ProcessBuilder(command)
             .directory(File(workingDir))
             .redirectErrorStream(mergeErrorStream)
+        
+        processBuilder.environment()["PYTHONWARNINGS"] = "ignore"
+        
         return processBuilder.start()
     }
 }
@@ -188,7 +191,7 @@ private fun destroyProcessTree(process: Process, forcibly: Boolean) {
  */
 class ProcessBuilderProcessLauncher(
     private val processFactory: SystemProcessFactory = ProcessBuilderSystemProcessFactory(),
-    private val startupWaitMillis: Long = 8_000L,
+    private val startupWaitMillis: Long = 30_000L,
     private val pollIntervalMillis: Long = 50L,
     private val shutdownHookRegistrar: ShutdownHookRegistrar = RuntimeShutdownHookRegistrar,
 ) : ProcessLauncher {

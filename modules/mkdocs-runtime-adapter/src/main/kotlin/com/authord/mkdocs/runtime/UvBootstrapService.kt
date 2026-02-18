@@ -44,7 +44,7 @@ data class BootstrapResult(
  * - Call once per activation attempt.
  * - Repeated calls for same project path skip duplicate setup.
  */
-class UvBootstrapService(
+open class UvBootstrapService(
     private val commandRunner: CommandRunner,
     private val uvExecutableProvider: UvExecutableProvider,
 ) {
@@ -70,7 +70,7 @@ class UvBootstrapService(
      * @param projectPath root project path.
      * @return bootstrap status, executed commands, and error details on failure.
      */
-    fun bootstrap(projectPath: String): BootstrapResult {
+    open fun bootstrap(projectPath: String): BootstrapResult {
         val runtimeDirectory = Path.of(projectPath).resolve(".mkdocs-plugin-venv")
         val runtimePath = runtimeDirectory.toString()
         val uvResolution = uvExecutableProvider.resolve(projectPath)

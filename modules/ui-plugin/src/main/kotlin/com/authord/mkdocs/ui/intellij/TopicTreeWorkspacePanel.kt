@@ -5,6 +5,8 @@ import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.ui.JBColor
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.JBSplitter
@@ -24,6 +26,7 @@ import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.Transferable
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
+import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
 import javax.swing.DefaultListModel
@@ -117,6 +120,16 @@ internal class TopicTreeWorkspacePanel(
                 null,
             )
         },
+    private val duplicatePathPrompt: (requestedPath: String, suggestedPath: String) -> Boolean =
+        { requestedPath, suggestedPath ->
+            Messages.showOkCancelDialog(
+                uiMessage("topicTree.prompt.duplicatePath.message", requestedPath, suggestedPath),
+                uiMessage("topicTree.prompt.duplicatePath.title"),
+                uiMessage("topicTree.prompt.duplicatePath.ok"),
+                uiMessage("topicTree.prompt.duplicatePath.cancel"),
+                Messages.getWarningIcon(),
+            ) == Messages.OK
+        },
 ) {
     private val root = DefaultMutableTreeNode(TopicTreeNodeView.root())
     private val model = DefaultTreeModel(root)
@@ -191,12 +204,9 @@ internal class TopicTreeWorkspacePanel(
             val selectedNode = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
             val userObject = selectedNode?.userObject
             if (project != null && userObject is TopicTreeNodeView && userObject.isNav) {
-                val absolutePath = resolveFilePath(userObject)
+                val absolutePath = resolveFilePathInternal(userObject, selectedNode)
                 if (!absolutePath.isNullOrBlank()) {
-                    val virtualFile = com.intellij.openapi.vfs.LocalFileSystem.getInstance().findFileByPath(absolutePath)
-                    if (virtualFile != null) {
-                        FileEditorManager.getInstance(project).openFile(virtualFile, true)
-                    }
+                    openFileInEditor(absolutePath)
                 }
             }
         }
@@ -266,6 +276,11 @@ internal class TopicTreeWorkspacePanel(
     }
 
     fun render(state: StartupTreeState) {
+        val expandedNodeIds = captureExpandedNodeIds()
+        val selectedNodeId = selectedNavNode()
+            ?.userObject
+            ?.let { it as? TopicTreeNodeView }
+            ?.nodeId
         currentState = state
         root.removeAllChildren()
 
@@ -305,6 +320,8 @@ internal class TopicTreeWorkspacePanel(
         if (root.childCount > 0) {
             tree.expandPath(TreePath(root.path))
         }
+        restoreExpandedNodeIds(expandedNodeIds)
+        selectedNodeId?.let { selectNodeById(it) }
         refreshInstances(state.instanceId)
         renderSelectionDetails()
         refreshActionEnablement()
@@ -674,11 +691,12 @@ internal class TopicTreeWorkspacePanel(
             uiMessage("topicTree.prompt.addTopic.topicTitle"),
         ) ?: return
         val suggestedPath = suggestedMarkdownPath(title, parentNode)
-        val sourcePath = promptOptional(
+        val requestedSourcePath = promptOptional(
             title = uiMessage("topicTree.prompt.addTopic.title"),
             message = uiMessage("topicTree.prompt.addTopic.relativePathOptional"),
             initial = suggestedPath,
         )?.let(::normalizeMarkdownPathWithExtension) ?: suggestedPath
+        val sourcePath = resolveSourcePathWithDuplicatePrompt(requestedSourcePath) ?: return
         val nodeId = "ui-node-${UUID.randomUUID()}"
         val controllers = controllersOrNull() ?: return
         val result = controllers.actionController.createTopic(
@@ -690,17 +708,11 @@ internal class TopicTreeWorkspacePanel(
             nodeId = nodeId,
         )
         handleDispatchResult(result, uiMessage("topicTree.status.createdTopic", title)) {
-            val uiNode = DefaultMutableTreeNode(
-                TopicTreeNodeView(
-                    nodeId = nodeId,
-                    title = title,
-                    parentNodeId = parent.nodeId,
-                    path = sourcePath,
-                ),
+            reconcileAfterMutation(
+                preferredNodeId = nodeId,
+                preferredPath = sourcePath,
+                preferredParentNodeId = parent.nodeId,
             )
-            model.insertNodeInto(uiNode, parentNode, parentNode.childCount)
-            tree.selectionPath = TreePath(uiNode.path)
-            tree.scrollPathToVisible(TreePath(uiNode.path))
         }
     }
 
@@ -716,11 +728,12 @@ internal class TopicTreeWorkspacePanel(
             uiMessage("topicTree.prompt.addChildTopic.topicTitle"),
         ) ?: return
         val suggestedPath = suggestedMarkdownPath(title, targetNode)
-        val sourcePath = promptOptional(
+        val requestedSourcePath = promptOptional(
             title = uiMessage("topicTree.prompt.addChildTopic.title"),
             message = uiMessage("topicTree.prompt.addTopic.relativePathOptional"),
             initial = suggestedPath,
         )?.let(::normalizeMarkdownPathWithExtension) ?: suggestedPath
+        val sourcePath = resolveSourcePathWithDuplicatePrompt(requestedSourcePath) ?: return
         val nodeId = "ui-node-${UUID.randomUUID()}"
         val controllers = controllersOrNull() ?: return
         val result = controllers.actionController.addChildTopic(
@@ -732,18 +745,11 @@ internal class TopicTreeWorkspacePanel(
             childNodeId = nodeId,
         )
         handleDispatchResult(result, uiMessage("topicTree.status.addedChildTopic", title)) {
-            val uiNode = DefaultMutableTreeNode(
-                TopicTreeNodeView(
-                    nodeId = nodeId,
-                    title = title,
-                    parentNodeId = target.nodeId,
-                    path = sourcePath,
-                ),
+            reconcileAfterMutation(
+                preferredNodeId = nodeId,
+                preferredPath = sourcePath,
+                preferredParentNodeId = target.nodeId,
             )
-            model.insertNodeInto(uiNode, targetNode, targetNode.childCount)
-            tree.expandPath(TreePath(targetNode.path))
-            tree.selectionPath = TreePath(uiNode.path)
-            tree.scrollPathToVisible(TreePath(uiNode.path))
         }
     }
 
@@ -1056,6 +1062,195 @@ internal class TopicTreeWorkspacePanel(
         return value.takeIf { it.isNotEmpty() }
     }
 
+    private fun resolveSourcePathWithDuplicatePrompt(requestedPath: String): String? {
+        var candidate = normalizeMarkdownPathWithExtension(requestedPath)
+        while (isRelativePathTaken(candidate)) {
+            val suggestion = suggestAlternativePath(candidate)
+            if (!duplicatePathPrompt(candidate, suggestion)) {
+                return null
+            }
+            candidate = suggestion
+        }
+        return candidate
+    }
+
+    private fun suggestAlternativePath(requestedPath: String): String {
+        val normalized = normalizeMarkdownPathWithExtension(requestedPath)
+        val directory = normalized.substringBeforeLast('/', "")
+        val fileName = normalized.substringAfterLast('/')
+        val stem = fileName.substringBeforeLast('.', fileName)
+        val extension = fileName.substringAfterLast('.', "md")
+        var suffix = 2
+        while (true) {
+            val candidate = joinPath(directory, "$stem-$suffix.$extension")
+            if (!isRelativePathTaken(candidate)) {
+                return candidate
+            }
+            suffix += 1
+        }
+    }
+
+    private fun isRelativePathTaken(relativePath: String): Boolean {
+        val normalized = normalizeOptionalPath(relativePath) ?: return false
+        val target = comparablePath(normalized)
+        val takenInTree = collectExistingTreePaths().any { existing ->
+            comparablePath(existing) == target
+        }
+        if (takenInTree) {
+            return true
+        }
+
+        val docsDir = activeDocsDirectory() ?: return false
+        val candidate = docsDir.resolve(normalized).normalize()
+        return runCatching { Files.exists(candidate) }.getOrDefault(false)
+    }
+
+    private fun collectExistingTreePaths(): Set<String> {
+        val paths = linkedSetOf<String>()
+        fun visit(node: DefaultMutableTreeNode) {
+            val view = node.userObject as? TopicTreeNodeView
+            normalizeOptionalPath(view?.path)?.let(paths::add)
+            for (index in 0 until node.childCount) {
+                val child = node.getChildAt(index) as? DefaultMutableTreeNode ?: continue
+                visit(child)
+            }
+        }
+        visit(root)
+        return paths
+    }
+
+    private fun activeDocsDirectory(): Path? {
+        val registry = controllersProvider()?.instanceRegistryPort ?: return null
+        val activeTreeId = activeTreeId()
+        val activeInstance = when (val active = registry.activeInstance()) {
+            is TopicGatewayResult.Success -> {
+                val instance = active.value
+                if (instance != null && instance.instanceId == activeTreeId) {
+                    instance
+                } else {
+                    when (val selected = registry.selectActiveInstance(activeTreeId)) {
+                        is TopicGatewayResult.Success -> selected.value
+                        is TopicGatewayResult.Failure -> null
+                    }
+                }
+            }
+
+            is TopicGatewayResult.Failure -> {
+                when (val selected = registry.selectActiveInstance(activeTreeId)) {
+                    is TopicGatewayResult.Success -> selected.value
+                    is TopicGatewayResult.Failure -> null
+                }
+            }
+        }
+        val docsDirPath = activeInstance?.docsDirPath?.takeIf { it.isNotBlank() } ?: return null
+        return runCatching { Path.of(docsDirPath).toAbsolutePath().normalize() }.getOrNull()
+    }
+
+    private fun comparablePath(path: String): String {
+        return if (SystemInfoRt.isFileSystemCaseSensitive) {
+            path
+        } else {
+            path.lowercase()
+        }
+    }
+
+    private fun reconcileAfterMutation(
+        preferredNodeId: String,
+        preferredPath: String,
+        preferredParentNodeId: String?,
+    ) {
+        reconcileFromDisk()
+        val preferredNode = findNode(preferredNodeId) ?: findNodeByRelativePath(preferredPath)
+        if (preferredNode != null) {
+            focusNode(preferredNode)
+            openNodeFileInEditor(preferredNode)
+            return
+        }
+        preferredParentNodeId
+            ?.let(::findNode)
+            ?.let { parentNode ->
+                tree.expandPath(TreePath(parentNode.path))
+                focusNode(parentNode)
+            }
+        openRelativePathInEditor(preferredPath)
+    }
+
+    private fun captureExpandedNodeIds(): Set<String> {
+        val expanded = linkedSetOf<String>()
+        for (row in 0 until tree.rowCount) {
+            val path = tree.getPathForRow(row) ?: continue
+            if (!tree.isExpanded(path)) {
+                continue
+            }
+            val node = path.lastPathComponent as? DefaultMutableTreeNode ?: continue
+            val nodeView = node.userObject as? TopicTreeNodeView ?: continue
+            expanded += nodeView.nodeId
+        }
+        return expanded
+    }
+
+    private fun restoreExpandedNodeIds(nodeIds: Set<String>) {
+        nodeIds.forEach { nodeId ->
+            findNode(nodeId)?.let { node ->
+                tree.expandPath(TreePath(node.path))
+            }
+        }
+    }
+
+    private fun selectNodeById(nodeId: String): Boolean {
+        val node = findNode(nodeId) ?: return false
+        focusNode(node)
+        return true
+    }
+
+    private fun findNodeByRelativePath(relativePath: String): DefaultMutableTreeNode? {
+        val normalized = normalizeOptionalPath(relativePath) ?: return null
+        val target = comparablePath(normalized)
+        fun visit(node: DefaultMutableTreeNode): DefaultMutableTreeNode? {
+            val view = node.userObject as? TopicTreeNodeView
+            val nodePath = normalizeOptionalPath(view?.path)
+            if (nodePath != null && comparablePath(nodePath) == target) {
+                return node
+            }
+            for (index in 0 until node.childCount) {
+                val child = node.getChildAt(index) as? DefaultMutableTreeNode ?: continue
+                val match = visit(child)
+                if (match != null) {
+                    return match
+                }
+            }
+            return null
+        }
+        return visit(root)
+    }
+
+    private fun focusNode(node: DefaultMutableTreeNode) {
+        val path = TreePath(node.path)
+        tree.selectionPath = path
+        tree.scrollPathToVisible(path)
+    }
+
+    private fun openNodeFileInEditor(node: DefaultMutableTreeNode) {
+        val view = node.userObject as? TopicTreeNodeView ?: return
+        val absolutePath = resolveFilePathInternal(view, node) ?: return
+        openFileInEditor(absolutePath)
+    }
+
+    private fun openRelativePathInEditor(relativePath: String) {
+        val normalized = normalizeOptionalPath(relativePath) ?: return
+        val docsDir = activeDocsDirectory() ?: return
+        openFileInEditor(docsDir.resolve(normalized).normalize().toString())
+    }
+
+    private fun openFileInEditor(absolutePath: String) {
+        val currentProject = project ?: return
+        val fileSystem = LocalFileSystem.getInstance()
+        val virtualFile = fileSystem.findFileByPath(absolutePath)
+            ?: fileSystem.refreshAndFindFileByPath(absolutePath)
+            ?: return
+        FileEditorManager.getInstance(currentProject).openFile(virtualFile, true)
+    }
+
     private fun activeTreeId(): String = currentState?.instanceId ?: "default"
 
     private fun normalizeOptionalPath(path: String?): String? {
@@ -1130,7 +1325,12 @@ internal class TopicTreeWorkspacePanel(
     }
 
     internal fun resolveFilePath(node: TopicTreeNodeView): String? {
-        val relativePath = node.path ?: return null
+        val treeNode = findNode(node.nodeId)
+        return resolveFilePathInternal(node, treeNode)
+    }
+
+    private fun resolveFilePathInternal(node: TopicTreeNodeView, treeNode: DefaultMutableTreeNode?): String? {
+        val relativePath = resolveRelativePathForOpen(node, treeNode) ?: return null
         val controllers = controllersProvider() ?: return null
         val activeInstanceId = activeTreeId()
 
@@ -1143,6 +1343,43 @@ internal class TopicTreeWorkspacePanel(
 
         val docsDir = instance?.docsDirPath ?: return null
         return Path.of(docsDir).resolve(relativePath).normalize().toString()
+    }
+
+    private fun resolveRelativePathForOpen(
+        node: TopicTreeNodeView,
+        treeNode: DefaultMutableTreeNode?,
+    ): String? {
+        normalizeOptionalPath(node.path)?.let { return it }
+        return treeNode?.let(::firstIndexPathInSubtree)
+    }
+
+    private fun firstIndexPathInSubtree(node: DefaultMutableTreeNode): String? {
+        var fallbackPath: String? = null
+        fun visit(current: DefaultMutableTreeNode): String? {
+            val view = current.userObject as? TopicTreeNodeView
+            val normalizedPath = normalizeOptionalPath(view?.path)
+            if (normalizedPath != null) {
+                if (isIndexMarkdownPath(normalizedPath)) {
+                    return normalizedPath
+                }
+                if (fallbackPath == null) {
+                    fallbackPath = normalizedPath
+                }
+            }
+            for (index in 0 until current.childCount) {
+                val child = current.getChildAt(index) as? DefaultMutableTreeNode ?: continue
+                val match = visit(child)
+                if (match != null) {
+                    return match
+                }
+            }
+            return null
+        }
+        return visit(node) ?: fallbackPath
+    }
+
+    private fun isIndexMarkdownPath(path: String): Boolean {
+        return path.equals("index.md", ignoreCase = true) || path.endsWith("/index.md", ignoreCase = true)
     }
 
     private fun firstPathInSubtree(node: DefaultMutableTreeNode): String? {
@@ -1273,7 +1510,7 @@ internal class TopicTreeWorkspacePanel(
 
     internal fun selectTreeNodeForTest(nodeId: String): Boolean {
         val targetNode = findNode(nodeId) ?: return false
-        tree.selectionPath = TreePath(targetNode.path)
+        focusNode(targetNode)
         return true
     }
 

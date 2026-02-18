@@ -5,6 +5,7 @@ import com.authord.mkdocs.runtime.BaseUrlDetector
 import com.authord.mkdocs.runtime.MkdocsProcessManager
 import com.authord.mkdocs.runtime.RuntimeServerConfig
 import com.authord.mkdocs.runtime.UvBootstrapService
+import com.authord.mkdocs.ui.intellij.AuthordUiBundle
 import java.net.ServerSocket
 import java.nio.file.Files
 import java.nio.file.Path
@@ -102,11 +103,25 @@ class PluginActivationService(
             // Keep action/tool-window start paths re-invokable when URL detection fails.
             // Without this cleanup the process remains marked as running and the start action is disabled.
             processManager.stop(projectId)
+            
+            // Analyze output for known errors even if process technically started
+            val failureDetails = startFailureDetails(projectPath, resolvedStartupOutput)
+            if (failureDetails.isNotBlank() && failureDetails != resolvedStartupOutput) {
+                 // Found a specific known error (git, module, etc.) -> Treat as start failure
+                 val reason = ActivationFailureReason.START_FAILED
+                 return ActivationResult(
+                    success = false,
+                    reason = reason,
+                    message = errorPresenter.present(reason, failureDetails),
+                )
+            }
+            
             val reason = ActivationFailureReason.BASE_URL_NOT_FOUND
+            // Pass the raw output as details so user can see what happened
             return ActivationResult(
                 success = false,
                 reason = reason,
-                message = errorPresenter.present(reason),
+                message = errorPresenter.present(reason, resolvedStartupOutput),
             )
         }
 
@@ -114,12 +129,30 @@ class PluginActivationService(
         return ActivationResult(
             success = true,
             previewUrl = baseUrl,
-            message = "Activation completed",
+            message = AuthordUiBundle.message("activation.status.completed"),
         )
     }
 
     private fun startFailureDetails(projectPath: String, startupOutput: String): String {
         val normalizedOutput = startupOutput.trim()
+        if ((normalizedOutput.contains("InvalidGitRepositoryError") || normalizedOutput.contains("GitCommandError")) &&
+            normalizedOutput.contains("mkdocs_git_revision_date_localized_plugin")
+        ) {
+            return AuthordUiBundle.message("activation.error.gitRequired")
+        }
+
+        if (normalizedOutput.contains("ModuleNotFoundError") ||
+            normalizedOutput.contains("Theme '.*' is not installed".toRegex())
+        ) {
+            return AuthordUiBundle.message("activation.error.moduleMissing", normalizedOutput)
+        }
+
+        if (normalizedOutput.contains("yaml.scanner.ScannerError") ||
+            normalizedOutput.contains("ConfigurationError")
+        ) {
+            return AuthordUiBundle.message("activation.error.yamlSyntax", normalizedOutput)
+        }
+
         if (normalizedOutput.isNotBlank()) {
             return normalizedOutput
         }
@@ -127,7 +160,7 @@ class PluginActivationService(
         val rootPath = Path.of(projectPath)
         val hasMkdocsConfig = rootPath.resolve("mkdocs.yml").exists() || rootPath.resolve("mkdocs.yaml").exists()
         if (!hasMkdocsConfig) {
-            return "No mkdocs.yml or mkdocs.yaml found in project root: $projectPath"
+            return AuthordUiBundle.message("activation.error.configNotFound", projectPath)
         }
 
         return ""
@@ -253,15 +286,16 @@ class PluginActivationService(
     }
 
     private fun defaultSiteName(projectPath: Path): String {
+        val defaultSiteName = AuthordUiBundle.message("activation.default.siteName")
         val leafName = projectPath.name.trim()
         if (leafName.isBlank()) {
-            return "MkDocs Site"
+            return defaultSiteName
         }
         return leafName
             .replace('-', ' ')
             .replace('_', ' ')
             .trim()
-            .ifBlank { "MkDocs Site" }
+            .ifBlank { defaultSiteName }
     }
 
     private fun escapeSingleQuotedYaml(value: String): String = value.replace("'", "''")

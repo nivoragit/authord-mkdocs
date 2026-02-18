@@ -70,7 +70,7 @@ private data class RunningProcess(
 /**
  * Manages MkDocs runtime lifecycle with single-instance semantics per project.
  */
-class MkdocsProcessManager(
+open class MkdocsProcessManager(
     private val processLauncher: ProcessLauncher,
 ) {
     private val processes = mutableMapOf<String, RunningProcess>()
@@ -78,7 +78,7 @@ class MkdocsProcessManager(
     /**
      * Starts runtime for a project, reusing an already-running process when available.
      */
-    fun start(projectId: String, workingDir: String, config: RuntimeServerConfig = RuntimeServerConfig()): RuntimeStartResult {
+    open fun start(projectId: String, workingDir: String, config: RuntimeServerConfig = RuntimeServerConfig()): RuntimeStartResult {
         val existing = processes[projectId]
         if (existing != null && existing.handle.isAlive()) {
             return RuntimeStartResult(
@@ -109,7 +109,7 @@ class MkdocsProcessManager(
      *
      * @return `true` when a running process existed and was stopped.
      */
-    fun stop(projectId: String): Boolean {
+    open fun stop(projectId: String): Boolean {
         val existing = processes.remove(projectId) ?: return false
         existing.handle.stop()
         return true

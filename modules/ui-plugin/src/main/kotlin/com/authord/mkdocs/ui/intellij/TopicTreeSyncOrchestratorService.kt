@@ -244,7 +244,7 @@ class TopicTreeSyncOrchestratorService(
         command: AddChildTopicNodeCommand,
     ): TopicGatewayResult<ConfigMutationResult> {
         val noNavFolderHierarchy = !document.navPresent
-        val target = findNode(document.nav, command.targetNodeId)
+        val target = resolveNodeContext(document.nav, command.targetNodeId)
             ?: return configFailure("Cannot locate target node '${command.targetNodeId}' in config nav")
         if (target.node.externalUrl != null) {
             return configFailure("Cannot add child under external link '${target.node.nodeId}'")
@@ -312,9 +312,38 @@ class TopicTreeSyncOrchestratorService(
         document: MkDocsConfigDocument,
         command: RenameTopicNodeCommand,
     ): TopicGatewayResult<ConfigMutationResult> {
-        val node = findNode(document.nav, command.nodeId)?.node
+        val node = resolveNodeContext(document.nav, command.nodeId)?.node
             ?: return configFailure("Cannot locate node '${command.nodeId}' for rename")
         val currentPath = normalizePath(node.path)
+
+        if (currentPath == null && !document.navPresent) {
+            val currentDirectory = deriveNoNavDirectoryForNode(node)
+            if (currentDirectory != null) {
+                val renamedDirectory = joinPath(
+                    currentDirectory.substringBeforeLast('/', ""),
+                    slugifyTitle(command.newTitle),
+                )
+                if (renamedDirectory != currentDirectory) {
+                    val pathRewrites = deriveDirectoryRewriteMap(node, currentDirectory, renamedDirectory)
+                    val rewrittenNode = rewriteNodePaths(node, pathRewrites).copy(title = command.newTitle)
+                    return when (val replaced = replaceNode(document, rewrittenNode)) {
+                        is TopicGatewayResult.Success -> {
+                            val operations = pathRewrites.entries
+                                .sortedBy { it.key }
+                                .flatMap { (sourcePath, targetPath) ->
+                                    listOf(
+                                        TopicFileOperation(TopicFileOperationKind.RENAME, sourcePath, targetPath),
+                                        TopicFileOperation(TopicFileOperationKind.REWRITE_LINKS, sourcePath, targetPath),
+                                    )
+                                }
+                            successMutation(replaced.value, operations)
+                        }
+                        is TopicGatewayResult.Failure -> replaced
+                    }
+                }
+            }
+        }
+
         val renamedPath = currentPath?.let { deriveRenamedPath(document, it, command.newTitle) }
         val updatedNode = node.copy(
             title = command.newTitle,
@@ -340,7 +369,8 @@ class TopicTreeSyncOrchestratorService(
         document: MkDocsConfigDocument,
         command: RemoveTopicNodeCommand,
     ): TopicGatewayResult<ConfigMutationResult> {
-        val (updatedNodes, removed) = removeNode(document.nav, command.nodeId)
+        val resolvedNodeId = resolveNodeContext(document.nav, command.nodeId)?.node?.nodeId ?: command.nodeId
+        val (updatedNodes, removed) = removeNode(document.nav, resolvedNodeId)
         if (removed == null) {
             return configFailure("Cannot locate node '${command.nodeId}' for removal")
         }
@@ -358,7 +388,7 @@ class TopicTreeSyncOrchestratorService(
             val reordered = reorderNodeList(document.nav, command.orderedNodeIds)
             return successMutation(document.copy(nav = reordered))
         }
-        val parent = findNode(document.nav, command.parentNodeId)?.node
+        val parent = resolveNodeContext(document.nav, command.parentNodeId)?.node
             ?: return configFailure("Cannot locate parent '${command.parentNodeId}' for reorder")
         val reorderedChildren = reorderNodeList(parent.children, command.orderedNodeIds)
         return when (val replaced = replaceNode(document, parent.copy(children = reorderedChildren))) {
@@ -373,38 +403,60 @@ class TopicTreeSyncOrchestratorService(
         newParentNodeId: String,
         newOrderIndex: Int,
     ): TopicGatewayResult<ConfigMutationResult> {
-        val sourceContext = findNode(document.nav, nodeId)
+        val sourceContext = resolveNodeContext(document.nav, nodeId)
             ?: return configFailure("Cannot locate node '$nodeId' for move")
-        val (withoutSource, removedNode) = removeNode(document.nav, nodeId)
+        val resolvedSourceNodeId = sourceContext.node.nodeId
+        val (effectiveWithoutSource, removedNode) = removeNode(document.nav, resolvedSourceNodeId)
         val movingNode = removedNode ?: return configFailure("Cannot locate node '$nodeId' for move")
+        val fileOperations = mutableListOf<TopicFileOperation>()
         val currentPath = normalizePath(sourceContext.node.path)
-        val updatedPath = currentPath?.let { existingPath ->
-            val targetDirectory = resolveDirectoryForParent(
-                nodes = withoutSource,
-                parentNodeId = newParentNodeId,
-                noNavFolderHierarchy = !document.navPresent,
-            )
-            val targetFileName = existingPath.substringAfterLast('/')
-            val baseTargetPath = joinPath(targetDirectory, targetFileName)
-            ensureUniquePath(baseTargetPath, collectAllPaths(withoutSource))
-        }
-        val nodeToInsert = if (updatedPath != null) {
+        val nodeToInsert = if (currentPath != null) {
+            val updatedPath = run {
+                val targetDirectory = resolveDirectoryForParent(
+                    nodes = effectiveWithoutSource,
+                    parentNodeId = newParentNodeId,
+                    noNavFolderHierarchy = !document.navPresent,
+                )
+                val targetFileName = currentPath.substringAfterLast('/')
+                val baseTargetPath = joinPath(targetDirectory, targetFileName)
+                ensureUniquePath(baseTargetPath, collectAllPaths(effectiveWithoutSource))
+            }
+            if (updatedPath != currentPath) {
+                fileOperations += TopicFileOperation(TopicFileOperationKind.MOVE, currentPath, updatedPath)
+                fileOperations += TopicFileOperation(TopicFileOperationKind.REWRITE_LINKS, currentPath, updatedPath)
+            }
             movingNode.copy(path = updatedPath)
+        } else if (!document.navPresent) {
+            val sourceDirectory = deriveNoNavDirectoryForNode(sourceContext.node)
+            if (sourceDirectory != null) {
+                val targetParentDirectory = resolveDirectoryForParent(
+                    nodes = effectiveWithoutSource,
+                    parentNodeId = newParentNodeId,
+                    noNavFolderHierarchy = true,
+                )
+                val targetDirectory = joinPath(targetParentDirectory, sourceDirectory.substringAfterLast('/'))
+                if (targetDirectory != sourceDirectory) {
+                    val pathRewrites = deriveDirectoryRewriteMap(movingNode, sourceDirectory, targetDirectory)
+                    pathRewrites.entries
+                        .sortedBy { it.key }
+                        .forEach { (sourcePath, targetPath) ->
+                            fileOperations += TopicFileOperation(TopicFileOperationKind.MOVE, sourcePath, targetPath)
+                            fileOperations += TopicFileOperation(TopicFileOperationKind.REWRITE_LINKS, sourcePath, targetPath)
+                        }
+                    rewriteNodePaths(movingNode, pathRewrites)
+                } else {
+                    movingNode
+                }
+            } else {
+                movingNode
+            }
         } else {
             movingNode
         }
-        val sourceDocument = document.copy(nav = withoutSource)
+        val sourceDocument = document.copy(nav = effectiveWithoutSource)
         return when (val inserted = insertNode(sourceDocument, newParentNodeId, nodeToInsert, newOrderIndex)) {
             is TopicGatewayResult.Success -> {
-                val operations = if (currentPath != null && updatedPath != null && currentPath != updatedPath) {
-                    listOf(
-                        TopicFileOperation(TopicFileOperationKind.MOVE, currentPath, updatedPath),
-                        TopicFileOperation(TopicFileOperationKind.REWRITE_LINKS, currentPath, updatedPath),
-                    )
-                } else {
-                    emptyList()
-                }
-                successMutation(inserted.value, operations)
+                successMutation(inserted.value, fileOperations)
             }
             is TopicGatewayResult.Failure -> inserted
         }
@@ -424,12 +476,160 @@ class TopicTreeSyncOrchestratorService(
             return TopicGatewayResult.Success(document.copy(nav = updatedRoot))
         }
 
-        val parent = findNode(document.nav, parentNodeId)?.node
+        val parent = resolveNodeContext(document.nav, parentNodeId)?.node
             ?: return configFailure("Cannot locate parent node '$parentNodeId' in config nav")
         val updatedParentChildren = parent.children.toMutableList().apply {
             addAt(normalizedIndex, node)
         }
         return replaceNode(document, parent.copy(children = updatedParentChildren))
+    }
+
+    private fun resolveNodeContext(nodes: List<TopicNavNode>, requestedNodeId: String): NavNodeContext? {
+        val direct = findNode(nodes, requestedNodeId)
+        if (direct != null) {
+            return direct
+        }
+
+        val pageAliasPath = pagePathFromAlias(requestedNodeId)
+        if (pageAliasPath != null) {
+            val byPath = findNodeByPath(nodes, pageAliasPath)
+            if (byPath != null) {
+                return byPath
+            }
+        }
+
+        val sectionAliasDirectory = sectionDirectoryFromAlias(requestedNodeId)
+        if (sectionAliasDirectory != null) {
+            val byDirectory = findSectionNodeByDirectory(nodes, sectionAliasDirectory)
+            if (byDirectory != null) {
+                return byDirectory
+            }
+        }
+
+        return null
+    }
+
+    private fun pagePathFromAlias(nodeId: String): String? {
+        if (!nodeId.startsWith("page:")) {
+            return null
+        }
+        return normalizePath(nodeId.removePrefix("page:"))
+    }
+
+    private fun sectionDirectoryFromAlias(nodeId: String): String? {
+        if (!nodeId.startsWith("section:")) {
+            return null
+        }
+        return normalizePath(nodeId.removePrefix("section:"))
+    }
+
+    private fun findNodeByPath(
+        nodes: List<TopicNavNode>,
+        path: String,
+        parentNodeId: String? = ROOT_NODE_ID,
+    ): NavNodeContext? {
+        val normalizedTarget = normalizePath(path) ?: return null
+        nodes.forEach { node ->
+            val normalizedNodePath = normalizePath(node.path)
+            if (normalizedNodePath == normalizedTarget) {
+                return NavNodeContext(node, parentNodeId)
+            }
+            val child = findNodeByPath(node.children, normalizedTarget, node.nodeId)
+            if (child != null) {
+                return child
+            }
+        }
+        return null
+    }
+
+    private fun findSectionNodeByDirectory(
+        nodes: List<TopicNavNode>,
+        directory: String,
+        parentNodeId: String? = ROOT_NODE_ID,
+    ): NavNodeContext? {
+        val normalizedDirectory = normalizePath(directory) ?: return null
+        nodes.forEach { node ->
+            val childMatch = findSectionNodeByDirectory(node.children, normalizedDirectory, node.nodeId)
+            if (childMatch != null) {
+                return childMatch
+            }
+            if (isDirectoryRepresentativeNode(node, normalizedDirectory)) {
+                return NavNodeContext(node, parentNodeId)
+            }
+        }
+        return null
+    }
+
+    private fun isDirectoryRepresentativeNode(node: TopicNavNode, normalizedDirectory: String): Boolean {
+        val normalizedPath = normalizePath(node.path)
+        if (normalizedPath != null) {
+            return false
+        }
+        val indexPath = joinPath(normalizedDirectory, "index.md")
+        return collectPaths(node).any { childPath ->
+            val normalizedChildPath = normalizePath(childPath) ?: return@any false
+            normalizedChildPath == indexPath
+        }
+    }
+
+    private fun deriveNoNavDirectoryForNode(node: TopicNavNode): String? {
+        val normalizedPath = normalizePath(node.path)
+        if (normalizedPath != null) {
+            return deriveNoNavDirectoryFromPagePath(normalizedPath)
+        }
+        val directSectionDirectory = sectionDirectoryFromNodeId(node.nodeId)
+        if (directSectionDirectory != null) {
+            return directSectionDirectory
+        }
+        val subtreePaths = collectPaths(node)
+            .mapNotNull(::normalizePath)
+        val indexPath = subtreePaths.firstOrNull { isIndexMarkdownPath(it) }
+        if (indexPath != null) {
+            return indexPath.substringBeforeLast('/', "")
+        }
+        return subtreePaths.firstOrNull()?.substringBeforeLast('/', "")
+    }
+
+    private fun deriveDirectoryRewriteMap(node: TopicNavNode, fromDirectory: String, toDirectory: String): Map<String, String> {
+        val normalizedFrom = normalizePath(fromDirectory)?.trimEnd('/') ?: return emptyMap()
+        val normalizedTo = normalizePath(toDirectory)?.trimEnd('/') ?: return emptyMap()
+        if (normalizedFrom == normalizedTo) {
+            return emptyMap()
+        }
+        val rewrites = linkedMapOf<String, String>()
+        collectPaths(node)
+            .mapNotNull(::normalizePath)
+            .forEach { path ->
+                relocatePathByDirectory(path, normalizedFrom, normalizedTo)?.let { relocated ->
+                    if (relocated != path) {
+                        rewrites[path] = relocated
+                    }
+                }
+            }
+        return rewrites
+    }
+
+    private fun relocatePathByDirectory(path: String, fromDirectory: String, toDirectory: String): String? {
+        val normalizedPath = normalizePath(path) ?: return null
+        val fromPrefix = "${fromDirectory.trimEnd('/')}/"
+        if (!normalizedPath.startsWith(fromPrefix)) {
+            return null
+        }
+        val suffix = normalizedPath.removePrefix(fromPrefix)
+        return joinPath(toDirectory.trimEnd('/'), suffix)
+    }
+
+    private fun rewriteNodePaths(node: TopicNavNode, pathRewrites: Map<String, String>): TopicNavNode {
+        val normalizedPath = normalizePath(node.path)
+        val rewrittenPath = if (normalizedPath != null && pathRewrites.containsKey(normalizedPath)) {
+            pathRewrites.getValue(normalizedPath)
+        } else {
+            node.path
+        }
+        return node.copy(
+            path = rewrittenPath,
+            children = node.children.map { child -> rewriteNodePaths(child, pathRewrites) },
+        )
     }
 
     private fun replaceNode(
@@ -583,7 +783,7 @@ class TopicTreeSyncOrchestratorService(
             return ""
         }
 
-        val parent = findNode(nodes, parentNodeId) ?: return ""
+        val parent = resolveNodeContext(nodes, parentNodeId) ?: return ""
         if (noNavFolderHierarchy) {
             sectionDirectoryFromNodeId(parent.node.nodeId)?.let { return it }
         }
@@ -627,6 +827,10 @@ class TopicTreeSyncOrchestratorService(
         } else {
             joinPath(directory, stem)
         }
+    }
+
+    private fun isIndexMarkdownPath(path: String): Boolean {
+        return path.equals("index.md", ignoreCase = true) || path.endsWith("/index.md", ignoreCase = true)
     }
 
     private fun firstPathInSubtree(nodes: List<TopicNavNode>): String? {

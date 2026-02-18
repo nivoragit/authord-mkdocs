@@ -266,6 +266,156 @@ class TopicTreeFileMutationDerivationTest {
     }
 
     @Test
+    fun `no-nav rename section alias rewrites folder markdown paths without config writes`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(
+                        nodeId = "install-local",
+                        title = "Install",
+                        children = listOf(
+                            TopicNavNode(nodeId = "install-page", title = "Install", path = "install/index.md"),
+                            TopicNavNode(nodeId = "install-a1", title = "A1", path = "install/a1.md"),
+                        ),
+                    ),
+                ),
+                navPresent = false,
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-no-nav-rename-section",
+                    instance = instance,
+                    command = RenameTopicNodeCommand(
+                        commandId = "cmd-no-nav-rename-section",
+                        treeId = "default",
+                        nodeId = "section:install",
+                        newTitle = "Guides",
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertEquals(
+            setOf(
+                "rename:install/index.md->guides/index.md",
+                "rewrite:install/index.md->guides/index.md",
+                "rename:install/a1.md->guides/a1.md",
+                "rewrite:install/a1.md->guides/a1.md",
+            ),
+            docsGateway.calls.toSet(),
+        )
+        assertTrue(configGateway.writes.isEmpty())
+    }
+
+    @Test
+    fun `no-nav move section alias rewrites folder markdown paths without config writes`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(
+                        nodeId = "guides-page-local",
+                        title = "Guides",
+                        path = "guides/index.md",
+                    ),
+                    TopicNavNode(
+                        nodeId = "install-local",
+                        title = "Install",
+                        children = listOf(
+                            TopicNavNode(nodeId = "install-page", title = "Install", path = "install/index.md"),
+                            TopicNavNode(nodeId = "install-a1", title = "A1", path = "install/a1.md"),
+                        ),
+                    ),
+                ),
+                navPresent = false,
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-no-nav-move-section",
+                    instance = instance,
+                    command = MoveTopicNodeCommand(
+                        commandId = "cmd-no-nav-move-section",
+                        treeId = "default",
+                        nodeId = "section:install",
+                        newParentNodeId = "page:guides/index.md",
+                        newOrderIndex = 1,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertEquals(
+            setOf(
+                "move:install/index.md->guides/install/index.md",
+                "rewrite:install/index.md->guides/install/index.md",
+                "move:install/a1.md->guides/install/a1.md",
+                "rewrite:install/a1.md->guides/install/a1.md",
+            ),
+            docsGateway.calls.toSet(),
+        )
+        assertTrue(configGateway.writes.isEmpty())
+    }
+
+    @Test
+    fun `no-nav remove section alias deletes subtree markdown files without config writes`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(
+                        nodeId = "install-local",
+                        title = "Install",
+                        children = listOf(
+                            TopicNavNode(nodeId = "install-page", title = "Install", path = "install/index.md"),
+                            TopicNavNode(nodeId = "install-a1", title = "A1", path = "install/a1.md"),
+                        ),
+                    ),
+                ),
+                navPresent = false,
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-no-nav-remove-section",
+                    instance = instance,
+                    command = RemoveTopicNodeCommand(
+                        commandId = "cmd-no-nav-remove-section",
+                        treeId = "default",
+                        nodeId = "section:install",
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertEquals(
+            setOf(
+                "delete:install/index.md:RECOVERABLE",
+                "delete:install/a1.md:RECOVERABLE",
+            ),
+            docsGateway.calls.toSet(),
+        )
+        assertTrue(configGateway.writes.isEmpty())
+    }
+
+    @Test
     fun `rename topic updates nav path and performs rename plus link rewrite`() {
         val configGateway = MutableConfigGatewayForDerivation(
             MkDocsConfigDocument(

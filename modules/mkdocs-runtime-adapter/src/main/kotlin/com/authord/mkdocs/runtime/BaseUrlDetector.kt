@@ -3,7 +3,7 @@ package com.authord.mkdocs.runtime
 /**
  * Detects runtime base URL from startup stdout text.
  */
-class BaseUrlDetector {
+open class BaseUrlDetector {
     private val urlRegex = Regex("""https?://[^\s"'<>]+""")
 
     /**
@@ -11,7 +11,7 @@ class BaseUrlDetector {
      *
      * @return normalized URL or null if none found.
      */
-    fun detectBaseUrl(startupOutput: String): String? {
+    open fun detectBaseUrl(startupOutput: String): String? {
         val match = urlRegex.find(startupOutput) ?: return null
         return normalizeDetectedUrl(match.value)
     }
