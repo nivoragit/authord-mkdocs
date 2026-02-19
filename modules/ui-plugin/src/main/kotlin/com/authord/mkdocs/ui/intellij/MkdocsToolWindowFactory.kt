@@ -182,6 +182,11 @@ class MkdocsToolWindowFactory(
      * Registers minimal content inside the tool window manager.
      */
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
+        if (toolWindow.id == AUTHORD_TREEVIEW_TOOL_WINDOW_ID) {
+            createTreeviewToolWindowContent(project, toolWindow)
+            return
+        }
+
         val runtimeService = runtimeServiceResolver(project)
         val previewContent = previewContentFactory()
         val projectCreator = mkDocsProjectCreatorResolver(project)
@@ -252,6 +257,29 @@ class MkdocsToolWindowFactory(
                 topicTreePanel.render(startupState)
                 startupStateListener(project, startupState)
             }
+        }
+    }
+
+    private fun createTreeviewToolWindowContent(
+        project: Project,
+        toolWindow: ToolWindow,
+    ) {
+        wireTopicTreeControllers(project)
+        val topicTreePanel = createTopicTreePanel(project)
+        topicTreePanelsByProject[project.locationHash] = topicTreePanel
+
+        val panel = JPanel(BorderLayout()).apply {
+            add(topicTreePanel.component, BorderLayout.CENTER)
+        }
+        val contentManager = toolWindow.contentManager
+        val content = contentManager.factory.createContent(panel, "", false)
+        contentManager.removeAllContents(true)
+        contentManager.addContent(content)
+
+        registerTopicTreeReconciliationTriggers(project, topicTreePanel)
+        runStartupReconciliation(project)?.let { startupState ->
+            topicTreePanel.render(startupState)
+            startupStateListener(project, startupState)
         }
     }
 

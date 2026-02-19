@@ -14,8 +14,9 @@
         <projectService serviceImplementation="com.authord.mkdocs.ui.intellij.PluginRuntimeIntegrationService" />
         <postStartupActivity implementation="com.authord.mkdocs.ui.intellij.MarkdownAutoOpenPreviewStartupActivity" />
         <directoryIndexExcludePolicy implementation="com.authord.mkdocs.ui.intellij.MkdocsVenvDirectoryExcludePolicy" />
+        <fileEditorProvider implementation="com.authord.mkdocs.ui.intellij.AuthordMarkdownSplitEditorProvider" />
         <toolWindow
-            id="Authord MkDocs"
+            id="Authord Treeview"
             factoryClass="com.authord.mkdocs.ui.intellij.MkdocsToolWindowFactory"
             anchor="right"
             canCloseContents="false"
