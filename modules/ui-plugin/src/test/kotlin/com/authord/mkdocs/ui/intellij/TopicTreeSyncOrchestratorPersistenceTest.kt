@@ -62,6 +62,7 @@ class TopicTreeSyncOrchestratorPersistenceTest {
 
         assertTrue(outcome.applied)
         assertEquals(listOf("create:guide/child.md"), docsGateway.calls)
+        assertEquals("# Child\n", docsGateway.createdContentByPath["guide/child.md"])
 
         val written = configGateway.writes.lastOrNull() ?: fail("Expected config write")
         val root = written.nav.single()
@@ -112,6 +113,7 @@ private class RecordingConfigGateway(initial: MkDocsConfigDocument) : MkDocsConf
 
 private class RecordingDocsGateway : DocsFileGateway {
     val calls = mutableListOf<String>()
+    val createdContentByPath = mutableMapOf<String, String>()
 
     override fun createMarkdownFile(
         instance: TopicInstanceRef,
@@ -119,6 +121,7 @@ private class RecordingDocsGateway : DocsFileGateway {
         initialContent: String,
     ): TopicGatewayResult<String> {
         calls += "create:$relativePath"
+        createdContentByPath[relativePath] = initialContent
         return TopicGatewayResult.Success(relativePath)
     }
 

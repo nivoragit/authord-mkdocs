@@ -27,6 +27,7 @@ import com.authord.mkdocs.ports.topic.TopicTreeCommand
 import com.authord.mkdocs.ports.topic.TopicTreeCommandStatus
 import com.authord.mkdocs.ports.topic.ValidateTopicTreeCommand
 import com.authord.mkdocs.ports.topic.TreeSyncOrchestrator
+import com.authord.mkdocs.runtime.MarkdownHeadingSupport
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 
@@ -98,7 +99,7 @@ class TopicTreeSyncOrchestratorService(
         val compensationStack = ArrayDeque<() -> TopicGatewayResult<*>>()
         val allFileOperations = (transaction.fileOperations + mutation.fileOperations).distinct()
         for (operation in allFileOperations) {
-            when (val applyResult = applyFileOperation(transaction, operation)) {
+            when (val applyResult = applyFileOperation(transaction, operation, mutation.document)) {
                 is TopicGatewayResult.Success -> compensationStack.addFirst(compensationFor(transaction, operation))
                 is TopicGatewayResult.Failure -> {
                     val compensationSucceeded = runCompensationStack(compensationStack)
@@ -112,6 +113,22 @@ class TopicTreeSyncOrchestratorService(
                     transactionOutcomes[transaction.transactionId] = outcome
                     return TopicGatewayResult.Success(outcome)
                 }
+            }
+        }
+
+        when (val titleSync = synchronizeMarkdownHeadingForCommand(transaction, mutation.document)) {
+            is TopicGatewayResult.Success -> Unit
+            is TopicGatewayResult.Failure -> {
+                val compensationSucceeded = runCompensationStack(compensationStack)
+                val outcome = TopicSyncOutcome(
+                    transactionId = transaction.transactionId,
+                    applied = false,
+                    rolledBack = true,
+                    compensated = compensationSucceeded,
+                    message = "Heading synchronization failed: ${titleSync.error.detail}",
+                )
+                transactionOutcomes[transaction.transactionId] = outcome
+                return TopicGatewayResult.Success(outcome)
             }
         }
 
@@ -935,12 +952,13 @@ class TopicTreeSyncOrchestratorService(
     private fun applyFileOperation(
         transaction: TopicSyncTransaction,
         operation: TopicFileOperation,
+        document: MkDocsConfigDocument,
     ): TopicGatewayResult<*> {
         return when (operation.kind) {
             TopicFileOperationKind.CREATE -> docsFileGateway.createMarkdownFile(
                 instance = transaction.instance,
                 relativePath = operation.sourcePath,
-                initialContent = "",
+                initialContent = initialContentForCreate(document, operation.sourcePath),
             )
 
             TopicFileOperationKind.DELETE -> docsFileGateway.deleteMarkdownFile(
@@ -985,6 +1003,43 @@ class TopicTreeSyncOrchestratorService(
                 )
             }
         }
+    }
+
+    private fun synchronizeMarkdownHeadingForCommand(
+        transaction: TopicSyncTransaction,
+        document: MkDocsConfigDocument,
+    ): TopicGatewayResult<String> {
+        val renameCommand = transaction.command as? RenameTopicNodeCommand
+            ?: return TopicGatewayResult.Success("")
+        val resolved = resolveNodeContext(document.nav, renameCommand.nodeId)?.node
+            ?: return TopicGatewayResult.Success("")
+        val normalizedPath = normalizePath(resolved.path)
+            ?: return TopicGatewayResult.Success("")
+        return docsFileGateway.upsertMarkdownTitleHeading(
+            instance = transaction.instance,
+            relativePath = normalizedPath,
+            title = resolved.title,
+        )
+    }
+
+    private fun initialContentForCreate(document: MkDocsConfigDocument, sourcePath: String): String {
+        val normalizedPath = normalizePath(sourcePath) ?: return ""
+        val resolvedTitle = findTitleByPath(document.nav, normalizedPath)
+            ?: return ""
+        return MarkdownHeadingSupport.defaultTopicContent(resolvedTitle)
+    }
+
+    private fun findTitleByPath(nodes: List<TopicNavNode>, normalizedPath: String): String? {
+        nodes.forEach { node ->
+            if (normalizePath(node.path) == normalizedPath) {
+                return node.title
+            }
+            val nested = findTitleByPath(node.children, normalizedPath)
+            if (nested != null) {
+                return nested
+            }
+        }
+        return null
     }
 
     private fun compensationFor(

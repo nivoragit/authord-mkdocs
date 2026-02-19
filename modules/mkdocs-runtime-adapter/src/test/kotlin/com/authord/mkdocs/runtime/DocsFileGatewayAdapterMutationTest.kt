@@ -43,6 +43,35 @@ class DocsFileGatewayAdapterMutationTest {
         assertTrue(Files.exists(docsDir.resolve(recoveryPath)))
     }
 
+    @Test
+    fun `gateway upserts markdown title heading`() {
+        val projectRoot = Files.createTempDirectory("docs-gateway-heading")
+        val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
+        val instance = TopicInstanceRef(
+            instanceId = "default",
+            configPath = projectRoot.resolve("mkdocs.yml").toString(),
+            docsDirPath = docsDir.toString(),
+        )
+        val target = docsDir.resolve("guide/title.md")
+        Files.createDirectories(target.parent)
+        Files.writeString(target, "Initial content\n")
+
+        val gateway = DocsFileGatewayAdapter(trashMover = { false })
+
+        val updatedPath = requireSuccess(
+            gateway.upsertMarkdownTitleHeading(
+                instance = instance,
+                relativePath = "guide/title.md",
+                title = "Resolved Title",
+            ),
+        )
+
+        assertEquals("guide/title.md", updatedPath)
+        val content = Files.readString(target)
+        assertTrue(content.startsWith("# Resolved Title"))
+        assertEquals("Resolved Title", MarkdownHeadingSupport.extractFirstH1(content))
+    }
+
     private fun <T> requireSuccess(result: TopicGatewayResult<T>): T {
         return when (result) {
             is TopicGatewayResult.Success -> result.value

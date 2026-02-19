@@ -20,12 +20,22 @@ class BaseUrlDetectorStdoutTest {
 
     @Test
     fun `trims trailing punctuation from detected url`() {
-        val stdout = "Started successfully at https://preview.example/docs/."
+        val stdout = "INFO - Serving on https://preview.example/docs/."
         assertEquals("https://preview.example/docs/", detector.detectBaseUrl(stdout))
     }
 
     @Test
     fun `returns null when stdout has no http or https url`() {
         assertNull(detector.detectBaseUrl("startup finished without exposed url"))
+    }
+
+    @Test
+    fun `ignores unrelated warning urls`() {
+        val stdout = """
+            WARNING - See docs at https://www.mkdocs.org/user-guide/configuration/
+            WARNING - plugin warning
+        """.trimIndent()
+
+        assertNull(detector.detectBaseUrl(stdout))
     }
 }

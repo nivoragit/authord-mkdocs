@@ -55,6 +55,7 @@ class TopicTreeFileMutationDerivationTest {
 
         assertTrue(outcome.applied)
         assertEquals(listOf("create:quick-start.md"), docsGateway.calls)
+        assertEquals("# Quick Start\n", docsGateway.createdContentByPath["quick-start.md"])
         val written = configGateway.writes.last()
         assertEquals("quick-start.md", written.nav.single().path)
         assertTrue(written.navPresent)
@@ -104,6 +105,7 @@ class TopicTreeFileMutationDerivationTest {
 
         assertTrue(outcome.applied)
         assertEquals(listOf("create:guides/install-guide.md"), docsGateway.calls)
+        assertEquals("# Install Guide\n", docsGateway.createdContentByPath["guides/install-guide.md"])
         val written = configGateway.writes.last()
         val guideNode = written.nav.single { it.nodeId == "guides" }
         assertTrue(guideNode.children.any { it.nodeId == "install" && it.path == "guides/install-guide.md" })
@@ -455,6 +457,7 @@ class TopicTreeFileMutationDerivationTest {
             ),
             docsGateway.calls,
         )
+        assertEquals(listOf("heading:guide/new-name.md=New Name"), docsGateway.headingUpdates)
         val written = configGateway.writes.last()
         assertEquals("guide/new-name.md", written.nav.single().path)
     }
@@ -624,6 +627,8 @@ private class MutableConfigGatewayForDerivation(
 
 private class RecordingDocsGatewayForDerivation : DocsFileGateway {
     val calls = mutableListOf<String>()
+    val createdContentByPath = mutableMapOf<String, String>()
+    val headingUpdates = mutableListOf<String>()
 
     override fun createMarkdownFile(
         instance: TopicInstanceRef,
@@ -631,6 +636,7 @@ private class RecordingDocsGatewayForDerivation : DocsFileGateway {
         initialContent: String,
     ): TopicGatewayResult<String> {
         calls += "create:$relativePath"
+        createdContentByPath[relativePath] = initialContent
         return TopicGatewayResult.Success(relativePath)
     }
 
@@ -668,5 +674,14 @@ private class RecordingDocsGatewayForDerivation : DocsFileGateway {
     ): TopicGatewayResult<Int> {
         calls += "rewrite:$fromRelativePath->$toRelativePath"
         return TopicGatewayResult.Success(1)
+    }
+
+    override fun upsertMarkdownTitleHeading(
+        instance: TopicInstanceRef,
+        relativePath: String,
+        title: String,
+    ): TopicGatewayResult<String> {
+        headingUpdates += "heading:$relativePath=$title"
+        return TopicGatewayResult.Success(relativePath)
     }
 }

@@ -80,4 +80,16 @@ interface DocsFileGateway {
         fromRelativePath: String,
         toRelativePath: String,
     ): TopicGatewayResult<Int>
+
+    /**
+     * Inserts or replaces the first Markdown H1 heading for [relativePath].
+     *
+     * Default behavior is a no-op success to preserve backward compatibility for
+     * adapters that have not implemented heading synchronization.
+     */
+    fun upsertMarkdownTitleHeading(
+        instance: TopicInstanceRef,
+        relativePath: String,
+        title: String,
+    ): TopicGatewayResult<String> = TopicGatewayResult.Success(relativePath)
 }

@@ -6,13 +6,14 @@ import kotlin.test.assertTrue
 
 class DocsFileGatewayContractTest {
     @Test
-    fun `defines markdown create delete rename move and rewrite operations`() {
+    fun `defines markdown create delete rename move rewrite and heading sync operations`() {
         val methods = DocsFileGateway::class.java.methods.map { it.name }.toSet()
         assertTrue(methods.contains("createMarkdownFile"))
         assertTrue(methods.contains("deleteMarkdownFile"))
         assertTrue(methods.contains("renameMarkdownFile"))
         assertTrue(methods.contains("moveMarkdownFile"))
         assertTrue(methods.contains("rewriteRelativeMarkdownLinks"))
+        assertTrue(methods.contains("upsertMarkdownTitleHeading"))
     }
 
     @Test

@@ -105,6 +105,38 @@ class DocsFileGatewayAdapter(
         return markdownLinkRewriter.rewrite(instance, fromRelativePath, toRelativePath)
     }
 
+    override fun upsertMarkdownTitleHeading(
+        instance: TopicInstanceRef,
+        relativePath: String,
+        title: String,
+    ): TopicGatewayResult<String> {
+        val pathResult = resolveMarkdownPath(instance, relativePath)
+        val absolutePath = when (pathResult) {
+            is TopicGatewayResult.Success -> pathResult.value
+            is TopicGatewayResult.Failure -> return pathResult
+        }
+
+        if (!Files.exists(absolutePath)) {
+            return TopicGatewayResult.Failure(
+                DefaultTopicSyncError(TopicSyncErrorCode.FILE_IO, "File does not exist: ${absolutePath.fileName}"),
+            )
+        }
+
+        return runCatching {
+            val current = Files.readString(absolutePath)
+            val updated = MarkdownHeadingSupport.upsertFirstH1(current, title)
+            Files.writeString(absolutePath, updated)
+            toRelative(instance, absolutePath)
+        }.fold(
+            onSuccess = { TopicGatewayResult.Success(it) },
+            onFailure = {
+                TopicGatewayResult.Failure(
+                    DefaultTopicSyncError(TopicSyncErrorCode.FILE_IO, "Update markdown heading failed: ${it.message}"),
+                )
+            },
+        )
+    }
+
     private fun moveInternal(
         instance: TopicInstanceRef,
         fromRelativePath: String,

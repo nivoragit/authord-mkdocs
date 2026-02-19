@@ -22,6 +22,7 @@ import com.intellij.ui.JBColor
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.Key
 import java.nio.file.Files
 import java.nio.file.Path
@@ -90,6 +91,11 @@ data class RuntimeIntegrationDependencies(
                     previewPaneCoordinator = previewPaneCoordinator,
                     errorPresenter = ActivationErrorPresenter(),
                     isDarkIdeTheme = { !JBColor.isBright() },
+                    readinessProbe = if (useInMemoryAdapters) {
+                        com.authord.mkdocs.ui.HttpReadinessProbe { true }
+                    } else {
+                        com.authord.mkdocs.ui.HttpURLConnectionReadinessProbe()
+                    },
                 ),
                 processManager = processManager,
                 previewPaneCoordinator = previewPaneCoordinator,
@@ -115,7 +121,15 @@ class PluginRuntimeIntegrationService(
     private val project: Project,
 ) : Disposable {
     private var dependencies: RuntimeIntegrationDependencies = RuntimeIntegrationDependencies.createDefault()
+    private val previewRuntimeService = MkDocsPreviewService(
+        processManagerProvider = { dependencies.processManager },
+        projectIdProvider = { project.locationHash },
+    )
     private var lastMkdocsConfigFingerprint: String? = null
+
+    init {
+        Disposer.register(this, previewRuntimeService)
+    }
 
     /**
      * Overrides runtime integration dependencies for unit tests.
@@ -156,11 +170,11 @@ class PluginRuntimeIntegrationService(
 
         val projectId = project.locationHash
         val configChanged = hasMkdocsConfigChanged(projectPath)
-        if (dependencies.processManager.isRunning(projectId) && configChanged) {
+        if (previewRuntimeService.isServerRunning() && configChanged) {
             return restartPreview(trigger)
         }
         val existingPreviewUrl = dependencies.previewPaneCoordinator.currentUrl(projectId)
-        if (dependencies.processManager.isRunning(projectId) && existingPreviewUrl != null) {
+        if (previewRuntimeService.isServerRunning() && existingPreviewUrl != null) {
             return ActivationResult(
                 success = true,
                 previewUrl = existingPreviewUrl,
@@ -183,12 +197,12 @@ class PluginRuntimeIntegrationService(
     /**
      * Stops active runtime instance for this project.
      */
-    fun stopPreview(): Boolean = dependencies.processManager.stop(project.locationHash)
+    fun stopPreview(): Boolean = previewRuntimeService.stopServer()
 
     /**
      * Returns `true` when runtime is currently active for this project.
      */
-    fun isRuntimeRunning(): Boolean = dependencies.processManager.isRunning(project.locationHash)
+    fun isRuntimeRunning(): Boolean = previewRuntimeService.isServerRunning()
 
     /**
      * Restarts active runtime flow for this project.
@@ -204,8 +218,8 @@ class PluginRuntimeIntegrationService(
             )
         val projectId = project.locationHash
         val previousRoute = dependencies.previewPaneCoordinator.currentState(projectId)?.currentRoute
-        if (dependencies.processManager.isRunning(projectId)) {
-            dependencies.processManager.stop(projectId)
+        if (previewRuntimeService.isServerRunning()) {
+            previewRuntimeService.stopServer()
         }
         val restarted = startPreview(trigger)
         if (!restarted.success) {
@@ -263,7 +277,7 @@ class PluginRuntimeIntegrationService(
      * Disposes project runtime resources safely.
      */
     override fun dispose() {
-        dependencies.processManager.dispose(project.locationHash)
+        previewRuntimeService.stopServer()
         lastMkdocsConfigFingerprint = null
     }
 

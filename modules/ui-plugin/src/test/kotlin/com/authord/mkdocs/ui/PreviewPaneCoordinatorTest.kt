@@ -39,4 +39,20 @@ class PreviewPaneCoordinatorTest {
 
         assertEquals("http://127.0.0.1:8000/guide/", coordinator.currentUrl("project-1"))
     }
+    @Test
+    fun `handles edge cases in url normalization`() {
+        val coordinator = PreviewPaneCoordinator()
+
+        // Test empty base url normalization
+        coordinator.open("empty-base", "   ")
+        assertEquals("/", coordinator.currentState("empty-base")?.baseUrl)
+
+        // Test base url without trailing slash
+        coordinator.open("no-slash", "http://localhost:8000")
+        assertEquals("http://localhost:8000/", coordinator.currentState("no-slash")?.baseUrl)
+
+        // Test navigation to root route normalization
+        coordinator.navigate("no-slash", "/")
+        assertEquals("/", coordinator.currentState("no-slash")?.currentRoute)
+    }
 }

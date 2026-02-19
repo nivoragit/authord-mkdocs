@@ -35,6 +35,21 @@ interface ManagedProcessHandle {
      * Implementations that do not capture output may return an empty string.
      */
     fun startupOutput(): String = ""
+
+    /**
+     * Returns captured stdout text, if available.
+     */
+    fun stdoutOutput(): String = startupOutput()
+
+    /**
+     * Returns captured stderr text, if available.
+     */
+    fun stderrOutput(): String = ""
+
+    /**
+     * Returns process exit code when available.
+     */
+    fun exitCodeOrNull(): Int? = null
 }
 
 /**
@@ -58,6 +73,19 @@ data class RuntimeStartResult(
     val command: List<String>,
     val alreadyRunning: Boolean,
     val startupOutput: String = "",
+)
+
+/**
+ * Runtime process diagnostics snapshot for startup/readiness troubleshooting.
+ */
+data class RuntimeProcessDiagnostics(
+    val processId: String,
+    val command: List<String>,
+    val isAlive: Boolean,
+    val startupOutput: String,
+    val stdoutOutput: String,
+    val stderrOutput: String,
+    val exitCode: Int?,
 )
 
 private data class RunningProcess(
@@ -136,6 +164,23 @@ open class MkdocsProcessManager(
      * Returns `true` when runtime process is alive for a project.
      */
     fun isRunning(projectId: String): Boolean = processes[projectId]?.handle?.isAlive() == true
+
+    /**
+     * Returns current process diagnostics for a project when a handle is tracked.
+     */
+    open fun diagnostics(projectId: String): RuntimeProcessDiagnostics? {
+        val running = processes[projectId] ?: return null
+        val handle = running.handle
+        return RuntimeProcessDiagnostics(
+            processId = handle.id,
+            command = running.command,
+            isAlive = handle.isAlive(),
+            startupOutput = handle.startupOutput(),
+            stdoutOutput = handle.stdoutOutput(),
+            stderrOutput = handle.stderrOutput(),
+            exitCode = handle.exitCodeOrNull(),
+        )
+    }
 
     /**
      * Builds effective runtime command without injecting host/port defaults.

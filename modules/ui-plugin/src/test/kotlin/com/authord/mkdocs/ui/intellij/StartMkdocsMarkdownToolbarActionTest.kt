@@ -71,7 +71,8 @@ class StartMkdocsMarkdownToolbarActionTest {
         actionWithOpener.actionPerformed(event)
 
         assertTrue(service.isRuntimeRunning())
-        assertEquals("https://preview.example/docs/", service.currentPreviewUrl())
+        val currentUrl = service.currentPreviewUrl()
+        assertTrue(currentUrl != null && currentUrl.startsWith("http://127.0.0.1:"))
         assertEquals(1, toolWindowOpened)
     }
 

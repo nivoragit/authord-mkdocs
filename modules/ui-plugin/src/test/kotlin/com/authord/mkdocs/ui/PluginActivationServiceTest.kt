@@ -53,6 +53,12 @@ class PluginActivationServiceTest {
         bootstrap: UvBootstrapService,
         processManager: MkdocsProcessManager,
         isDarkIdeTheme: Boolean = false,
+        readinessProbe: HttpReadinessProbe = HttpReadinessProbe { true },
+        maxStartupAttempts: Int = 5,
+        startupProbeTimeoutMillis: Long = 5_000L,
+        startupPollIntervalMillis: Long = 150L,
+        nowMillisProvider: () -> Long = System::currentTimeMillis,
+        sleeper: (Long) -> Unit = { },
     ): PluginActivationService {
         return PluginActivationService(
             bootstrapService = bootstrap,
@@ -61,6 +67,12 @@ class PluginActivationServiceTest {
             previewPaneCoordinator = PreviewPaneCoordinator(),
             errorPresenter = ActivationErrorPresenter(),
             isDarkIdeTheme = { isDarkIdeTheme },
+            readinessProbe = readinessProbe,
+            maxStartupAttempts = maxStartupAttempts,
+            startupProbeTimeoutMillis = startupProbeTimeoutMillis,
+            startupPollIntervalMillis = startupPollIntervalMillis,
+            nowMillisProvider = nowMillisProvider,
+            sleeper = sleeper,
         )
     }
 
@@ -171,11 +183,17 @@ class PluginActivationServiceTest {
     }
 
     @Test
-    fun `fails when base url cannot be parsed`() {
+    fun `fails when readiness probe does not succeed and retries stop the process`() {
         val handle = ActivationHandle("p1", true)
+        var now = 0L
         val svc = service(
             bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
             processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> handle }),
+            readinessProbe = HttpReadinessProbe { false },
+            maxStartupAttempts = 2,
+            startupProbeTimeoutMillis = 1L,
+            startupPollIntervalMillis = 1L,
+            nowMillisProvider = { now++ },
         )
 
         val result = svc.activate(
@@ -186,12 +204,12 @@ class PluginActivationServiceTest {
         )
 
         assertFalse(result.success)
-        assertEquals(ActivationFailureReason.BASE_URL_NOT_FOUND, result.reason)
-        assertEquals(1, handle.stopCalls)
+        assertEquals(ActivationFailureReason.START_FAILED, result.reason)
+        assertEquals(2, handle.stopCalls)
     }
 
     @Test
-    fun `succeeds when bootstrap start and url detection succeed`() {
+    fun `succeeds when bootstrap start and readiness probe succeeds`() {
         val svc = service(
             bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
             processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> ActivationHandle("p1", true) }),
@@ -205,16 +223,17 @@ class PluginActivationServiceTest {
         )
 
         assertTrue(result.success)
-        assertEquals("http://127.0.0.1:8000/", result.previewUrl)
+        assertTrue(result.previewUrl.startsWith("http://127.0.0.1:"))
+        assertTrue(result.previewUrl.endsWith("/"))
         assertEquals("Activation completed", result.message)
     }
 
     @Test
-    fun `detects preview url from process startup output when explicit startup output is empty`() {
+    fun `startup output is not required when readiness probe succeeds`() {
         val svc = service(
             bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
             processManager = MkdocsProcessManager(ProcessLauncher { _, _ ->
-                ActivationHandle("p1", alive = true, startupOutputText = "Serving at http://127.0.0.1:8000/")
+                ActivationHandle("p1", alive = true, startupOutputText = "WARNING: unrelated URL https://example.com/docs")
             }),
         )
 
@@ -226,7 +245,7 @@ class PluginActivationServiceTest {
         )
 
         assertTrue(result.success)
-        assertEquals("http://127.0.0.1:8000/", result.previewUrl)
+        assertTrue(result.previewUrl.startsWith("http://127.0.0.1:"))
     }
 
     @Test
@@ -273,7 +292,7 @@ class PluginActivationServiceTest {
             assertTrue("--parent-pid" in launcher.command)
             assertTrue("--working-dir" in launcher.command)
             assertTrue("serve" in launcher.command)
-            val bindIndex = launcher.command.indexOf("-a")
+            val bindIndex = launcher.command.indexOf("--dev-addr")
             assertTrue(bindIndex >= 0)
             val bindAddress = launcher.command.getOrNull(bindIndex + 1).orEmpty()
             assertTrue(bindAddress.startsWith("127.0.0.1:"))

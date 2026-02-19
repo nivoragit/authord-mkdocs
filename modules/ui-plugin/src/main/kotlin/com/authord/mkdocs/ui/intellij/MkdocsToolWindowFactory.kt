@@ -21,6 +21,7 @@ import com.intellij.openapi.editor.event.DocumentEvent
 import com.intellij.openapi.editor.event.DocumentListener
 import com.intellij.openapi.editor.event.VisibleAreaEvent
 import com.intellij.openapi.editor.event.VisibleAreaListener
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.FileEditorManagerEvent
@@ -192,6 +193,9 @@ class MkdocsToolWindowFactory(
         val splitter = shellContent.splitter
         val contentManager = toolWindow.contentManager
         val content = contentManager.factory.createContent(panel, "", false)
+        content.setDisposer(Disposable {
+            runtimeService.stopPreview()
+        })
         contentManager.removeAllContents(true)
         contentManager.addContent(content)
 

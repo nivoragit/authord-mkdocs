@@ -771,8 +771,11 @@ internal class TopicTreeWorkspacePanel(
             newTitle = newTitle,
         )
         handleDispatchResult(result, uiMessage("topicTree.status.renamedTopic", newTitle)) {
-            selectedNode.userObject = selected.copy(title = newTitle)
-            model.nodeChanged(selectedNode)
+            reconcileAfterMutation(
+                preferredNodeId = selected.nodeId,
+                preferredPath = selected.path.orEmpty(),
+                preferredParentNodeId = selected.parentNodeId,
+            )
         }
     }
 

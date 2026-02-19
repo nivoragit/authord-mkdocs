@@ -3,15 +3,59 @@ package com.authord.mkdocs.ui
 import com.authord.mkdocs.core.flags.FeatureFlagPolicy
 import com.authord.mkdocs.runtime.BaseUrlDetector
 import com.authord.mkdocs.runtime.MkdocsProcessManager
+import com.authord.mkdocs.runtime.RuntimeProcessDiagnostics
 import com.authord.mkdocs.runtime.RuntimeServerConfig
 import com.authord.mkdocs.runtime.UvBootstrapService
 import com.authord.mkdocs.ui.intellij.AuthordUiBundle
+import com.intellij.openapi.diagnostic.Logger
+import java.net.HttpURLConnection
+import java.net.InetAddress
+import java.net.URI
 import java.net.ServerSocket
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
 import kotlin.io.path.exists
 import kotlin.io.path.name
+
+/**
+ * Probes HTTP readiness for a resolved base URL.
+ */
+fun interface HttpReadinessProbe {
+    /**
+     * Returns `true` when the URL returns any HTTP status response.
+     */
+    fun isReady(baseUrl: String): Boolean
+}
+
+/**
+ * Lightweight HTTP readiness probe using [HttpURLConnection].
+ */
+open class HttpURLConnectionReadinessProbe(
+    private val connectTimeoutMillis: Int = 350,
+    private val readTimeoutMillis: Int = 350,
+) : HttpReadinessProbe {
+    override fun isReady(baseUrl: String): Boolean {
+        val connection = runCatching {
+            URI.create(baseUrl).toURL().openConnection() as HttpURLConnection
+        }.getOrNull() ?: return false
+
+        return try {
+            connection.requestMethod = "GET"
+            connection.instanceFollowRedirects = false
+            connection.connectTimeout = connectTimeoutMillis
+            connection.readTimeout = readTimeoutMillis
+            connection.useCaches = false
+            connection.connect()
+            val status = connection.responseCode
+            status in 100..599
+        } catch (_: Exception) {
+            false
+        } finally {
+            connection.disconnect()
+        }
+    }
+}
 
 /**
  * Result returned by plugin activation flow.
@@ -29,11 +73,33 @@ data class ActivationResult(
 class PluginActivationService(
     private val bootstrapService: UvBootstrapService,
     private val processManager: MkdocsProcessManager,
-    private val baseUrlDetector: BaseUrlDetector,
+    @Suppress("UNUSED_PARAMETER")
+    baseUrlDetector: BaseUrlDetector,
     private val previewPaneCoordinator: PreviewPaneCoordinator,
     private val errorPresenter: ActivationErrorPresenter,
     private val isDarkIdeTheme: () -> Boolean = { false },
+    private val readinessProbe: HttpReadinessProbe = HttpURLConnectionReadinessProbe(),
+    private val nowMillisProvider: () -> Long = System::currentTimeMillis,
+    private val sleeper: (Long) -> Unit = { millis -> Thread.sleep(millis) },
+    private val maxStartupAttempts: Int = 6,
+    private val startupProbeTimeoutMillis: Long = 10_000L,
+    private val startupPollIntervalMillis: Long = 150L,
 ) {
+    private data class StartupAttemptFailure(
+        val baseUrl: String,
+        val failureSummary: String,
+        val diagnostics: RuntimeProcessDiagnostics?,
+        val startupOutput: String,
+    )
+
+    private sealed interface StartupReadiness {
+        data class Ready(val diagnostics: RuntimeProcessDiagnostics?) : StartupReadiness
+
+        data class ProcessExited(val diagnostics: RuntimeProcessDiagnostics?) : StartupReadiness
+
+        data class TimedOut(val diagnostics: RuntimeProcessDiagnostics?) : StartupReadiness
+    }
+
     private val siteNameKeyRegex = Regex("""^\s*site_name\s*:""")
     private val themeKeyRegex = Regex("""^(?:theme|["']theme["'])\s*:""")
     private val fallbackThemeConfigFileName = ".authord-mkdocs.theme.yml"
@@ -43,13 +109,13 @@ class PluginActivationService(
      *
      * @param projectId stable project key.
      * @param projectPath project root path.
-     * @param startupOutput runtime startup stdout used for base URL detection.
+     * @param startupOutput retained for source compatibility; startup now uses HTTP readiness probes.
      * @param featureFlags effective feature-flag policy.
      */
     fun activate(
         projectId: String,
         projectPath: String,
-        startupOutput: String,
+        @Suppress("UNUSED_PARAMETER") startupOutput: String,
         featureFlags: FeatureFlagPolicy,
     ): ActivationResult {
         if (!featureFlags.allowsMvpFlow() || !featureFlags.disallowsFutureCycleFeatures()) {
@@ -71,66 +137,219 @@ class PluginActivationService(
             )
         }
 
-        val startResult = processManager.start(
-            projectId = projectId,
-            workingDir = projectPath,
-            config = RuntimeServerConfig(
-                command = parentBoundServeCommand(
-                    projectPath = projectPath,
-                    runtimePath = bootstrapResult.runtimePath,
-                    uvExecutablePath = bootstrapResult.uvExecutablePath,
-                ),
-            ),
-        )
-        if (!startResult.started) {
-            val reason = ActivationFailureReason.START_FAILED
-            val failureDetails = startFailureDetails(
-                projectPath = projectPath,
-                startupOutput = startResult.startupOutput,
-            )
-            return ActivationResult(
-                success = false,
-                reason = reason,
-                message = errorPresenter.present(reason, failureDetails),
-            )
-        }
+        val attempts = maxStartupAttempts.coerceAtLeast(1)
+        val host = loopbackHostAddress()
+        var lastFailure: StartupAttemptFailure? = null
 
-        val startupOutputCandidates = listOf(startupOutput, startResult.startupOutput)
-            .filter { it.isNotBlank() }
-        val resolvedStartupOutput = startupOutputCandidates.joinToString("\n")
-        val baseUrl = baseUrlDetector.detectBaseUrl(resolvedStartupOutput)
-        if (baseUrl == null) {
-            // Keep action/tool-window start paths re-invokable when URL detection fails.
-            // Without this cleanup the process remains marked as running and the start action is disabled.
-            processManager.stop(projectId)
-            
-            // Analyze output for known errors even if process technically started
-            val failureDetails = startFailureDetails(projectPath, resolvedStartupOutput)
-            if (failureDetails.isNotBlank() && failureDetails != resolvedStartupOutput) {
-                 // Found a specific known error (git, module, etc.) -> Treat as start failure
-                 val reason = ActivationFailureReason.START_FAILED
-                 return ActivationResult(
-                    success = false,
-                    reason = reason,
-                    message = errorPresenter.present(reason, failureDetails),
+        for (attempt in 1..attempts) {
+            val port = allocateLoopbackPort()
+            if (port == null) {
+                lastFailure = StartupAttemptFailure(
+                    baseUrl = "",
+                    failureSummary = "Could not allocate a free loopback port.",
+                    diagnostics = processManager.diagnostics(projectId),
+                    startupOutput = "",
                 )
+                safeSleep(startupPollIntervalMillis)
+                continue
             }
-            
-            val reason = ActivationFailureReason.BASE_URL_NOT_FOUND
-            // Pass the raw output as details so user can see what happened
-            return ActivationResult(
-                success = false,
-                reason = reason,
-                message = errorPresenter.present(reason, resolvedStartupOutput),
+
+            val baseUrl = "http://$host:$port/"
+            LOG.info("Starting MkDocs preview runtime for $projectId at $baseUrl (attempt $attempt/$attempts)")
+
+            val startResult = processManager.start(
+                projectId = projectId,
+                workingDir = projectPath,
+                config = RuntimeServerConfig(
+                    command = parentBoundServeCommand(
+                        projectPath = projectPath,
+                        runtimePath = bootstrapResult.runtimePath,
+                        uvExecutablePath = bootstrapResult.uvExecutablePath,
+                        host = host,
+                        port = port,
+                    ),
+                ),
             )
+
+            if (!startResult.started) {
+                val diagnostics = processManager.diagnostics(projectId)
+                logWarnings(diagnostics?.startupOutput.orEmpty())
+                lastFailure = StartupAttemptFailure(
+                    baseUrl = baseUrl,
+                    failureSummary = "MkDocs process failed to start.",
+                    diagnostics = diagnostics,
+                    startupOutput = startResult.startupOutput,
+                )
+                processManager.stop(projectId)
+                safeSleep(startupPollIntervalMillis)
+                continue
+            }
+
+            if (startResult.alreadyRunning) {
+                val diagnostics = processManager.diagnostics(projectId)
+                logWarnings(diagnostics?.startupOutput.orEmpty())
+                lastFailure = StartupAttemptFailure(
+                    baseUrl = baseUrl,
+                    failureSummary = "MkDocs process was already running before startup attempt.",
+                    diagnostics = diagnostics,
+                    startupOutput = startResult.startupOutput,
+                )
+                processManager.stop(projectId)
+                safeSleep(startupPollIntervalMillis)
+                continue
+            }
+
+            when (val readiness = waitUntilUp(projectId, baseUrl)) {
+                is StartupReadiness.Ready -> {
+                    logWarnings(readiness.diagnostics?.startupOutput.orEmpty())
+                    previewPaneCoordinator.open(projectId, baseUrl)
+                    return ActivationResult(
+                        success = true,
+                        previewUrl = baseUrl,
+                        message = AuthordUiBundle.message("activation.status.completed"),
+                    )
+                }
+
+                is StartupReadiness.ProcessExited -> {
+                    logWarnings(readiness.diagnostics?.startupOutput.orEmpty())
+                    lastFailure = StartupAttemptFailure(
+                        baseUrl = baseUrl,
+                        failureSummary = "MkDocs process exited before readiness probe succeeded.",
+                        diagnostics = readiness.diagnostics,
+                        startupOutput = startResult.startupOutput,
+                    )
+                }
+
+                is StartupReadiness.TimedOut -> {
+                    logWarnings(readiness.diagnostics?.startupOutput.orEmpty())
+                    lastFailure = StartupAttemptFailure(
+                        baseUrl = baseUrl,
+                        failureSummary = "MkDocs readiness probe timed out.",
+                        diagnostics = readiness.diagnostics,
+                        startupOutput = startResult.startupOutput,
+                    )
+                }
+            }
+
+            processManager.stop(projectId)
+            safeSleep(startupPollIntervalMillis)
         }
 
-        previewPaneCoordinator.open(projectId, baseUrl)
+        val reason = ActivationFailureReason.START_FAILED
+        val failureDetails = startupFailureDetails(projectPath, lastFailure)
         return ActivationResult(
-            success = true,
-            previewUrl = baseUrl,
-            message = AuthordUiBundle.message("activation.status.completed"),
+            success = false,
+            reason = reason,
+            message = errorPresenter.present(reason, failureDetails),
         )
+    }
+
+    private fun waitUntilUp(projectId: String, baseUrl: String): StartupReadiness {
+        val pollInterval = startupPollIntervalMillis.coerceIn(100L, 250L)
+        val timeout = startupProbeTimeoutMillis.coerceAtLeast(1_000L)
+        val deadline = nowMillisProvider() + timeout
+        var latestDiagnostics = processManager.diagnostics(projectId)
+
+        while (nowMillisProvider() <= deadline) {
+            if (readinessProbe.isReady(baseUrl)) {
+                return StartupReadiness.Ready(processManager.diagnostics(projectId) ?: latestDiagnostics)
+            }
+
+            latestDiagnostics = processManager.diagnostics(projectId)
+            if (latestDiagnostics != null && !latestDiagnostics.isAlive) {
+                return StartupReadiness.ProcessExited(latestDiagnostics)
+            }
+
+            if (!safeSleep(pollInterval)) {
+                break
+            }
+        }
+
+        return StartupReadiness.TimedOut(processManager.diagnostics(projectId) ?: latestDiagnostics)
+    }
+
+    private fun startupFailureDetails(projectPath: String, failure: StartupAttemptFailure?): String {
+        if (failure == null) {
+            return startFailureDetails(projectPath, "")
+        }
+
+        val diagnostics = failure.diagnostics
+        val mergedOutput = listOfNotNull(
+            diagnostics?.stdoutOutput,
+            diagnostics?.stderrOutput,
+            diagnostics?.startupOutput,
+            failure.startupOutput,
+        )
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
+        val parsedError = startFailureDetails(projectPath, mergedOutput)
+        val stdoutTail = tailText(diagnostics?.stdoutOutput.orEmpty())
+        val stderrTail = tailText(diagnostics?.stderrOutput.orEmpty())
+
+        return buildString {
+            append(failure.failureSummary)
+            append(" Last attempted URL: ")
+            append(failure.baseUrl.ifBlank { "<unavailable>" })
+            append(". Process exit code: ")
+            append(diagnostics?.exitCode?.toString() ?: "unavailable")
+
+            if (parsedError.isNotBlank()) {
+                append(". ")
+                append(parsedError)
+            }
+
+            if (stdoutTail.isNotBlank()) {
+                append(". stdout tail:\n")
+                append(stdoutTail)
+            }
+
+            if (stderrTail.isNotBlank()) {
+                append("\nstderr tail:\n")
+                append(stderrTail)
+            }
+        }
+    }
+
+    private fun tailText(text: String, maxLines: Int = 40, maxChars: Int = 4_000): String {
+        if (text.isBlank()) {
+            return ""
+        }
+
+        val tailLines = text
+            .lineSequence()
+            .toList()
+            .takeLast(maxLines)
+            .joinToString("\n")
+
+        return if (tailLines.length <= maxChars) {
+            tailLines
+        } else {
+            tailLines.takeLast(maxChars)
+        }
+    }
+
+    private fun logWarnings(output: String) {
+        output.lineSequence()
+            .map(String::trim)
+            .filter { it.contains("warning", ignoreCase = true) }
+            .take(5)
+            .forEach { warningLine ->
+                LOG.info("MkDocs startup warning (non-fatal): $warningLine")
+            }
+    }
+
+    private fun safeSleep(millis: Long): Boolean {
+        if (millis <= 0L) {
+            return true
+        }
+
+        return try {
+            sleeper(millis)
+            true
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
     }
 
     private fun startFailureDetails(projectPath: String, startupOutput: String): String {
@@ -170,6 +389,8 @@ class PluginActivationService(
         projectPath: String,
         runtimePath: String,
         uvExecutablePath: String,
+        host: String,
+        port: Int,
     ): List<String> {
         ensureSiteNameRequiredByMkDocs(projectPath)
         val scriptPath = ensureParentGuardScript(projectPath)
@@ -180,10 +401,7 @@ class PluginActivationService(
         } else {
             emptyList()
         }
-        val hostBindingArgs = allocateLoopbackPort()?.let { port ->
-            val host = java.net.InetAddress.getLoopbackAddress().hostAddress
-            listOf("-a", "$host:$port")
-        } ?: emptyList()
+        val hostBindingArgs = listOf("--dev-addr", "$host:$port")
 
         return listOf(
             uvExecutablePath,
@@ -302,11 +520,19 @@ class PluginActivationService(
 
     private fun allocateLoopbackPort(): Int? {
         return runCatching {
-            ServerSocket(0).use { socket ->
+            ServerSocket(0, 0, InetAddress.getLoopbackAddress()).use { socket ->
                 socket.reuseAddress = true
                 socket.localPort.takeIf { it > 0 }
             }
         }.getOrNull()
+    }
+
+    private fun loopbackHostAddress(): String {
+        val resolved = runCatching { InetAddress.getLoopbackAddress().hostAddress }.getOrDefault("127.0.0.1")
+        if (resolved.isBlank() || resolved.contains(':')) {
+            return "127.0.0.1"
+        }
+        return resolved
     }
 
     private fun pluginRuntimeDir(projectPath: String): Path = Path.of(projectPath).resolve(".mkdocs-plugin-runtime")
@@ -399,5 +625,9 @@ class PluginActivationService(
             StandardOpenOption.WRITE,
         )
         return scriptPath
+    }
+
+    companion object {
+        private val LOG: Logger = Logger.getInstance(PluginActivationService::class.java)
     }
 }

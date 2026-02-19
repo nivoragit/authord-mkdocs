@@ -29,7 +29,8 @@ class StartMkdocsActionInvocationTest {
 
         assertTrue(invoked)
         assertTrue(service.isRuntimeRunning())
-        assertEquals("https://preview.example/docs/", service.currentPreviewUrl())
+        val currentUrl = service.currentPreviewUrl()
+        assertTrue(currentUrl != null && currentUrl.startsWith("http://127.0.0.1:"))
     }
 
     @Test
@@ -49,7 +50,8 @@ class StartMkdocsActionInvocationTest {
         assertTrue(first)
         assertTrue(second)
         assertTrue(service.isRuntimeRunning())
-        assertEquals("https://preview.example/docs/", service.currentPreviewUrl())
+        val currentUrl = service.currentPreviewUrl()
+        assertTrue(currentUrl != null && currentUrl.startsWith("http://127.0.0.1:"))
         assertEquals(2, messages.size)
         assertTrue(messages.last().contains("already running", ignoreCase = true))
     }

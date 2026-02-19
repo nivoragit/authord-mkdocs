@@ -2,6 +2,7 @@ package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.topic.MkDocsConfigDocument
 import com.authord.mkdocs.ports.topic.TopicNavNode
+import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertTrue
@@ -80,5 +81,47 @@ class TopicTreeStartupLoaderTest {
 
         assertEquals(StartupTreeSource.FALLBACK, state.source)
         assertEquals(listOf("guide/install.md", "index.md"), state.navOrderedPaths)
+    }
+
+    @Test
+    fun `resolves nav display title from markdown h1 when present`() {
+        val root = Files.createTempDirectory("startup-loader-h1-nav")
+        val docs = Files.createDirectories(root.resolve("docs"))
+        val page = docs.resolve("index.md")
+        Files.writeString(page, "# Welcome Home\n\nBody\n")
+
+        val loader = TopicTreeStartupLoader()
+        val config = MkDocsConfigDocument(
+            docsDir = docs.toString(),
+            nav = listOf(TopicNavNode(nodeId = "n1", title = "Fallback Title", path = "index.md")),
+        )
+
+        val state = loader.load(
+            config = config,
+            docsMarkdownPaths = listOf(page.toString()),
+        )
+
+        assertEquals("Welcome Home", state.nodes.single().title)
+    }
+
+    @Test
+    fun `reloading startup state reflects updated markdown h1 title`() {
+        val root = Files.createTempDirectory("startup-loader-h1-refresh")
+        val docs = Files.createDirectories(root.resolve("docs"))
+        val page = docs.resolve("guide.md")
+        Files.writeString(page, "# First Title\n")
+
+        val loader = TopicTreeStartupLoader()
+        val config = MkDocsConfigDocument(
+            docsDir = docs.toString(),
+            nav = listOf(TopicNavNode(nodeId = "n1", title = "Config Title", path = "guide.md")),
+        )
+
+        val first = loader.load(config = config, docsMarkdownPaths = listOf(page.toString()))
+        assertEquals("First Title", first.nodes.single().title)
+
+        Files.writeString(page, "# Updated Title\n")
+        val second = loader.load(config = config, docsMarkdownPaths = listOf(page.toString()))
+        assertEquals("Updated Title", second.nodes.single().title)
     }
 }

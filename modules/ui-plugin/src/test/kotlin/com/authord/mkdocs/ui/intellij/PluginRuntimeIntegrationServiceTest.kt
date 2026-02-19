@@ -76,6 +76,7 @@ class PluginRuntimeIntegrationServiceTest {
                 baseUrlDetector = BaseUrlDetector(),
                 previewPaneCoordinator = previewPane,
                 errorPresenter = ActivationErrorPresenter(),
+                readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
             ),
             processManager = processManager,
             previewPaneCoordinator = previewPane,
@@ -99,7 +100,8 @@ class PluginRuntimeIntegrationServiceTest {
         assertEquals(1, launcher.launchCount)
         assertTrue(service.isRuntimeRunning())
         assertTrue(service.canStartPreview())
-        assertEquals("https://preview.example/", service.currentPreviewUrl())
+        val currentUrl = service.currentPreviewUrl()
+        assertTrue(currentUrl != null && currentUrl.startsWith("http://127.0.0.1:"))
 
         assertTrue(service.stopPreview())
         assertFalse(service.isRuntimeRunning())
@@ -130,6 +132,7 @@ class PluginRuntimeIntegrationServiceTest {
                     baseUrlDetector = BaseUrlDetector(),
                     previewPaneCoordinator = previewPane,
                     errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
                 ),
                 processManager = processManager,
                 previewPaneCoordinator = previewPane,
@@ -183,6 +186,7 @@ class PluginRuntimeIntegrationServiceTest {
                 baseUrlDetector = BaseUrlDetector(),
                 previewPaneCoordinator = previewPane,
                 errorPresenter = ActivationErrorPresenter(),
+                readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
             ),
             processManager = processManager,
             previewPaneCoordinator = previewPane,
@@ -205,7 +209,8 @@ class PluginRuntimeIntegrationServiceTest {
         assertTrue(restarted.success)
         assertEquals(2, launcher.launchCount)
         assertTrue(service.isRuntimeRunning())
-        assertEquals("https://preview.example/", service.currentPreviewUrl())
+        val currentUrl = service.currentPreviewUrl()
+        assertTrue(currentUrl != null && currentUrl.startsWith("http://127.0.0.1:"))
     }
 
     @Test
@@ -222,6 +227,7 @@ class PluginRuntimeIntegrationServiceTest {
                 baseUrlDetector = BaseUrlDetector(),
                 previewPaneCoordinator = previewPane,
                 errorPresenter = ActivationErrorPresenter(),
+                readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
             ),
             processManager = processManager,
             previewPaneCoordinator = previewPane,
@@ -238,14 +244,16 @@ class PluginRuntimeIntegrationServiceTest {
         service.overrideDependenciesForTesting(dependencies)
 
         assertTrue(service.startPreview().success)
-        assertEquals("https://preview.example/guides/", service.navigateToSelectedFile("/tmp/project/docs/guides/index.md"))
+        val navigated = service.navigateToSelectedFile("/tmp/project/docs/guides/index.md")
+        assertTrue(navigated != null && navigated.endsWith("/guides/"))
 
         val restarted = service.restartPreview(PreviewStartTrigger.TOOL_WINDOW)
 
         assertTrue(restarted.success)
         assertEquals(2, launcher.launchCount)
-        assertEquals("https://preview.example/guides/", restarted.previewUrl)
-        assertEquals("https://preview.example/guides/", service.currentPreviewUrl())
+        assertTrue(restarted.previewUrl.endsWith("/guides/"))
+        val restartedCurrent = service.currentPreviewUrl()
+        assertTrue(restartedCurrent != null && restartedCurrent.endsWith("/guides/"))
     }
 
     @Test
@@ -275,9 +283,37 @@ class PluginRuntimeIntegrationServiceTest {
     }
 
     @Test
-    fun `failed start without base url keeps start action re-invokable`() {
+    fun `failed start keeps start action re-invokable`() {
         val project = IntellijTestFixtures.project(basePath = "/tmp/project")
+        val launcher = CountingProcessLauncher()
+        val processManager = MkdocsProcessManager(launcher)
+        val previewPane = PreviewPaneCoordinator()
+        var now = 0L
+        val dependencies = RuntimeIntegrationDependencies(
+            activationService = PluginActivationService(
+                bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                processManager = processManager,
+                baseUrlDetector = BaseUrlDetector(),
+                previewPaneCoordinator = previewPane,
+                errorPresenter = ActivationErrorPresenter(),
+                readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { false },
+                maxStartupAttempts = 1,
+                startupProbeTimeoutMillis = 1L,
+                startupPollIntervalMillis = 1L,
+                nowMillisProvider = { now++ },
+            ),
+            processManager = processManager,
+            previewPaneCoordinator = previewPane,
+            navigationCoordinator = NavigationCoordinator(
+                routeMappingService = RouteMappingService(),
+                previewPaneCoordinator = previewPane,
+                failureHandler = PreviewNavigationFailureHandler(),
+            ),
+            featureFlagPolicyService = FeatureFlagPolicyService(),
+            startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+        )
         val service = PluginRuntimeIntegrationService(project)
+        service.overrideDependenciesForTesting(dependencies)
 
         val result = service.startPreview()
 
@@ -295,7 +331,7 @@ class PluginRuntimeIntegrationServiceTest {
 
         val updatedUrl = service.navigateToSelectedFile("/tmp/project/docs/guides/index.md")
 
-        assertEquals("https://preview.example/guides/", updatedUrl)
+        assertTrue(updatedUrl != null && updatedUrl.endsWith("/guides/"))
     }
 
     @Test
@@ -308,6 +344,7 @@ class PluginRuntimeIntegrationServiceTest {
         val updatedUrl = service.navigateToSelectedFile("/tmp/project/README.md")
 
         assertNull(updatedUrl)
-        assertEquals("https://preview.example/", service.currentPreviewUrl())
+        val currentUrl = service.currentPreviewUrl()
+        assertTrue(currentUrl != null && currentUrl.startsWith("http://127.0.0.1:"))
     }
 }

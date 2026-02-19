@@ -16,11 +16,12 @@ data class PreviewPaneState(
 open class PreviewPaneCoordinator {
     private val sessions = mutableMapOf<String, PreviewPaneState>()
 
-    /** Opens preview state for a project with a detected base URL. */
+    /** Opens preview state for a project with a resolved deterministic base URL. */
     open fun open(projectId: String, baseUrl: String): PreviewPaneState {
+        val normalizedBaseUrl = normalizeBaseUrl(baseUrl)
         val state = PreviewPaneState(
             projectId = projectId,
-            baseUrl = baseUrl,
+            baseUrl = normalizedBaseUrl,
             currentRoute = "/",
             isOpen = true,
         )
@@ -50,5 +51,13 @@ open class PreviewPaneCoordinator {
         if (route == "/") return route
         val withLeading = if (route.startsWith("/")) route else "/$route"
         return if (withLeading.endsWith("/")) withLeading else "$withLeading/"
+    }
+
+    private fun normalizeBaseUrl(baseUrl: String): String {
+        val trimmed = baseUrl.trim()
+        if (trimmed.isEmpty()) {
+            return "/"
+        }
+        return if (trimmed.endsWith("/")) trimmed else "$trimmed/"
     }
 }

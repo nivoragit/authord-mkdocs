@@ -35,6 +35,7 @@ class ActivationToPreviewIT {
             baseUrlDetector = BaseUrlDetector(),
             previewPaneCoordinator = preview,
             errorPresenter = ActivationErrorPresenter(),
+            readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
         )
 
         val result = service.activate(
@@ -45,6 +46,6 @@ class ActivationToPreviewIT {
         )
 
         assertTrue(result.success)
-        assertTrue(preview.currentUrl("project-1")!!.startsWith("http://127.0.0.1:8000"))
+        assertTrue(preview.currentUrl("project-1")!!.startsWith("http://127.0.0.1:"))
     }
 }

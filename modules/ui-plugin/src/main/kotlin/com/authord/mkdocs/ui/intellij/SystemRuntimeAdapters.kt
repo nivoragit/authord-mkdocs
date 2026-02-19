@@ -116,9 +116,11 @@ class ProcessBuilderCommandRunner(
 private class ProcessBackedManagedProcessHandle(
     override val id: String,
     private val process: Process,
-    private val outputBuffer: StringBuilder,
+    private val stdoutBuffer: StringBuilder,
+    private val stderrBuffer: StringBuilder,
     private val outputLock: Any,
-    private val outputReaderThread: Thread,
+    private val stdoutReaderThread: Thread,
+    private val stderrReaderThread: Thread,
     private val shutdownHookRegistrar: ShutdownHookRegistrar,
 ) : ManagedProcessHandle {
     private val shutdownHook: Thread = Thread(
@@ -137,7 +139,8 @@ private class ProcessBackedManagedProcessHandle(
             if (!process.waitFor(3, TimeUnit.SECONDS)) {
                 destroyProcessTree(process, forcibly = true)
             }
-            outputReaderThread.join(500)
+            stdoutReaderThread.join(500)
+            stderrReaderThread.join(500)
         } catch (ignored: InterruptedException) {
             Thread.currentThread().interrupt()
             destroyProcessTree(process, forcibly = true)
@@ -152,7 +155,20 @@ private class ProcessBackedManagedProcessHandle(
     /**
      * Returns currently captured startup/runtime output snapshot.
      */
-    override fun startupOutput(): String = synchronized(outputLock) { outputBuffer.toString() }
+    override fun startupOutput(): String = synchronized(outputLock) {
+        buildString {
+            append(stdoutBuffer)
+            append(stderrBuffer)
+        }
+    }
+
+    override fun stdoutOutput(): String = synchronized(outputLock) { stdoutBuffer.toString() }
+
+    override fun stderrOutput(): String = synchronized(outputLock) { stderrBuffer.toString() }
+
+    override fun exitCodeOrNull(): Int? {
+        return if (process.isAlive) null else runCatching { process.exitValue() }.getOrNull()
+    }
 
     private fun unregisterShutdownHook() {
         if (!shutdownHookRegistered) {
@@ -187,7 +203,7 @@ private fun destroyProcessTree(process: Process, forcibly: Boolean) {
 }
 
 /**
- * Process launcher that captures runtime startup output for base-URL detection.
+ * Process launcher that captures and continuously drains runtime stdout/stderr.
  */
 class ProcessBuilderProcessLauncher(
     private val processFactory: SystemProcessFactory = ProcessBuilderSystemProcessFactory(),
@@ -196,71 +212,66 @@ class ProcessBuilderProcessLauncher(
     private val shutdownHookRegistrar: ShutdownHookRegistrar = RuntimeShutdownHookRegistrar,
 ) : ProcessLauncher {
     private val counter = AtomicInteger(0)
-    private val urlRegex = Regex("(https?://[^\\s]+)")
 
     /**
-     * Launches a process and captures startup output with a bounded wait window.
+     * Launches a process and begins non-blocking stdout/stderr draining immediately.
      */
     override fun launch(command: List<String>, workingDir: String): ManagedProcessHandle {
-        val process = processFactory.start(command, workingDir, mergeErrorStream = true)
+        val process = processFactory.start(command, workingDir, mergeErrorStream = false)
         val processId = "process-${counter.incrementAndGet()}"
         val outputLock = Any()
-        val outputBuffer = StringBuilder()
+        val stdoutBuffer = StringBuilder()
+        val stderrBuffer = StringBuilder()
 
-        val readerThread = thread(
+        val stdoutReaderThread = thread(
             start = true,
             isDaemon = true,
-            name = "authord-mkdocs-$processId-output-reader",
+            name = "authord-mkdocs-$processId-stdout-reader",
         ) {
             process.inputStream.bufferedReader().forEachLine { line ->
                 synchronized(outputLock) {
-                    outputBuffer.appendLine(line)
+                    stdoutBuffer.appendLine(line)
                 }
             }
         }
 
-        waitForStartupOutput(process, outputBuffer, outputLock)
-        waitForReaderDrainIfProcessExited(process, readerThread)
+        val stderrReaderThread = thread(
+            start = true,
+            isDaemon = true,
+            name = "authord-mkdocs-$processId-stderr-reader",
+        ) {
+            process.errorStream.bufferedReader().forEachLine { line ->
+                synchronized(outputLock) {
+                    stderrBuffer.appendLine(line)
+                }
+            }
+        }
+
+        waitForReaderDrainIfProcessExited(process, stdoutReaderThread, stderrReaderThread)
 
         return ProcessBackedManagedProcessHandle(
             id = processId,
             process = process,
-            outputBuffer = outputBuffer,
+            stdoutBuffer = stdoutBuffer,
+            stderrBuffer = stderrBuffer,
             outputLock = outputLock,
-            outputReaderThread = readerThread,
+            stdoutReaderThread = stdoutReaderThread,
+            stderrReaderThread = stderrReaderThread,
             shutdownHookRegistrar = shutdownHookRegistrar,
         )
     }
 
-    private fun waitForStartupOutput(process: Process, outputBuffer: StringBuilder, outputLock: Any) {
-        val deadline = System.currentTimeMillis() + startupWaitMillis
-
-        while (System.currentTimeMillis() < deadline) {
-            val currentOutput = synchronized(outputLock) { outputBuffer.toString() }
-            if (urlRegex.containsMatchIn(currentOutput)) {
-                return
-            }
-
-            if (!process.isAlive && currentOutput.isNotBlank()) {
-                return
-            }
-
-            try {
-                Thread.sleep(pollIntervalMillis)
-            } catch (ignored: InterruptedException) {
-                Thread.currentThread().interrupt()
-                return
-            }
-        }
-    }
-
-    private fun waitForReaderDrainIfProcessExited(process: Process, outputReaderThread: Thread) {
+    private fun waitForReaderDrainIfProcessExited(process: Process, stdoutReaderThread: Thread, stderrReaderThread: Thread) {
         if (process.isAlive) {
             return
         }
 
+        val joinMillis = startupWaitMillis
+            .coerceAtMost(500L)
+            .coerceAtLeast(pollIntervalMillis.coerceAtLeast(25L))
         try {
-            outputReaderThread.join(250)
+            stdoutReaderThread.join(joinMillis)
+            stderrReaderThread.join(joinMillis)
         } catch (ignored: InterruptedException) {
             Thread.currentThread().interrupt()
         }

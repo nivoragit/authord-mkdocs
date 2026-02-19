@@ -140,7 +140,7 @@ class SystemRuntimeAdaptersTest {
         assertTrue(handle.startupOutput().contains("http://127.0.0.1:8000/"))
         assertTrue(handle.isAlive())
         assertEquals(listOf("mkdocs", "serve"), factory.command)
-        assertTrue(factory.mergeErrorStream)
+        assertFalse(factory.mergeErrorStream)
 
         handle.stop()
         assertFalse(handle.isAlive())

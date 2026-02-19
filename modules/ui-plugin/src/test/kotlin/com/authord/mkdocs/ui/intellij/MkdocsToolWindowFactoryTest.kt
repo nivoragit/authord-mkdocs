@@ -291,10 +291,8 @@ class MkdocsToolWindowFactoryTest {
         val service = PluginRuntimeIntegrationService(project)
         service.setStartupOutputForNextRun("ready at https://preview.example/")
         assertTrue(service.startPreview().success)
-        assertEquals(
-            "https://preview.example/guides/",
-            service.navigateToSelectedFile("/tmp/project/docs/guides/index.md"),
-        )
+        val routedUrl = service.navigateToSelectedFile("/tmp/project/docs/guides/index.md")
+        assertTrue(routedUrl != null && routedUrl.endsWith("/guides/"))
 
         val previewContent = RecordingPreviewContent()
         val messages = mutableListOf<String>()
@@ -311,8 +309,9 @@ class MkdocsToolWindowFactoryTest {
         )
 
         assertTrue(result.success)
-        assertEquals("https://preview.example/guides/", result.previewUrl)
-        assertEquals(listOf("https://preview.example/guides/"), previewContent.loadedUrls())
+        assertTrue(result.previewUrl.endsWith("/guides/"))
+        assertEquals(1, previewContent.loadedUrls().size)
+        assertTrue(previewContent.loadedUrls().single().endsWith("/guides/"))
         assertTrue(messages.last().contains("restarted", ignoreCase = true))
     }
 
@@ -449,7 +448,10 @@ class MkdocsToolWindowFactoryTest {
         factory.createToolWindowContent(project, fixture.toolWindow)
 
         assertTrue(service.isRuntimeRunning())
-        assertEquals(listOf("https://preview.example/"), previewContent.loadedUrls())
+        assertEquals(1, previewContent.loadedUrls().size)
+        val loadedRootUrl = previewContent.loadedUrls().single()
+        assertTrue(loadedRootUrl.startsWith("http://127.0.0.1:"))
+        assertTrue(loadedRootUrl.endsWith("/"))
     }
 
     @Test
@@ -489,7 +491,10 @@ class MkdocsToolWindowFactoryTest {
         factory.createToolWindowContent(projectWithService, fixture.toolWindow)
 
         assertTrue(service.isRuntimeRunning())
-        assertEquals(listOf("https://preview.example/default/"), previewContent.loadedUrls())
+        assertEquals(1, previewContent.loadedUrls().size)
+        val loadedRootUrl = previewContent.loadedUrls().single()
+        assertTrue(loadedRootUrl.startsWith("http://127.0.0.1:"))
+        assertTrue(loadedRootUrl.endsWith("/"))
     }
 
     @Test
@@ -507,7 +512,7 @@ class MkdocsToolWindowFactoryTest {
 
         factory.createShellContentPanel(project)
 
-        assertEquals(listOf("https://preview.example/preloaded/"), previewContent.loadedUrls())
+        assertEquals(listOf(service.currentPreviewUrl()), previewContent.loadedUrls())
     }
 
     @Test
@@ -533,7 +538,8 @@ class MkdocsToolWindowFactoryTest {
         )
 
         assertTrue(applied)
-        assertEquals(listOf("https://preview.example/guide/"), previewContent.loadedUrls())
+        assertEquals(1, previewContent.loadedUrls().size)
+        assertTrue(previewContent.loadedUrls().single().endsWith("/guide/"))
         assertTrue(messages.last().contains("updated", ignoreCase = true))
     }
 
