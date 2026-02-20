@@ -4,6 +4,7 @@ import com.authord.mkdocs.ui.PluginCompositionRoot
 import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.DumbAware
 
@@ -53,7 +54,10 @@ class StartMkdocsAction(
         )
     }
 
-    internal fun invokeForProject(project: Project?): Boolean {
+    internal fun invokeForProject(
+        project: Project?,
+        onSuccessfulStart: (() -> Unit)? = null,
+    ): Boolean {
         if (project == null) {
             return false
         }
@@ -69,10 +73,25 @@ class StartMkdocsAction(
         }
 
         val runtimeService = runtimeServiceResolver(project)
-        val result = runtimeService.startPreview(PreviewStartTrigger.ACTION)
-        val message = formatPreviewResultMessage(result)
-        resultPresenter(project, message, result.success)
-        return result.success
+        val application = ApplicationManager.getApplication()
+        if (application == null) {
+            val result = runtimeService.startPreview(PreviewStartTrigger.ACTION)
+            val message = formatPreviewResultMessage(result)
+            resultPresenter(project, message, result.success)
+            if (result.success) {
+                onSuccessfulStart?.invoke()
+            }
+            return result.success
+        }
+
+        runtimeService.startPreviewAsync(PreviewStartTrigger.ACTION) { result ->
+            val message = formatPreviewResultMessage(result)
+            resultPresenter(project, message, result.success)
+            if (result.success) {
+                onSuccessfulStart?.invoke()
+            }
+        }
+        return true
     }
 }
 

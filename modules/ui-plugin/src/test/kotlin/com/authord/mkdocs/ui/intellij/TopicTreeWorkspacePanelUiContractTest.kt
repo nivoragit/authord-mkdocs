@@ -23,9 +23,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         val tooltips = panel.tooltipTextsForTest().toSet()
 
         listOf(
-            // "New", // disabled in UI
             "Delete",
-            "Rename",
             "Root",
             "Child",
             "Collapse All",
@@ -37,31 +35,16 @@ class TopicTreeWorkspacePanelUiContractTest {
     @Test
     fun `menu structure matches contract order`() {
         val panel = panelWithDefaults()
-
         assertEquals(
-            emptyList<String>(),
-            panel.instancesOverflowMenuLabelsForTest(),
-        )
-        /* todo
-        assertEquals(
-            listOf("New Topic", "New Child Topic", "Edit Title", "Remove TOC Element", "Set as Home Page"),
+            listOf("New Child Topic", "Edit Title", "Remove TOC Element"),
             panel.tocContextMenuLabelsForTest(),
         )
-        */
     }
 
     @Test
     fun `enablement follows capability and selection rules`() {
         val panel = panelWithDefaults()
         panel.render(sampleState())
-
-        val instanceStates = panel.instanceActionStatesForTest()
-        assertFalse(instanceStates.getValue("Rename"))
-        assertFalse(instanceStates.getValue("Delete"))
-        assertEquals(
-            emptyList<Pair<String, Boolean>>(),
-            panel.instancesOverflowMenuStatesForTest(),
-        )
 
         val tocWithoutSelection = panel.tocRowActionStatesForTest()
         assertFalse(tocWithoutSelection.getValue("Child"))
@@ -73,7 +56,6 @@ class TopicTreeWorkspacePanelUiContractTest {
         assertTrue(tocWithSelection.getValue("Delete"))
 
         val headerVisibility = panel.headerActionVisibilityForTest()
-        assertTrue(headerVisibility.getValue("New"))
         assertTrue(headerVisibility.getValue("Collapse All"))
         assertTrue(headerVisibility.getValue("Root"))
     }

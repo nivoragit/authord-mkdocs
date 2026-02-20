@@ -29,6 +29,8 @@ import java.awt.Component
 import java.awt.event.InputEvent
 import java.lang.reflect.InvocationHandler
 import java.lang.reflect.Proxy
+import java.nio.file.Files
+import java.nio.file.Path
 import javax.swing.JComponent
 
 object IntellijTestFixtures {
@@ -110,6 +112,7 @@ object IntellijTestFixtures {
         locationHash: String = "project-hash",
         services: Map<Class<*>, Any> = emptyMap(),
     ): Project {
+        ensureSyntheticProjectRoot(basePath)
         val userData = mutableMapOf<Key<*>, Any?>()
         val messageBusConnection = dynamicProxy(MessageBusConnection::class.java) { _, method, _ ->
             when (method.name) {
@@ -146,7 +149,27 @@ object IntellijTestFixtures {
         }
     }
 
-    fun toolWindowFixture(): ToolWindowFixture {
+    private fun ensureSyntheticProjectRoot(basePath: String?) {
+        if (basePath != "/tmp/project") {
+            return
+        }
+        runCatching {
+            val root = Path.of(basePath)
+            Files.createDirectories(root)
+            val configPath = root.resolve("mkdocs.yml")
+            if (!Files.exists(configPath)) {
+                Files.writeString(
+                    configPath,
+                    """
+                        site_name: Fixture Docs
+                        docs_dir: docs
+                    """.trimIndent() + "\n",
+                )
+            }
+        }
+    }
+
+    fun toolWindowFixture(toolWindowId: String? = null): ToolWindowFixture {
         val removedAllCalls = mutableListOf<Boolean>()
         val addedComponents = mutableListOf<JComponent>()
 
@@ -179,6 +202,7 @@ object IntellijTestFixtures {
         val toolWindow = dynamicProxy(ToolWindow::class.java) { _, method, _ ->
             when (method.name) {
                 "getContentManager" -> contentManager
+                "getId" -> toolWindowId
                 else -> defaultValue(method.returnType)
             }
         }

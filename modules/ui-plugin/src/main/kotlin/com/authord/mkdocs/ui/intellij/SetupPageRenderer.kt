@@ -209,9 +209,8 @@ class SetupPageRenderer {
                       </svg>
                     </div>
                     <h1>Create Documentation</h1>
-                    <p class="subtitle">
-                      No <code>mkdocs.yml</code> was found in the project root.<br/>
-                      Create a new MkDocs project to get started.
+                    <p class="subtitle">              
+                      Create a new project to get started.
                     </p>
                     <label for="project-name-input">Project name</label>
                     <div class="input-group">

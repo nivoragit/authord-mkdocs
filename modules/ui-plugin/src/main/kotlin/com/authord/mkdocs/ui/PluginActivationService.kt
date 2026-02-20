@@ -81,8 +81,8 @@ class PluginActivationService(
     private val readinessProbe: HttpReadinessProbe = HttpURLConnectionReadinessProbe(),
     private val nowMillisProvider: () -> Long = System::currentTimeMillis,
     private val sleeper: (Long) -> Unit = { millis -> Thread.sleep(millis) },
-    private val maxStartupAttempts: Int = 6,
-    private val startupProbeTimeoutMillis: Long = 10_000L,
+    private val maxStartupAttempts: Int = 2,
+    private val startupProbeTimeoutMillis: Long = 45_000L,
     private val startupPollIntervalMillis: Long = 150L,
 ) {
     private data class StartupAttemptFailure(
@@ -124,6 +124,16 @@ class PluginActivationService(
                 success = false,
                 reason = reason,
                 message = errorPresenter.present(reason),
+            )
+        }
+
+        if (isMaterializedProjectRoot(projectPath) && resolveMkdocsConfigPath(projectPath) == null) {
+            val reason = ActivationFailureReason.START_FAILED
+            val details = AuthordUiBundle.message("activation.error.configNotFound", projectPath)
+            return ActivationResult(
+                success = false,
+                reason = reason,
+                message = errorPresenter.present(reason, details),
             )
         }
 
@@ -383,6 +393,11 @@ class PluginActivationService(
         }
 
         return ""
+    }
+
+    private fun isMaterializedProjectRoot(projectPath: String): Boolean {
+        val rootPath = runCatching { Path.of(projectPath) }.getOrNull() ?: return false
+        return rootPath.exists() && Files.isDirectory(rootPath)
     }
 
     private fun parentBoundServeCommand(

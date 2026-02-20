@@ -13,6 +13,13 @@ class StartMkdocsMarkdownToolbarAction(
     private val delegate: StartMkdocsAction = StartMkdocsAction(),
     private val markdownContextPredicate: (AnActionEvent) -> Boolean = ::isMarkdownEditorContext,
     private val toolWindowOpener: (com.intellij.openapi.project.Project) -> Unit = ::showAuthordToolWindow,
+    private val mkdocsConfigChecker: (com.intellij.openapi.project.Project) -> Boolean = { project ->
+        project.basePath?.let(::hasMkdocsConfig) ?: false
+    },
+    private val markdownPreviewRefresher: (com.intellij.openapi.project.Project, PreviewStartTrigger) -> Unit =
+        { project, trigger ->
+            refreshOpenAuthordMarkdownPreviews(project, trigger)
+        },
 ) : AnAction(), DumbAware {
     override fun getActionUpdateThread(): ActionUpdateThread = delegate.actionUpdateThread
 
@@ -28,8 +35,14 @@ class StartMkdocsMarkdownToolbarAction(
         if (!markdownContextPredicate(event)) {
             return
         }
-        if (delegate.invokeForProject(project)) {
-            toolWindowOpener(project)
+
+        toolWindowOpener(project)
+        if (!mkdocsConfigChecker(project)) {
+            return
+        }
+
+        delegate.invokeForProject(project) {
+            markdownPreviewRefresher(project, PreviewStartTrigger.ACTION)
         }
     }
 

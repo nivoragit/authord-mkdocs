@@ -19,6 +19,8 @@ import com.authord.mkdocs.ui.PreviewNavigationFailureHandler
 import com.authord.mkdocs.ui.PreviewPaneCoordinator
 import com.authord.mkdocs.core.navigation.RouteMappingService
 import com.intellij.ui.JBColor
+import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
 import com.intellij.openapi.project.Project
@@ -160,6 +162,7 @@ class PluginRuntimeIntegrationService(
      * @param trigger source entry point for diagnostics and traceability.
      * @return activation result with success, failure reason, and optional preview URL.
      */
+    @Synchronized
     fun startPreview(trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION): ActivationResult {
         val projectPath = project.basePath
             ?: return ActivationResult(
@@ -169,9 +172,13 @@ class PluginRuntimeIntegrationService(
             )
 
         val projectId = project.locationHash
+        val hasKnownConfigFingerprint = lastMkdocsConfigFingerprint != null
         val configChanged = hasMkdocsConfigChanged(projectPath)
-        if (previewRuntimeService.isServerRunning() && configChanged) {
+        if (previewRuntimeService.isServerRunning() && hasKnownConfigFingerprint && configChanged) {
             return restartPreview(trigger)
+        }
+        if (previewRuntimeService.isServerRunning() && !hasKnownConfigFingerprint) {
+            syncMkdocsConfigFingerprint(projectPath)
         }
         val existingPreviewUrl = dependencies.previewPaneCoordinator.currentUrl(projectId)
         if (previewRuntimeService.isServerRunning() && existingPreviewUrl != null) {
@@ -195,8 +202,24 @@ class PluginRuntimeIntegrationService(
     }
 
     /**
+     * Starts preview on a pooled thread and dispatches completion on the UI thread.
+     *
+     * Falls back to synchronous execution when no IntelliJ application is available (unit tests).
+     */
+    fun startPreviewAsync(
+        trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION,
+        onComplete: (ActivationResult) -> Unit,
+    ) {
+        runPreviewOperationAsync(
+            operation = { startPreview(trigger) },
+            onComplete = onComplete,
+        )
+    }
+
+    /**
      * Stops active runtime instance for this project.
      */
+    @Synchronized
     fun stopPreview(): Boolean = previewRuntimeService.stopServer()
 
     /**
@@ -209,6 +232,7 @@ class PluginRuntimeIntegrationService(
      *
      * If runtime is not currently running, this method starts preview instead.
      */
+    @Synchronized
     fun restartPreview(trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION): ActivationResult {
         val projectPath = project.basePath
             ?: return ActivationResult(
@@ -232,6 +256,21 @@ class PluginRuntimeIntegrationService(
 
         syncMkdocsConfigFingerprint(projectPath)
         return restarted.copy(previewUrl = currentPreviewUrl().orEmpty())
+    }
+
+    /**
+     * Restarts preview on a pooled thread and dispatches completion on the UI thread.
+     *
+     * Falls back to synchronous execution when no IntelliJ application is available (unit tests).
+     */
+    fun restartPreviewAsync(
+        trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION,
+        onComplete: (ActivationResult) -> Unit,
+    ) {
+        runPreviewOperationAsync(
+            operation = { restartPreview(trigger) },
+            onComplete = onComplete,
+        )
     }
 
     /**
@@ -279,6 +318,29 @@ class PluginRuntimeIntegrationService(
     override fun dispose() {
         previewRuntimeService.stopServer()
         lastMkdocsConfigFingerprint = null
+    }
+
+    private fun runPreviewOperationAsync(
+        operation: () -> ActivationResult,
+        onComplete: (ActivationResult) -> Unit,
+    ) {
+        val application = ApplicationManager.getApplication()
+        if (application == null) {
+            onComplete(operation())
+            return
+        }
+
+        application.executeOnPooledThread {
+            val result = operation()
+            application.invokeLater(
+                {
+                    if (!project.isDisposed) {
+                        onComplete(result)
+                    }
+                },
+                ModalityState.any(),
+            )
+        }
     }
 
     private fun hasMkdocsConfigChanged(projectPath: String): Boolean {

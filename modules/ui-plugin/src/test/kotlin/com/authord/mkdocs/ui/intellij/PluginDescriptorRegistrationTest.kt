@@ -3,6 +3,7 @@ package com.authord.mkdocs.ui.intellij
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.Test
+import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 class PluginDescriptorRegistrationTest {
@@ -20,7 +21,7 @@ class PluginDescriptorRegistrationTest {
             content.contains("implementation=\"com.authord.mkdocs.ui.intellij.MkdocsVenvDirectoryExcludePolicy\""),
         )
         assertTrue(content.contains("factoryClass=\"com.authord.mkdocs.ui.intellij.MkdocsToolWindowFactory\""))
-        assertTrue(content.contains("implementation=\"com.authord.mkdocs.ui.intellij.MarkdownAutoOpenPreviewStartupActivity\""))
+        assertFalse(content.contains("implementation=\"com.authord.mkdocs.ui.intellij.MarkdownAutoOpenPreviewStartupActivity\""))
         assertTrue(content.contains("class=\"com.authord.mkdocs.ui.intellij.StartMkdocsAction\""))
     }
 

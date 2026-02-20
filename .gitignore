@@ -13,6 +13,7 @@ local.properties
 .idea/
 .vscode/
 .codex/
+.agent/
 
 # OS
 .DS_Store

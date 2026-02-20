@@ -108,6 +108,61 @@ class PluginRuntimeIntegrationServiceTest {
     }
 
     @Test
+    fun `startPreview does not restart running runtime before first config fingerprint is known`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-running-no-fingerprint-")
+        try {
+            Files.writeString(
+                projectRoot.resolve("mkdocs.yml"),
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                    nav: []
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString())
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            val previewPane = PreviewPaneCoordinator()
+            val projectId = project.locationHash
+
+            processManager.start(projectId = projectId, workingDir = projectRoot.toString())
+            previewPane.open(projectId, "http://127.0.0.1:8000/")
+
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "ready at https://preview.example/" },
+            )
+
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+
+            val result = service.startPreview()
+
+            assertTrue(result.success)
+            assertEquals("Preview already running.", result.message)
+            assertEquals(1, launcher.launchCount)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `startPreview reloads mkdocs config changes by restarting runtime`() {
         val projectRoot = createTempDirectory(prefix = "runtime-config-reload-")
         try {

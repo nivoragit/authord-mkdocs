@@ -9,6 +9,7 @@ import com.authord.mkdocs.runtime.ProcessLauncher
 import com.authord.mkdocs.runtime.UvBootstrapService
 import com.authord.mkdocs.runtime.StaticUvExecutableProvider
 import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -76,6 +77,19 @@ class PluginActivationServiceTest {
         )
     }
 
+    private fun createProjectRootWithConfig(prefix: String): Path {
+        val projectRoot = createTempDirectory(prefix = prefix)
+        Files.writeString(
+            projectRoot.resolve("mkdocs.yml"),
+            """
+                site_name: Demo
+                docs_dir: docs
+                nav: []
+            """.trimIndent() + "\n",
+        )
+        return projectRoot
+    }
+
     @Test
     fun `fails when mvp flow is disabled`() {
         val svc = service(
@@ -96,75 +110,97 @@ class PluginActivationServiceTest {
 
     @Test
     fun `fails when bootstrap fails`() {
-        val svc = service(
-            bootstrap = UvBootstrapService { command, _ ->
-                if (command[1] == "venv") CommandResult(1, stderr = "boom") else CommandResult(0)
-            },
-            processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> ActivationHandle("p1", true) }),
-        )
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-bootstrap-fail-")
+        try {
+            val svc = service(
+                bootstrap = UvBootstrapService { command, _ ->
+                    if (command[1] == "venv") CommandResult(1, stderr = "boom") else CommandResult(0)
+                },
+                processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> ActivationHandle("p1", true) }),
+            )
 
-        val result = svc.activate(
-            projectId = "project-1",
-            projectPath = "/tmp/project",
-            startupOutput = "http://127.0.0.1:8000/",
-            featureFlags = FeatureFlagPolicy(),
-        )
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "http://127.0.0.1:8000/",
+                featureFlags = FeatureFlagPolicy(),
+            )
 
-        assertFalse(result.success)
-        assertEquals(ActivationFailureReason.BOOTSTRAP_FAILED, result.reason)
-        assertTrue(result.message.contains("boom"))
+            assertFalse(result.success)
+            assertEquals(ActivationFailureReason.BOOTSTRAP_FAILED, result.reason)
+            assertTrue(result.message.contains("boom"))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
     }
 
     @Test
     fun `fails when process start returns not started`() {
-        val svc = service(
-            bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
-            processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> ActivationHandle("p1", false) }),
-        )
-
-        val result = svc.activate(
-            projectId = "project-1",
-            projectPath = "/tmp/project",
-            startupOutput = "http://127.0.0.1:8000/",
-            featureFlags = FeatureFlagPolicy(),
-        )
-
-        assertFalse(result.success)
-        assertEquals(ActivationFailureReason.START_FAILED, result.reason)
-    }
-
-    @Test
-    fun `includes startup output details when process start fails`() {
-        val svc = service(
-            bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
-            processManager = MkdocsProcessManager(ProcessLauncher { _, _ ->
-                ActivationHandle(
-                    id = "p1",
-                    alive = false,
-                    startupOutputText = "Error: Config file 'mkdocs.yml' does not exist.",
-                )
-            }),
-        )
-
-        val result = svc.activate(
-            projectId = "project-1",
-            projectPath = "/tmp/project",
-            startupOutput = "",
-            featureFlags = FeatureFlagPolicy(),
-        )
-
-        assertFalse(result.success)
-        assertEquals(ActivationFailureReason.START_FAILED, result.reason)
-        assertTrue(result.message.contains("Config file 'mkdocs.yml' does not exist"))
-    }
-
-    @Test
-    fun `includes mkdocs config hint when process start fails without output`() {
-        val projectRoot = createTempDirectory(prefix = "plugin-activation-missing-config-")
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-start-fail-")
         try {
             val svc = service(
                 bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
                 processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> ActivationHandle("p1", false) }),
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "http://127.0.0.1:8000/",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertFalse(result.success)
+            assertEquals(ActivationFailureReason.START_FAILED, result.reason)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `includes startup output details when process start fails`() {
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-startup-output-")
+        try {
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = MkdocsProcessManager(ProcessLauncher { _, _ ->
+                    ActivationHandle(
+                        id = "p1",
+                        alive = false,
+                        startupOutputText = "Error: Config file 'mkdocs.yml' does not exist.",
+                    )
+                }),
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertFalse(result.success)
+            assertEquals(ActivationFailureReason.START_FAILED, result.reason)
+            assertTrue(result.message.contains("Config file 'mkdocs.yml' does not exist"))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `fails fast with mkdocs config hint when config is missing`() {
+        val projectRoot = createTempDirectory(prefix = "plugin-activation-missing-config-")
+        try {
+            val launcher = RecordingStartLauncher(
+                ActivationHandle("p1", alive = false, startupOutputText = "should-not-run"),
+            )
+            var bootstrapCalls = 0
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ ->
+                    bootstrapCalls += 1
+                    CommandResult(0)
+                },
+                processManager = MkdocsProcessManager(launcher),
             )
 
             val result = svc.activate(
@@ -177,6 +213,8 @@ class PluginActivationServiceTest {
             assertFalse(result.success)
             assertEquals(ActivationFailureReason.START_FAILED, result.reason)
             assertTrue(result.message.contains("No mkdocs.yml or mkdocs.yaml found in project root"))
+            assertEquals(0, bootstrapCalls)
+            assertTrue(launcher.command.isEmpty())
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -184,68 +222,83 @@ class PluginActivationServiceTest {
 
     @Test
     fun `fails when readiness probe does not succeed and retries stop the process`() {
-        val handle = ActivationHandle("p1", true)
-        var now = 0L
-        val svc = service(
-            bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
-            processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> handle }),
-            readinessProbe = HttpReadinessProbe { false },
-            maxStartupAttempts = 2,
-            startupProbeTimeoutMillis = 1L,
-            startupPollIntervalMillis = 1L,
-            nowMillisProvider = { now++ },
-        )
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-readiness-timeout-")
+        try {
+            val handle = ActivationHandle("p1", true)
+            var now = 0L
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> handle }),
+                readinessProbe = HttpReadinessProbe { false },
+                maxStartupAttempts = 2,
+                startupProbeTimeoutMillis = 1L,
+                startupPollIntervalMillis = 1L,
+                nowMillisProvider = { now++ },
+            )
 
-        val result = svc.activate(
-            projectId = "project-1",
-            projectPath = "/tmp/project",
-            startupOutput = "no url here",
-            featureFlags = FeatureFlagPolicy(),
-        )
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "no url here",
+                featureFlags = FeatureFlagPolicy(),
+            )
 
-        assertFalse(result.success)
-        assertEquals(ActivationFailureReason.START_FAILED, result.reason)
-        assertEquals(2, handle.stopCalls)
+            assertFalse(result.success)
+            assertEquals(ActivationFailureReason.START_FAILED, result.reason)
+            assertEquals(2, handle.stopCalls)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
     }
 
     @Test
     fun `succeeds when bootstrap start and readiness probe succeeds`() {
-        val svc = service(
-            bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
-            processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> ActivationHandle("p1", true) }),
-        )
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-success-")
+        try {
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> ActivationHandle("p1", true) }),
+            )
 
-        val result = svc.activate(
-            projectId = "project-1",
-            projectPath = "/tmp/project",
-            startupOutput = "ready at http://127.0.0.1:8000/",
-            featureFlags = FeatureFlagPolicy(),
-        )
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "ready at http://127.0.0.1:8000/",
+                featureFlags = FeatureFlagPolicy(),
+            )
 
-        assertTrue(result.success)
-        assertTrue(result.previewUrl.startsWith("http://127.0.0.1:"))
-        assertTrue(result.previewUrl.endsWith("/"))
-        assertEquals("Activation completed", result.message)
+            assertTrue(result.success)
+            assertTrue(result.previewUrl.startsWith("http://127.0.0.1:"))
+            assertTrue(result.previewUrl.endsWith("/"))
+            assertEquals("Activation completed", result.message)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
     }
 
     @Test
     fun `startup output is not required when readiness probe succeeds`() {
-        val svc = service(
-            bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
-            processManager = MkdocsProcessManager(ProcessLauncher { _, _ ->
-                ActivationHandle("p1", alive = true, startupOutputText = "WARNING: unrelated URL https://example.com/docs")
-            }),
-        )
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-no-startup-output-")
+        try {
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = MkdocsProcessManager(ProcessLauncher { _, _ ->
+                    ActivationHandle("p1", alive = true, startupOutputText = "WARNING: unrelated URL https://example.com/docs")
+                }),
+            )
 
-        val result = svc.activate(
-            projectId = "project-1",
-            projectPath = "/tmp/project",
-            startupOutput = "",
-            featureFlags = FeatureFlagPolicy(),
-        )
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
 
-        assertTrue(result.success)
-        assertTrue(result.previewUrl.startsWith("http://127.0.0.1:"))
+            assertTrue(result.success)
+            assertTrue(result.previewUrl.startsWith("http://127.0.0.1:"))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
     }
 
     @Test

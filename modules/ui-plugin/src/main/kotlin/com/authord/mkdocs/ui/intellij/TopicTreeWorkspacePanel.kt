@@ -1,7 +1,6 @@
 package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
-import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.fileEditor.FileEditorManager
@@ -11,10 +10,8 @@ import com.intellij.ui.JBColor
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.JBSplitter
 import com.intellij.ui.components.JBLabel
-import com.intellij.ui.components.JBList
 import com.intellij.ui.components.JBPanel
 import com.intellij.ui.components.JBScrollPane
-import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
@@ -29,7 +26,6 @@ import java.awt.event.MouseEvent
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.UUID
-import javax.swing.DefaultListModel
 import javax.swing.DropMode
 import javax.swing.Icon
 import javax.swing.JButton
@@ -37,9 +33,7 @@ import javax.swing.JComponent
 import javax.swing.JMenuItem
 import javax.swing.JPanel
 import javax.swing.JPopupMenu
-import javax.swing.JTabbedPane
 import javax.swing.JTree
-import javax.swing.ListSelectionModel
 import javax.swing.TransferHandler
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeCellRenderer
@@ -135,31 +129,15 @@ internal class TopicTreeWorkspacePanel(
     private val model = DefaultTreeModel(root)
     private val tree = JTree(model)
     private val treeSelectionBandColor = JBColor(Color(0xD7E8FF), Color(0x304D80))
-    private val instanceSelectionBandColor = JBColor(Color(0xD7E8FF), Color(0x304D80))
-    private val instanceModel = DefaultListModel<TopicInstanceRef>()
-    private val instanceList = JBList(instanceModel)
-    private var suppressInstanceSelectionEvents: Boolean = false
-    private val status = JBLabel(uiMessage("topicTree.status.notLoaded"))
-    private val details = JBTextArea()
-    private val unlinkedModel = DefaultListModel<String>()
-    private val validationModel = DefaultListModel<String>()
-    private val unlinkedList = JBList(unlinkedModel)
-    private val validationList = JBList(validationModel)
-    private lateinit var newInstanceButton: JButton
-    private lateinit var instancesOverflowButton: JButton
+    private val status = JBLabel("")
     private lateinit var collapseAllButton: JButton
     private lateinit var addRootTopicButton: JButton
-    private lateinit var instanceDeleteButton: JButton
-    private lateinit var instanceRenameButton: JButton
-    private lateinit var instanceRowActionsPanel: JPanel
     private lateinit var tocDeleteButton: JButton
     private lateinit var tocChildButton: JButton
     private lateinit var tocRowActionsPanel: JPanel
-    private lateinit var tocSetHomePageMenuItem: JMenuItem
     private lateinit var tocNewChildMenuItem: JMenuItem
     private lateinit var tocEditTitleMenuItem: JMenuItem
     private lateinit var tocRemoveMenuItem: JMenuItem
-    private val instancesOverflowMenu = JPopupMenu()
     private val tocContextMenu = JPopupMenu()
     private var currentState: StartupTreeState? = null
 
@@ -187,6 +165,10 @@ internal class TopicTreeWorkspacePanel(
                 hasFocus: Boolean,
             ): Component {
                 val component = super.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, hasFocus)
+                icon = null
+                openIcon = null
+                closedIcon = null
+                leafIcon = null
                 backgroundSelectionColor = treeSelectionBandColor
                 border = if (selected) {
                     JBUI.Borders.customLine(treeSelectionBandColor, 0, 4, 0, 0)
@@ -197,9 +179,8 @@ internal class TopicTreeWorkspacePanel(
             }
         }
         tree.addTreeSelectionListener {
-            renderSelectionDetails()
             refreshActionEnablement()
-            
+
             // Open file in editor on selection
             val selectedNode = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
             val userObject = selectedNode?.userObject
@@ -226,52 +207,6 @@ internal class TopicTreeWorkspacePanel(
             nodeFromId = ::findNode,
             onMoveRequest = ::applyDragDropMove,
         )
-
-        details.isEditable = false
-        details.lineWrap = true
-        details.wrapStyleWord = true
-        details.border = JBUI.Borders.empty(8)
-        details.background = tree.background
-        details.text = uiMessage("topicTree.details.select")
-
-        instanceList.selectionMode = ListSelectionModel.SINGLE_SELECTION
-        instanceList.cellRenderer = object : javax.swing.ListCellRenderer<TopicInstanceRef> {
-            private val delegate = DefaultTreeCellRenderer()
-            override fun getListCellRendererComponent(
-                list: javax.swing.JList<out TopicInstanceRef>,
-                value: TopicInstanceRef?,
-                index: Int,
-                isSelected: Boolean,
-                cellHasFocus: Boolean,
-            ): Component {
-                val text = if (value == null) {
-                    ""
-                } else {
-                    if (value.instanceId == currentState?.instanceId) {
-                        uiMessage("topicTree.instance.active", value.instanceId)
-                    } else {
-                        value.instanceId
-                    }
-                }
-                val label = delegate.getTreeCellRendererComponent(tree, text, isSelected, false, true, index, cellHasFocus) as javax.swing.JLabel
-                label.border = if (isSelected) {
-                    JBUI.Borders.customLine(instanceSelectionBandColor, 0, 4, 0, 0)
-                } else {
-                    JBUI.Borders.emptyLeft(4)
-                }
-                label.background = if (isSelected) instanceSelectionBandColor else list.background
-                label.isOpaque = true
-                return label
-            }
-        }
-        instanceList.addListSelectionListener { event ->
-            if (event.valueIsAdjusting || suppressInstanceSelectionEvents) {
-                return@addListSelectionListener
-            }
-            onInstanceSelectionChanged()
-        }
-
-        buildInstancesOverflowMenu()
         buildTocContextMenu()
     }
 
@@ -301,29 +236,12 @@ internal class TopicTreeWorkspacePanel(
             }
         }
 
-        unlinkedModel.clear()
-        state.unlinkedPaths.forEach(unlinkedModel::addElement)
-
-        validationModel.clear()
-        state.validationIssues
-            .map { "${it.type}: ${it.reference}" }
-            .forEach(validationModel::addElement)
-
-        status.text = uiMessage(
-            "topicTree.status.summary",
-            state.source.name.lowercase(),
-            state.navOrderedPaths.size,
-            state.unlinkedPaths.size,
-            state.validationIssues.size,
-        )
         model.reload()
         if (root.childCount > 0) {
             tree.expandPath(TreePath(root.path))
         }
         restoreExpandedNodeIds(expandedNodeIds)
         selectedNodeId?.let { selectNodeById(it) }
-        refreshInstances(state.instanceId)
-        renderSelectionDetails()
         refreshActionEnablement()
     }
 
@@ -331,45 +249,14 @@ internal class TopicTreeWorkspacePanel(
         val title = JBLabel(uiMessage("topicTree.header.brand")).apply {
             font = JBFont.label().deriveFont(JBFont.label().size + 2f)
         }
-        val subtitle = JBLabel(uiMessage("topicTree.header.subtitle")).apply {
-            foreground = JBUI.CurrentTheme.ContextHelp.FOREGROUND
-            border = JBUI.Borders.emptyTop(2)
-        }
 
         return JBPanel<JBPanel<*>>(BorderLayout()).apply {
             border = JBUI.Borders.empty(8, 10, 4, 10)
-            add(title, BorderLayout.NORTH)
-            add(subtitle, BorderLayout.SOUTH)
+            add(title, BorderLayout.CENTER)
         }
     }
 
     private fun buildCenter(): JComponent {
-        newInstanceButton = iconActionButton(icon = AllIcons.General.Add, tooltip = uiMessage("topicTree.tooltip.new")) { createNewInstance() }
-        instancesOverflowButton = overflowActionButton { showInstancesOverflowMenu() }
-        val instancesHeaderActions = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.RIGHT, 2, 0)).apply {
-            add(instancesOverflowButton)
-        }
-
-        instanceRenameButton = iconActionButton(icon = AllIcons.Actions.Edit, tooltip = uiMessage("topicTree.tooltip.rename")) { renameInstance() }
-        instanceDeleteButton = iconActionButton(icon = AllIcons.General.Remove, tooltip = uiMessage("topicTree.tooltip.delete")) { deleteInstance() }
-        instanceRowActionsPanel = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.RIGHT, 2, 2)).apply {
-            add(instanceRenameButton)
-            add(instanceDeleteButton)
-            isVisible = false
-            border = JBUI.Borders.empty(2, 0, 0, 0)
-        }
-        val instancesSectionBody = JBPanel<JBPanel<*>>(BorderLayout()).apply {
-            border = JBUI.Borders.empty(0, 8, 8, 8)
-            add(JBScrollPane(instanceList), BorderLayout.CENTER)
-            add(instanceRowActionsPanel, BorderLayout.SOUTH)
-        }
-        val instancesSection = buildCollapsibleSection(
-            title = uiMessage("topicTree.section.instances"),
-            headerActions = instancesHeaderActions,
-            body = instancesSectionBody,
-            initiallyCollapsed = false,
-        )
-
         collapseAllButton = iconActionButton(icon = AllIcons.Actions.Collapseall, tooltip = uiMessage("topicTree.tooltip.collapseAll")) { collapseAllTopics() }
         addRootTopicButton = iconActionButton(icon = AllIcons.General.Add, tooltip = uiMessage("topicTree.tooltip.root")) { addRootTopic() }
         val tocHeaderActions = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.RIGHT, 2, 0)).apply {
@@ -386,20 +273,9 @@ internal class TopicTreeWorkspacePanel(
             border = JBUI.Borders.empty(2, 0, 0, 0)
         }
 
-        val diagnosticsTabs = JTabbedPane().apply {
-            addTab(uiMessage("topicTree.tab.details"), JBScrollPane(details))
-            addTab(uiMessage("topicTree.tab.unlinked"), JBScrollPane(unlinkedList))
-            addTab(uiMessage("topicTree.tab.validation"), JBScrollPane(validationList))
-        }
-
-        val split = JBSplitter(true, 0.70f).apply {
-            firstComponent = JBScrollPane(tree)
-            secondComponent = diagnosticsTabs
-        }
-
         val tocSectionBody = JBPanel<JBPanel<*>>(BorderLayout()).apply {
             border = JBUI.Borders.empty(0, 8, 8, 8)
-            add(split, BorderLayout.CENTER)
+            add(JBScrollPane(tree), BorderLayout.CENTER)
             add(tocRowActionsPanel, BorderLayout.SOUTH)
         }
         val tocSection = buildCollapsibleSection(
@@ -410,8 +286,7 @@ internal class TopicTreeWorkspacePanel(
         )
 
         return JBPanel<JBPanel<*>>(BorderLayout()).apply {
-            add(instancesSection, BorderLayout.NORTH)
-            add(tocSection, BorderLayout.CENTER)
+            add(tocSection, BorderLayout.NORTH)
         }
     }
 
@@ -461,18 +336,6 @@ internal class TopicTreeWorkspacePanel(
         }
     }
 
-    private fun overflowActionButton(action: () -> Unit): JButton {
-        return JButton("...").apply {
-            toolTipText = uiMessage("topicTree.tooltip.more")
-            margin = JBUI.insets(2, 6)
-            isFocusable = false
-            addActionListener { action() }
-        }
-    }
-
-    private fun buildInstancesOverflowMenu() {
-        instancesOverflowMenu.removeAll()
-    }
     // todo 
     private fun buildTocContextMenu() {
         tocContextMenu.removeAll()
@@ -483,8 +346,7 @@ internal class TopicTreeWorkspacePanel(
         tocContextMenu.add(tocEditTitleMenuItem)
         tocRemoveMenuItem = JMenuItem(uiMessage("topicTree.menu.removeTocElement")).apply { addActionListener { removeTopic() } }
         tocContextMenu.add(tocRemoveMenuItem)
-        tocSetHomePageMenuItem = JMenuItem(uiMessage("topicTree.menu.setAsHomePage")).apply { addActionListener { setAsHomePage() } }
-        // tocContextMenu.add(tocSetHomePageMenuItem)
+        // tocContextMenu.add(JMenuItem(uiMessage("topicTree.menu.setAsHomePage")).apply { addActionListener { setAsHomePage() } })
     }
 
     private fun maybeShowTocContextMenu(event: MouseEvent) {
@@ -497,166 +359,6 @@ internal class TopicTreeWorkspacePanel(
         }
         refreshActionEnablement()
         tocContextMenu.show(event.component, event.x, event.y)
-    }
-
-    private fun showInstancesOverflowMenu() {
-        refreshActionEnablement()
-        instancesOverflowMenu.show(instancesOverflowButton, 0, instancesOverflowButton.height)
-    }
-
-    private fun refreshInstances(activeInstanceId: String) {
-        val listedInstances = when (val result = controllersProvider()?.instanceRegistryPort?.listInstances()) {
-            is TopicGatewayResult.Success -> result.value
-            else -> emptyList()
-        }
-        val instances = if (listedInstances.isNotEmpty()) {
-            listedInstances
-        } else {
-            listOf(
-                TopicInstanceRef(
-                    instanceId = activeInstanceId,
-                    configPath = "",
-                    docsDirPath = "",
-                ),
-            )
-        }
-        suppressInstanceSelectionEvents = true
-        instanceModel.clear()
-        instances.sortedBy { it.instanceId }.forEach(instanceModel::addElement)
-        val activeIndex = (0 until instanceModel.size())
-            .firstOrNull { index -> instanceModel.get(index).instanceId == activeInstanceId }
-            ?: 0
-        if (instanceModel.size() > 0) {
-            instanceList.selectedIndex = activeIndex
-        }
-        suppressInstanceSelectionEvents = false
-    }
-
-    private fun onInstanceSelectionChanged() {
-        val selectedInstance = instanceList.selectedValue ?: return
-        if (selectedInstance.instanceId == currentState?.instanceId) {
-            refreshActionEnablement()
-            return
-        }
-        val controllers = controllersOrNull() ?: return
-        val switchResult = controllers.instanceSwitchCoordinator.switchActiveInstance(selectedInstance.instanceId)
-        when (switchResult) {
-            is TopicGatewayResult.Success -> {
-                publishStatus(uiMessage("topicTree.status.switchedInstance", switchResult.value.selectedInstance.instanceId))
-                reconcileFromDisk()
-            }
-
-            is TopicGatewayResult.Failure -> {
-                val recovery = controllers.failureRecoveryPresenter.present(uiMessage("topicTree.operation.switchInstance"), switchResult.error)
-                publishStatus(recovery.summary)
-                details.text = "${recovery.summary}\n${recovery.guidance}"
-            }
-        }
-        refreshActionEnablement()
-    }
-
-    private fun createNewInstance() {
-        val controllers = controllersOrNull() ?: return
-        val instanceRegistry = controllers.instanceRegistryPort ?: run {
-            publishStatus(uiMessage("topicTree.status.instanceRegistrationUnavailable"))
-            refreshActionEnablement()
-            return
-        }
-        val instanceId = prompt(
-            uiMessage("topicTree.prompt.newInstance.title"),
-            uiMessage("topicTree.prompt.newInstance.instanceId"),
-        ) ?: return
-        val configInput = prompt(
-            uiMessage("topicTree.prompt.newInstance.title"),
-            uiMessage("topicTree.prompt.newInstance.configPath"),
-            defaultMkdocsConfigPath(),
-        ) ?: return
-        val configPath = resolveConfigPathForRegistration(configInput)
-        val defaultDocsDir = runCatching {
-            Path.of(configPath).toAbsolutePath().normalize().parent.resolve("docs").toString()
-        }.getOrDefault("docs")
-        val docsDirPath = promptOptional(
-            uiMessage("topicTree.prompt.newInstance.title"),
-            uiMessage("topicTree.prompt.newInstance.docsDirPath"),
-        ) ?: defaultDocsDir
-        val registration = instanceRegistry.registerInstance(
-            TopicInstanceRef(
-                instanceId = instanceId,
-                configPath = configPath,
-                docsDirPath = docsDirPath,
-            ),
-        )
-        when (registration) {
-            is TopicGatewayResult.Success -> {
-                refreshInstances(activeInstanceId = instanceId)
-                onInstanceSelectionChanged()
-                publishStatus(uiMessage("topicTree.status.instanceRegistered", instanceId))
-            }
-
-            is TopicGatewayResult.Failure -> {
-                val recovery = controllers.failureRecoveryPresenter.present(uiMessage("topicTree.operation.registerInstance"), registration.error)
-                publishStatus(recovery.summary)
-                details.text = "${recovery.summary}\n${recovery.guidance}"
-            }
-        }
-        refreshActionEnablement()
-    }
-
-    private fun resolveConfigPathForRegistration(configInput: String): String {
-        val trimmed = configInput.trim()
-        val baseRoot = defaultConfigBaseDir()
-        val expanded = expandUserHomePath(trimmed)
-        val rawPath = runCatching { Path.of(expanded) }.getOrNull() ?: return expanded
-        if (rawPath.isAbsolute) {
-            return rawPath.normalize().toString()
-        }
-        return baseRoot.resolve(rawPath).normalize().toString()
-    }
-
-    private fun expandUserHomePath(path: String): String {
-        if (path == "~") {
-            return userHomeDir().toString()
-        }
-        if (!path.startsWith("~/") && !path.startsWith("~\\")) {
-            return path
-        }
-
-        val home = userHomeDir()
-        val relative = path.substring(2)
-        if (relative.isBlank()) {
-            return home.toString()
-        }
-        return home.resolve(relative).normalize().toString()
-    }
-
-    private fun defaultMkdocsConfigPath(): String {
-        return defaultConfigBaseDir()
-            .resolve("mkdocs.yml")
-            .toString()
-    }
-
-    private fun defaultConfigBaseDir(): Path {
-        val projectBase = projectRootPath
-            ?.trim()
-            ?.takeIf { it.isNotEmpty() }
-            ?.let { runCatching { Path.of(it).toAbsolutePath().normalize() }.getOrNull() }
-        return projectBase ?: userHomeDir()
-    }
-
-    private fun userHomeDir(): Path {
-        return runCatching {
-            Path.of(System.getProperty("user.home")).toAbsolutePath().normalize()
-        }.getOrElse {
-            Path.of(".").toAbsolutePath().normalize()
-        }
-    }
-
-    private fun renameInstance() {
-        publishStatus(uiMessage("topicTree.status.instanceRenameUnavailable"))
-    }
-
-    private fun deleteInstance() {
-        publishStatus(uiMessage("topicTree.status.instanceDeleteUnavailable"))
     }
 
     private fun collapseAllTopics() {
@@ -679,7 +381,6 @@ internal class TopicTreeWorkspacePanel(
         }
         render(state)
         startupStateListener(state)
-        details.text = uiMessage("topicTree.details.reconcileComplete")
         refreshActionEnablement()
     }
 
@@ -869,21 +570,14 @@ internal class TopicTreeWorkspacePanel(
                 val outcome = result.result.value
                 if (!outcome.applied) {
                     publishStatus(uiMessage("topicTree.status.dragDropFailedSafely"))
-                    details.text = uiMessage("topicTree.details.dragDropFailedSafely", outcome.message)
                     return false
                 }
                 moveNodeInTree(draggedNode, targetParent, newOrderIndex)
-                details.text = uiMessage("topicTree.details.dragDropApplied", draggedNodeId)
                 true
             }
 
             is TopicGatewayResult.Failure -> {
                 val recovery = result.recovery
-                details.text = buildString {
-                    append(recovery?.summary ?: uiMessage("topicTree.status.dragDropFailed"))
-                    append('\n')
-                    append(recovery?.guidance ?: uiMessage("topicTree.details.dragDropNoGuidance"))
-                }
                 publishStatus(recovery?.summary ?: uiMessage("topicTree.status.dragDropFailed"))
                 false
             }
@@ -932,17 +626,8 @@ internal class TopicTreeWorkspacePanel(
     }
 
     private fun refreshActionEnablement() {
-        val controllers = controllersProvider()
-        val hasInstanceSelection = false
         val hasNavSelection = selectedNavNode() != null
         val hasMutableTocSelection = selectedMutableNode() != null
-
-        newInstanceButton.isEnabled = controllers?.instanceRegistryPort != null
-        instanceRenameButton.isEnabled = false
-        instanceDeleteButton.isEnabled = false
-        instanceRenameButton.isVisible = hasInstanceSelection
-        instanceDeleteButton.isVisible = hasInstanceSelection
-        instanceRowActionsPanel.isVisible = hasInstanceSelection
 
         tocChildButton.isEnabled = hasNavSelection
         tocDeleteButton.isEnabled = hasMutableTocSelection
@@ -953,36 +638,6 @@ internal class TopicTreeWorkspacePanel(
         tocNewChildMenuItem.isEnabled = hasNavSelection
         tocEditTitleMenuItem.isEnabled = hasMutableTocSelection
         tocRemoveMenuItem.isEnabled = hasMutableTocSelection
-        // tocSetHomePageMenuItem.isEnabled = canSetAsHomePage()
- // todo 
-        instancesOverflowMenu.components
-            .filterIsInstance<JMenuItem>()
-            .forEachIndexed { index, menuItem ->
-                menuItem.isEnabled = when (index) {
-                    0 -> controllers?.instanceRegistryPort != null
-                    else -> false
-                }
-            }
-    }
-
-    private fun canSetAsHomePage(): Boolean {
-        val selectedNode = selectedMutableNode() ?: return false
-        val parentNode = selectedNode.parent as? DefaultMutableTreeNode ?: return false
-        val parent = parentNode.userObject as? TopicTreeNodeView ?: return false
-        if (parent.nodeId != ROOT_NODE_ID) {
-            return false
-        }
-        val mutableSiblingIds = (0 until parentNode.childCount)
-            .mapNotNull { index -> parentNode.getChildAt(index) as? DefaultMutableTreeNode }
-            .mapNotNull { node ->
-                val view = node.userObject as? TopicTreeNodeView ?: return@mapNotNull null
-                if (view.isMutable) view.nodeId else null
-            }
-        if (mutableSiblingIds.size <= 1) {
-            return false
-        }
-        val selectedId = (selectedNode.userObject as? TopicTreeNodeView)?.nodeId ?: return false
-        return mutableSiblingIds.firstOrNull() != selectedId
     }
 
     private fun controllersOrNull(): TopicTreeControllers? {
@@ -1004,47 +659,17 @@ internal class TopicTreeWorkspacePanel(
                 if (!outcome.applied) {
                     val summary = uiMessage("topicTree.summary.operationFailedSafely")
                     publishStatus(summary)
-                    details.text = buildString {
-                        append(summary)
-                        append('\n')
-                        append(outcome.message)
-                    }
                     return
                 }
                 onSuccess()
                 publishStatus(successMessage)
-                details.text = uiMessage("topicTree.details.success", successMessage)
             }
 
             is TopicGatewayResult.Failure -> {
                 val recovery = dispatch.recovery
                 val summary = recovery?.summary ?: uiMessage("topicTree.summary.operationFailed")
                 publishStatus(summary)
-                details.text = buildString {
-                    append(summary)
-                    append('\n')
-                    append(recovery?.guidance ?: uiMessage("topicTree.details.noRecoveryGuidance"))
-                }
             }
-        }
-    }
-
-    private fun renderSelectionDetails() {
-        val selected = selectedNavNode()?.userObject as? TopicTreeNodeView
-        if (selected == null) {
-            details.text = uiMessage("topicTree.details.select")
-            return
-        }
-        details.text = buildString {
-            append(uiMessage("topicTree.details.title", selected.title))
-            append('\n')
-            append(uiMessage("topicTree.details.nodeId", selected.nodeId))
-            append('\n')
-            append(uiMessage("topicTree.details.parentId", selected.parentNodeId ?: "-"))
-            append('\n')
-            append(uiMessage("topicTree.details.path", selected.path ?: "-"))
-            append('\n')
-            append(uiMessage("topicTree.details.externalUrl", selected.externalUrl ?: "-"))
         }
     }
 
@@ -1453,31 +1078,10 @@ internal class TopicTreeWorkspacePanel(
         return tooltips
     }
 
-    internal fun instancesOverflowMenuLabelsForTest(): List<String> {
-        return instancesOverflowMenu.components
-            .filterIsInstance<JMenuItem>()
-            .map { it.text }
-    }
-
-    internal fun instancesOverflowMenuStatesForTest(): List<Pair<String, Boolean>> {
-        refreshActionEnablement()
-        return instancesOverflowMenu.components
-            .filterIsInstance<JMenuItem>()
-            .map { it.text to it.isEnabled }
-    }
-
     internal fun tocContextMenuLabelsForTest(): List<String> {
         return tocContextMenu.components
             .filterIsInstance<JMenuItem>()
             .map { it.text }
-    }
-
-    internal fun instanceActionStatesForTest(): Map<String, Boolean> {
-        refreshActionEnablement()
-        return mapOf(
-            "Rename" to instanceRenameButton.isEnabled,
-            "Delete" to instanceDeleteButton.isEnabled,
-        )
     }
 
     internal fun tocRowActionStatesForTest(): Map<String, Boolean> {
@@ -1490,7 +1094,6 @@ internal class TopicTreeWorkspacePanel(
 
     internal fun headerActionVisibilityForTest(): Map<String, Boolean> {
         return mapOf(
-            "New" to (newInstanceButton.isShowing || newInstanceButton.isVisible),
             "Collapse All" to (collapseAllButton.isShowing || collapseAllButton.isVisible),
             "Root" to (addRootTopicButton.isShowing || addRootTopicButton.isVisible),
         )
@@ -1499,7 +1102,6 @@ internal class TopicTreeWorkspacePanel(
     internal fun triggerHeaderActionForTest(label: String): Boolean {
         refreshActionEnablement()
         val button = when (label) {
-            "New" -> newInstanceButton
             "Collapse All" -> collapseAllButton
             "Root" -> addRootTopicButton
             else -> return false

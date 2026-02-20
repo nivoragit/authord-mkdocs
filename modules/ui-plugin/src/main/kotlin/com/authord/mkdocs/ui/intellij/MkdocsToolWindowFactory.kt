@@ -28,8 +28,11 @@ import com.intellij.openapi.fileEditor.FileEditorManagerEvent
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Disposer
+import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileManager
 import com.intellij.openapi.vfs.newvfs.BulkFileListener
@@ -72,6 +75,8 @@ import javax.swing.SwingUtilities
 import kotlin.io.path.name
 import kotlin.math.abs
 import kotlin.math.roundToInt
+
+private val LOG = Logger.getInstance(MkdocsToolWindowFactory::class.java)
 
 private fun defaultTopicTreeUiService(project: Project): TopicTreeUiService {
     val instanceRegistry = InstanceRegistryService()
@@ -117,15 +122,18 @@ class MkdocsToolWindowFactory(
     private val activeEditorPathProvider: (Project) -> String? = { project ->
         FileEditorManager.getInstance(project).selectedFiles.firstOrNull()?.path
     },
-    private val typingListenerRegistrar: (Project, DocumentListener) -> Unit = { project, listener ->
+    private val typingListenerRegistrar: (Project, DocumentListener, Disposable) -> Unit = { _, listener, parentDisposable ->
         runCatching {
-            EditorFactory.getInstance().eventMulticaster.addDocumentListener(listener, project)
+            EditorFactory.getInstance().eventMulticaster.addDocumentListener(listener, parentDisposable)
         }
     },
-    private val visibleAreaListenerRegistrar: (Project, VisibleAreaListener) -> Unit = { project, listener ->
+    private val visibleAreaListenerRegistrar: (Project, VisibleAreaListener, Disposable) -> Unit = { _, listener, parentDisposable ->
         runCatching {
-            EditorFactory.getInstance().eventMulticaster.addVisibleAreaListener(listener, project)
+            EditorFactory.getInstance().eventMulticaster.addVisibleAreaListener(listener, parentDisposable)
         }
+    },
+    private val vfsBulkListenerRegistrar: (Project, BulkFileListener, Disposable) -> Unit = { project, listener, parentDisposable ->
+        project.messageBus.connect(parentDisposable).subscribe(VirtualFileManager.VFS_CHANGES, listener)
     },
     private val startupReconciliationResolver: (Project) -> StartupReconciliationCoordinator = {
         StartupReconciliationCoordinator()
@@ -150,6 +158,7 @@ class MkdocsToolWindowFactory(
         },
     private val mkDocsProjectCreatorResolver: (Project) -> MkDocsProjectCreator = { MkDocsProjectCreator() },
     private val mkdocsConfigPresenceResolver: (Project) -> Boolean = ::hasMkdocsConfigInProjectRoot,
+    private val mkdocsConfigCacheInvalidator: (Project) -> Unit = ::invalidateMkdocsConfigCacheForProject,
     private val instanceSwitchCoordinatorFactory: (TopicTreeUiService) -> InstanceSwitchCoordinator = { uiService ->
         InstanceSwitchCoordinator(uiService = uiService)
     },
@@ -165,6 +174,7 @@ class MkdocsToolWindowFactory(
             ApplicationManager.getApplication().invokeLater(task, ModalityState.defaultModalityState())
         }
     },
+    private val markdownPreviewRefresher: (Project, PreviewStartTrigger) -> Boolean = ::refreshOpenAuthordMarkdownPreviews,
 ) : ToolWindowFactory, DumbAware {
     private val expandedTreeProportionByProject = ConcurrentHashMap<String, Float>()
     private val shellLayoutModeByProject = ConcurrentHashMap<String, ShellLayoutMode>()
@@ -178,6 +188,9 @@ class MkdocsToolWindowFactory(
     private val topicTreePanelsByProject = ConcurrentHashMap<String, TopicTreeWorkspacePanel>()
     private val topicTreeControllersByProject = ConcurrentHashMap<String, TopicTreeControllers>()
     private val topicTreeUiServicesByProject = ConcurrentHashMap<String, TopicTreeUiService>()
+    private val previewSyncLifecycleByProject = ConcurrentHashMap<String, Disposable>()
+    private val modeWatcherLifecycleByProject = ConcurrentHashMap<String, Disposable>()
+    private val previewModeByProject = ConcurrentHashMap<String, Boolean>()
     /**
      * Registers minimal content inside the tool window manager.
      */
@@ -200,63 +213,43 @@ class MkdocsToolWindowFactory(
         val content = contentManager.factory.createContent(panel, "", false)
         content.setDisposer(Disposable {
             runtimeService.stopPreview()
+            disposePreviewSyncLifecycle(project, previewContent)
+            disposeModeWatcher(project)
+            mkdocsConfigCacheInvalidator(project)
+            previewModeByProject.remove(project.locationHash)
         })
         contentManager.removeAllContents(true)
         contentManager.addContent(content)
 
-        val setupMode = !mkdocsConfigPresenceResolver(project)
-        if (setupMode) {
-            splitter?.let { setShellLayoutMode(projectKey(project), it, ShellLayoutMode.PREVIEW) }
-            if (splitter != null && previewContent is JcefPreviewContent) {
-                val setupPanel = SetupPanel { requestedName ->
-                    handleSetupProjectCreate(
-                        project = project,
-                        requestedName = requestedName,
-                        runtimeService = runtimeService,
-                        previewContent = previewContent,
-                        topicTreePanel = topicTreePanel,
-                        splitter = splitter,
-                        projectCreator = projectCreator,
-                    )
-                }
-                splitter.firstComponent = setupPanel
-            } else {
-                previewContent.loadSetupPage { requestedName ->
-                    handleSetupProjectCreate(
-                        project = project,
-                        requestedName = requestedName,
-                        runtimeService = runtimeService,
-                        previewContent = previewContent,
-                        topicTreePanel = topicTreePanel,
-                        splitter = splitter,
-                        projectCreator = projectCreator,
-                    )
-                }
-            }
-            resultPresenter(project, "No mkdocs.yml found. Create a project to start preview.", false)
-        } else {
-            val initialResult = runtimeService.startPreview(PreviewStartTrigger.TOOL_WINDOW)
-            val initialMessage = formatPreviewResultMessage(initialResult)
-            if (initialResult.success) {
-                val resolvedUrl = initialResult.previewUrl.ifBlank { runtimeService.currentPreviewUrl().orEmpty() }
-                if (resolvedUrl.isNotBlank()) {
-                    previewContent.loadUrl(resolvedUrl)
-                }
-            }
-            resultPresenter(project, initialMessage, initialResult.success)
-        }
-        registerPreviewAnchorInvalidation(project, runtimeService, previewContent)
-        registerEditorSelectionSync(project, runtimeService, previewContent)
-        registerDocumentTypingSync(project, previewContent)
-        registerEditorScrollSync(project, runtimeService, previewContent)
-        registerManualScrollSync(project, previewContent)
         registerTopicTreeReconciliationTriggers(project, topicTreePanel)
+        registerModeWatcher(
+            project = project,
+            runtimeService = runtimeService,
+            previewContent = previewContent,
+            topicTreePanel = topicTreePanel,
+            splitter = splitter,
+            projectCreator = projectCreator,
+        )
 
-        if (!setupMode) {
-            runStartupReconciliation(project)?.let { startupState ->
-                topicTreePanel.render(startupState)
-                startupStateListener(project, startupState)
-            }
+        if (mkdocsConfigPresenceResolver(project)) {
+            enterPreviewMode(
+                project = project,
+                runtimeService = runtimeService,
+                previewContent = previewContent,
+                topicTreePanel = topicTreePanel,
+                splitter = splitter,
+                projectCreator = projectCreator,
+                trigger = PreviewStartTrigger.TOOL_WINDOW,
+            )
+        } else {
+            enterSetupMode(
+                project = project,
+                runtimeService = runtimeService,
+                previewContent = previewContent,
+                topicTreePanel = topicTreePanel,
+                splitter = splitter,
+                projectCreator = projectCreator,
+            )
         }
     }
 
@@ -264,22 +257,193 @@ class MkdocsToolWindowFactory(
         project: Project,
         toolWindow: ToolWindow,
     ) {
+        val runtimeService = runtimeServiceResolver(project)
+        val projectCreator = mkDocsProjectCreatorResolver(project)
         wireTopicTreeControllers(project)
         val topicTreePanel = createTopicTreePanel(project)
         topicTreePanelsByProject[project.locationHash] = topicTreePanel
 
-        val panel = JPanel(BorderLayout()).apply {
-            add(topicTreePanel.component, BorderLayout.CENTER)
-        }
+        val panel = JPanel(BorderLayout())
         val contentManager = toolWindow.contentManager
         val content = contentManager.factory.createContent(panel, "", false)
+        content.setDisposer(Disposable {
+            disposeModeWatcher(project)
+            mkdocsConfigCacheInvalidator(project)
+            previewModeByProject.remove(project.locationHash)
+        })
         contentManager.removeAllContents(true)
         contentManager.addContent(content)
 
         registerTopicTreeReconciliationTriggers(project, topicTreePanel)
+        registerTreeviewModeWatcher(project, panel, topicTreePanel, runtimeService, projectCreator)
+
+        if (mkdocsConfigPresenceResolver(project)) {
+            enterTreeviewMode(project, panel, topicTreePanel)
+            startRuntimeForConfirmedConfig(project, runtimeService, PreviewStartTrigger.TOOL_WINDOW)
+        } else {
+            enterTreeviewSetupMode(project, panel, topicTreePanel, runtimeService, projectCreator)
+        }
+    }
+
+    private fun enterTreeviewMode(
+        project: Project,
+        panel: JPanel,
+        topicTreePanel: TopicTreeWorkspacePanel,
+    ) {
+        previewModeByProject[project.locationHash] = true
+        panel.removeAll()
+        panel.add(topicTreePanel.component, BorderLayout.CENTER)
+        panel.revalidate()
+        panel.repaint()
+        topicTreePanel.reconcileFromDisk()
         runStartupReconciliation(project)?.let { startupState ->
             topicTreePanel.render(startupState)
             startupStateListener(project, startupState)
+        }
+    }
+
+    private fun enterTreeviewSetupMode(
+        project: Project,
+        panel: JPanel,
+        topicTreePanel: TopicTreeWorkspacePanel,
+        runtimeService: PluginRuntimeIntegrationService,
+        projectCreator: MkDocsProjectCreator,
+    ) {
+        previewModeByProject[project.locationHash] = false
+        panel.removeAll()
+        panel.add(
+            SetupPanel { requestedName ->
+                handleTreeviewSetupProjectCreate(
+                    project = project,
+                    requestedName = requestedName,
+                    panel = panel,
+                    topicTreePanel = topicTreePanel,
+                    runtimeService = runtimeService,
+                    projectCreator = projectCreator,
+                )
+            },
+            BorderLayout.CENTER,
+        )
+        panel.revalidate()
+        panel.repaint()
+        LOG.info(
+            "Entering setup mode for project `${project.name}` in Authord Treeview: mkdocs.yml/mkdocs.yaml not found in project root.",
+        )
+    }
+
+    private fun handleTreeviewSetupProjectCreate(
+        project: Project,
+        requestedName: String,
+        panel: JPanel,
+        topicTreePanel: TopicTreeWorkspacePanel,
+        runtimeService: PluginRuntimeIntegrationService,
+        projectCreator: MkDocsProjectCreator,
+    ) {
+        val projectPath = project.basePath
+        if (projectPath.isNullOrBlank()) {
+            resultPresenter(project, "Project path is unavailable.", false)
+            return
+        }
+
+        runInBackground {
+            val creationResult = projectCreator.createProject(projectPath, requestedName)
+            runOnUiThread {
+                if (project.isDisposed) {
+                    return@runOnUiThread
+                }
+                if (!creationResult.success) {
+                    resultPresenter(
+                        project,
+                        creationResult.message.ifBlank { "Failed to create MkDocs project." },
+                        false,
+                    )
+                    return@runOnUiThread
+                }
+
+                refreshProjectRoot(projectPath)
+                mkdocsConfigCacheInvalidator(project)
+                enterTreeviewMode(project, panel, topicTreePanel)
+                startRuntimeForConfirmedConfig(project, runtimeService, PreviewStartTrigger.TOOL_WINDOW)
+            }
+        }
+    }
+
+    private fun registerTreeviewModeWatcher(
+        project: Project,
+        panel: JPanel,
+        topicTreePanel: TopicTreeWorkspacePanel,
+        runtimeService: PluginRuntimeIntegrationService,
+        projectCreator: MkDocsProjectCreator,
+    ) {
+        val projectId = project.locationHash
+        modeWatcherLifecycleByProject.remove(projectId)?.let(Disposer::dispose)
+        val lifecycle = Disposer.newDisposable("authord.mkdocs.treeviewModeWatcher.$projectId")
+        modeWatcherLifecycleByProject[projectId] = lifecycle
+        Disposer.register(project, lifecycle)
+        vfsBulkListenerRegistrar(
+            project,
+            object : BulkFileListener {
+                override fun after(events: MutableList<out VFileEvent>) {
+                    if (project.isDisposed || events.isEmpty()) {
+                        return
+                    }
+                    if (!containsMkdocsConfigRootEvent(project, events)) {
+                        return
+                    }
+                    mkdocsConfigCacheInvalidator(project)
+                    runOnUiThread {
+                        if (project.isDisposed) {
+                            return@runOnUiThread
+                        }
+                        val hasConfig = mkdocsConfigPresenceResolver(project)
+                        val inTreeMode = previewModeByProject[project.locationHash] == true
+                        when {
+                            hasConfig -> {
+                                if (!inTreeMode) {
+                                    enterTreeviewMode(
+                                        project = project,
+                                        panel = panel,
+                                        topicTreePanel = topicTreePanel,
+                                    )
+                                }
+                                startRuntimeForConfirmedConfig(
+                                    project = project,
+                                    runtimeService = runtimeService,
+                                    trigger = PreviewStartTrigger.TOOL_WINDOW,
+                                )
+                            }
+
+                            inTreeMode -> enterTreeviewSetupMode(
+                                project = project,
+                                panel = panel,
+                                topicTreePanel = topicTreePanel,
+                                runtimeService = runtimeService,
+                                projectCreator = projectCreator,
+                            )
+                        }
+                    }
+                }
+            },
+            lifecycle,
+        )
+    }
+
+    private fun startRuntimeForConfirmedConfig(
+        project: Project,
+        runtimeService: PluginRuntimeIntegrationService,
+        trigger: PreviewStartTrigger,
+    ) {
+        if (runtimeService.isRuntimeRunning()) {
+            return
+        }
+        runtimeService.startPreviewAsync(trigger) { initialResult ->
+            if (project.isDisposed) {
+                return@startPreviewAsync
+            }
+            resultPresenter(project, formatPreviewResultMessage(initialResult), initialResult.success)
+            if (initialResult.success) {
+                markdownPreviewRefresher(project, trigger)
+            }
         }
     }
 
@@ -338,7 +502,9 @@ class MkdocsToolWindowFactory(
         panel.add(content, BorderLayout.CENTER)
 
         runtimeService.currentPreviewUrl()?.takeIf { it.isNotBlank() }?.let { url ->
-            previewContent.loadUrl(url)
+            if (mkdocsConfigPresenceResolver(project)) {
+                previewContent.loadUrl(url)
+            }
         }
 
         return ShellContent(
@@ -391,7 +557,7 @@ class MkdocsToolWindowFactory(
             AllIcons.Actions.Refresh,
         ) {
             override fun actionPerformed(event: AnActionEvent) {
-                restartPlugin(project, runtimeService, previewContent)
+                restartPluginAsync(project, runtimeService, previewContent)
             }
         }
     }
@@ -405,21 +571,7 @@ class MkdocsToolWindowFactory(
             FileDocumentManager.getInstance().saveAllDocuments()
         }
         val result = runtimeService.restartPreview(PreviewStartTrigger.TOOL_WINDOW)
-        val resolvedUrl = result.previewUrl.ifBlank { runtimeService.currentPreviewUrl().orEmpty() }
-        if (result.success) {
-            refreshTopicTreeAfterRestart(project)
-        }
-        if (result.success && resolvedUrl.isNotBlank()) {
-            syncEngine(project.locationHash).resetSyncState()
-            previewContent.loadUrl(resolvedUrl)
-        }
-        val message = if (result.success) {
-            "MkDocs preview restarted: ${resolvedUrl.ifBlank { "<unknown-url>" }}"
-        } else {
-            result.message.ifBlank { "Preview restart failed." }
-        }
-        resultPresenter(project, message, result.success)
-        return result.copy(previewUrl = resolvedUrl)
+        return applyRestartResult(project, runtimeService, previewContent, result)
     }
 
     private fun refreshTopicTreeAfterRestart(project: Project) {
@@ -446,6 +598,9 @@ class MkdocsToolWindowFactory(
                 com.intellij.openapi.actionSystem.ActionUpdateThread.BGT
 
             override fun actionPerformed(event: AnActionEvent) {
+                if (!isPreviewModeActive(project) && mode != ShellLayoutMode.PREVIEW) {
+                    return
+                }
                 val shellSplitter = splitter ?: return
                 setShellLayoutMode(projectKey, shellSplitter, mode)
             }
@@ -453,8 +608,20 @@ class MkdocsToolWindowFactory(
             override fun update(event: AnActionEvent) {
                 val treeComponent = splitter?.secondComponent
                 val hasTree = treeComponent != null
-                event.presentation.isVisible = hasTree
                 if (!hasTree) {
+                    event.presentation.isVisible = false
+                    event.presentation.isEnabled = false
+                    return
+                }
+
+                val inPreviewMode = isPreviewModeActive(project)
+                val modeVisible = inPreviewMode || mode == ShellLayoutMode.PREVIEW
+                event.presentation.isVisible = modeVisible
+                if (!modeVisible) {
+                    event.presentation.isEnabled = false
+                    return
+                }
+                if (!inPreviewMode && mode == ShellLayoutMode.PREVIEW) {
                     event.presentation.isEnabled = false
                     return
                 }
@@ -517,6 +684,282 @@ class MkdocsToolWindowFactory(
         splitter.repaint()
     }
 
+    private fun enterSetupMode(
+        project: Project,
+        runtimeService: PluginRuntimeIntegrationService,
+        previewContent: PreviewContent,
+        topicTreePanel: TopicTreeWorkspacePanel,
+        splitter: OnePixelSplitter?,
+        projectCreator: MkDocsProjectCreator,
+    ) {
+        previewModeByProject[project.locationHash] = false
+        runtimeService.stopPreview()
+        disposePreviewSyncLifecycle(project, previewContent)
+        renderSetupSurface(
+            project = project,
+            previewContent = previewContent,
+            splitter = splitter,
+            onProjectCreate = { requestedName ->
+                handleSetupProjectCreate(
+                    project = project,
+                    requestedName = requestedName,
+                    runtimeService = runtimeService,
+                    previewContent = previewContent,
+                    topicTreePanel = topicTreePanel,
+                    splitter = splitter,
+                    projectCreator = projectCreator,
+                )
+            },
+        )
+        LOG.info(
+            "Entering setup mode for project `${project.name}`: mkdocs.yml/mkdocs.yaml not found in project root.",
+        )
+    }
+
+    private fun enterPreviewMode(
+        project: Project,
+        runtimeService: PluginRuntimeIntegrationService,
+        previewContent: PreviewContent,
+        topicTreePanel: TopicTreeWorkspacePanel,
+        splitter: OnePixelSplitter?,
+        projectCreator: MkDocsProjectCreator,
+        trigger: PreviewStartTrigger,
+    ) {
+        if (!mkdocsConfigPresenceResolver(project)) {
+            enterSetupMode(
+                project = project,
+                runtimeService = runtimeService,
+                previewContent = previewContent,
+                topicTreePanel = topicTreePanel,
+                splitter = splitter,
+                projectCreator = projectCreator,
+            )
+            return
+        }
+
+        splitter?.let {
+            if (it.firstComponent !== previewContent.component) {
+                it.firstComponent = previewContent.component
+            }
+            setShellLayoutMode(projectKey(project), it, ShellLayoutMode.PREVIEW_AND_TREEVIEW)
+        }
+        previewModeByProject[project.locationHash] = true
+        if (previewContent.supportsPreviewEditorSync()) {
+            registerPreviewSyncLifecycle(project, runtimeService, previewContent)
+        } else {
+            disposePreviewSyncLifecycle(project, previewContent)
+        }
+
+        topicTreePanel.reconcileFromDisk()
+        runStartupReconciliation(project)?.let { startupState ->
+            topicTreePanel.render(startupState)
+            startupStateListener(project, startupState)
+        }
+
+        runtimeService.startPreviewAsync(trigger) { initialResult ->
+            if (project.isDisposed) {
+                return@startPreviewAsync
+            }
+            val initialMessage = formatPreviewResultMessage(initialResult)
+            if (initialResult.success) {
+                val resolvedUrl = initialResult.previewUrl.ifBlank { runtimeService.currentPreviewUrl().orEmpty() }
+                if (resolvedUrl.isNotBlank()) {
+                    previewContent.loadUrl(resolvedUrl)
+                }
+                markdownPreviewRefresher(project, trigger)
+            }
+            resultPresenter(project, initialMessage, initialResult.success)
+        }
+    }
+
+    private fun restartPluginAsync(
+        project: Project,
+        runtimeService: PluginRuntimeIntegrationService,
+        previewContent: PreviewContent,
+    ) {
+        runCatching {
+            FileDocumentManager.getInstance().saveAllDocuments()
+        }
+        runtimeService.restartPreviewAsync(PreviewStartTrigger.TOOL_WINDOW) { result ->
+            if (project.isDisposed) {
+                return@restartPreviewAsync
+            }
+            applyRestartResult(project, runtimeService, previewContent, result)
+        }
+    }
+
+    private fun applyRestartResult(
+        project: Project,
+        runtimeService: PluginRuntimeIntegrationService,
+        previewContent: PreviewContent,
+        result: ActivationResult,
+    ): ActivationResult {
+        val resolvedUrl = result.previewUrl.ifBlank { runtimeService.currentPreviewUrl().orEmpty() }
+        if (result.success) {
+            refreshTopicTreeAfterRestart(project)
+        }
+        if (result.success && resolvedUrl.isNotBlank()) {
+            syncEngine(project.locationHash).resetSyncState()
+            previewContent.loadUrl(resolvedUrl)
+        }
+        val message = if (result.success) {
+            "MkDocs preview restarted: ${resolvedUrl.ifBlank { "<unknown-url>" }}"
+        } else {
+            result.message.ifBlank { "Preview restart failed." }
+        }
+        resultPresenter(project, message, result.success)
+        return result.copy(previewUrl = resolvedUrl)
+    }
+
+    private fun renderSetupSurface(
+        project: Project,
+        previewContent: PreviewContent,
+        splitter: OnePixelSplitter?,
+        onProjectCreate: (String) -> Unit,
+    ) {
+        splitter?.let { setShellLayoutMode(projectKey(project), it, ShellLayoutMode.PREVIEW) }
+        if (splitter != null && previewContent.prefersSetupPanel()) {
+            splitter.firstComponent = SetupPanel(onProjectCreate)
+            return
+        }
+        if (splitter != null) {
+            splitter.firstComponent = previewContent.component
+        }
+        previewContent.loadSetupPage(onProjectCreate)
+    }
+
+    private fun registerPreviewSyncLifecycle(
+        project: Project,
+        runtimeService: PluginRuntimeIntegrationService,
+        previewContent: PreviewContent,
+    ) {
+        disposePreviewSyncLifecycle(project, previewContent)
+        val lifecycle = Disposer.newDisposable("authord.mkdocs.previewSync.${project.locationHash}")
+        previewSyncLifecycleByProject[project.locationHash] = lifecycle
+        Disposer.register(project, lifecycle)
+        registerPreviewAnchorInvalidation(project, runtimeService, previewContent, lifecycle)
+        registerEditorSelectionSync(project, runtimeService, lifecycle)
+        registerDocumentTypingSync(project, previewContent, lifecycle)
+        registerEditorScrollSync(project, runtimeService, previewContent, lifecycle)
+        registerManualScrollSync(project, previewContent, lifecycle)
+    }
+
+    private fun disposePreviewSyncLifecycle(project: Project, previewContent: PreviewContent) {
+        previewSyncLifecycleByProject.remove(project.locationHash)?.let(Disposer::dispose)
+        previewContent.setContentReloadListener(null)
+        previewContent.setManualScrollListener(null)
+    }
+
+    private fun registerModeWatcher(
+        project: Project,
+        runtimeService: PluginRuntimeIntegrationService,
+        previewContent: PreviewContent,
+        topicTreePanel: TopicTreeWorkspacePanel,
+        splitter: OnePixelSplitter?,
+        projectCreator: MkDocsProjectCreator,
+    ) {
+        val projectId = project.locationHash
+        modeWatcherLifecycleByProject.remove(projectId)?.let(Disposer::dispose)
+        val lifecycle = Disposer.newDisposable("authord.mkdocs.modeWatcher.$projectId")
+        modeWatcherLifecycleByProject[projectId] = lifecycle
+        Disposer.register(project, lifecycle)
+        vfsBulkListenerRegistrar(
+            project,
+            object : BulkFileListener {
+                override fun after(events: MutableList<out VFileEvent>) {
+                    if (project.isDisposed || events.isEmpty()) {
+                        return
+                    }
+                    if (!containsMkdocsConfigRootEvent(project, events)) {
+                        return
+                    }
+                    mkdocsConfigCacheInvalidator(project)
+                    runOnUiThread {
+                        if (project.isDisposed) {
+                            return@runOnUiThread
+                        }
+                        val hasConfig = mkdocsConfigPresenceResolver(project)
+                        val inPreviewMode = previewModeByProject[project.locationHash] == true
+                        when {
+                            hasConfig && !inPreviewMode -> enterPreviewMode(
+                                project = project,
+                                runtimeService = runtimeService,
+                                previewContent = previewContent,
+                                topicTreePanel = topicTreePanel,
+                                splitter = splitter,
+                                projectCreator = projectCreator,
+                                trigger = PreviewStartTrigger.TOOL_WINDOW,
+                            )
+
+                            !hasConfig && inPreviewMode -> enterSetupMode(
+                                project = project,
+                                runtimeService = runtimeService,
+                                previewContent = previewContent,
+                                topicTreePanel = topicTreePanel,
+                                splitter = splitter,
+                                projectCreator = projectCreator,
+                            )
+                        }
+                    }
+                }
+            },
+            lifecycle,
+        )
+    }
+
+    private fun disposeModeWatcher(project: Project) {
+        modeWatcherLifecycleByProject.remove(project.locationHash)?.let(Disposer::dispose)
+    }
+
+    private fun containsMkdocsConfigRootEvent(project: Project, events: List<VFileEvent>): Boolean {
+        val configPaths = projectMkdocsConfigPaths(project)
+        if (configPaths.isEmpty()) {
+            return false
+        }
+        return events.any { event ->
+            eventPathsForConfigDetection(event).any { path -> path in configPaths }
+        }
+    }
+
+    private fun projectMkdocsConfigPaths(project: Project): Set<String> {
+        val basePath = project.basePath ?: return emptySet()
+        val root = runCatching { Path.of(basePath).toAbsolutePath().normalize() }.getOrNull() ?: return emptySet()
+        return setOf(
+            root.resolve("mkdocs.yml").toString().replace('\\', '/'),
+            root.resolve("mkdocs.yaml").toString().replace('\\', '/'),
+        )
+    }
+
+    private fun eventPathsForConfigDetection(event: VFileEvent): Set<String> {
+        val paths = linkedSetOf(event.path.replace('\\', '/'))
+        when (event) {
+            is VFileMoveEvent -> {
+                paths += "${event.oldParent.path}/${event.file.name}".replace('\\', '/')
+            }
+
+            is VFilePropertyChangeEvent -> {
+                if (event.propertyName == VirtualFile.PROP_NAME) {
+                    val oldName = event.oldValue as? String
+                    val newName = event.newValue as? String
+                    if (oldName != null && newName != null) {
+                        val newPath = event.path
+                        val oldPath = if (newPath.endsWith("/$newName")) {
+                            newPath.removeSuffix("/$newName") + "/$oldName"
+                        } else {
+                            newPath
+                        }
+                        paths += oldPath.replace('\\', '/')
+                    }
+                }
+            }
+        }
+        return paths
+    }
+
+    private fun isPreviewModeActive(project: Project): Boolean {
+        return previewModeByProject[project.locationHash] ?: true
+    }
+
     private fun handleSetupProjectCreate(
         project: Project,
         requestedName: String,
@@ -547,22 +990,17 @@ class MkdocsToolWindowFactory(
                     return@runOnUiThread
                 }
 
-                splitter?.let {
-                    it.firstComponent = previewContent.component
-                    setShellLayoutMode(projectKey(project), it, ShellLayoutMode.PREVIEW_AND_TREEVIEW)
-                }
-                topicTreePanel.reconcileFromDisk()
-                runStartupReconciliation(project)?.let { startupState ->
-                    topicTreePanel.render(startupState)
-                    startupStateListener(project, startupState)
-                }
-
-                val activationResult = runtimeService.startPreview(PreviewStartTrigger.TOOL_WINDOW)
-                val resolvedUrl = activationResult.previewUrl.ifBlank { runtimeService.currentPreviewUrl().orEmpty() }
-                if (activationResult.success && resolvedUrl.isNotBlank()) {
-                    previewContent.loadUrl(resolvedUrl)
-                }
-                resultPresenter(project, formatPreviewResultMessage(activationResult), activationResult.success)
+                refreshProjectRoot(projectPath)
+                mkdocsConfigCacheInvalidator(project)
+                enterPreviewMode(
+                    project = project,
+                    runtimeService = runtimeService,
+                    previewContent = previewContent,
+                    topicTreePanel = topicTreePanel,
+                    splitter = splitter,
+                    projectCreator = projectCreator,
+                    trigger = PreviewStartTrigger.TOOL_WINDOW,
+                )
             }
         }
     }
@@ -585,12 +1023,20 @@ class MkdocsToolWindowFactory(
         task()
     }
 
+    private fun refreshProjectRoot(projectPath: String) {
+        runCatching {
+            val root = Path.of(projectPath).toAbsolutePath().normalize().toFile()
+            val rootVirtualFile = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(root)
+            rootVirtualFile?.refresh(true, true)
+        }
+    }
+
     private fun registerEditorSelectionSync(
         project: Project,
         runtimeService: PluginRuntimeIntegrationService,
-        previewContent: PreviewContent,
+        lifecycleDisposable: Disposable,
     ) {
-        project.messageBus.connect(project).subscribe(
+        project.messageBus.connect(lifecycleDisposable).subscribe(
             FileEditorManagerListener.FILE_EDITOR_MANAGER,
             /**
              * Listens for active editor selection changes to keep preview routing aligned.
@@ -601,7 +1047,7 @@ class MkdocsToolWindowFactory(
                  */
                 override fun selectionChanged(event: FileEditorManagerEvent) {
                     val selectedPath = event.newFile?.path ?: return
-                    applyPreviewRoute(project, runtimeService, previewContent, selectedPath)
+                    applyPreviewRoute(project, runtimeService, selectedPath)
                 }
             },
         )
@@ -610,6 +1056,7 @@ class MkdocsToolWindowFactory(
     private fun registerDocumentTypingSync(
         project: Project,
         previewContent: PreviewContent,
+        lifecycleDisposable: Disposable,
     ) {
         typingListenerRegistrar(
             project,
@@ -626,6 +1073,7 @@ class MkdocsToolWindowFactory(
                     )
                 }
             },
+            lifecycleDisposable,
         )
     }
 
@@ -633,6 +1081,7 @@ class MkdocsToolWindowFactory(
         project: Project,
         runtimeService: PluginRuntimeIntegrationService,
         previewContent: PreviewContent,
+        lifecycleDisposable: Disposable,
     ) {
         previewContent.setContentReloadListener {
             val engine = syncEngine(project.locationHash)
@@ -640,13 +1089,16 @@ class MkdocsToolWindowFactory(
             engine.resetSyncState()
             triggerScrollRestorationAfterReload(project, runtimeService, previewContent)
         }
-        previewContent.component.addComponentListener(
-            object : ComponentAdapter() {
-                override fun componentResized(event: ComponentEvent?) {
-                    syncEngine(project.locationHash).invalidateAnchors()
-                }
-            },
-        )
+        val componentListener = object : ComponentAdapter() {
+            override fun componentResized(event: ComponentEvent?) {
+                syncEngine(project.locationHash).invalidateAnchors()
+            }
+        }
+        previewContent.component.addComponentListener(componentListener)
+        Disposer.register(lifecycleDisposable, Disposable {
+            previewContent.component.removeComponentListener(componentListener)
+            previewContent.setContentReloadListener(null)
+        })
     }
 
     private fun triggerScrollRestorationAfterReload(
@@ -654,6 +1106,9 @@ class MkdocsToolWindowFactory(
         runtimeService: PluginRuntimeIntegrationService,
         previewContent: PreviewContent,
     ) {
+        if (!isPreviewModeActive(project)) {
+            return
+        }
         if (!runtimeService.isRuntimeRunning()) {
             return
         }
@@ -687,6 +1142,7 @@ class MkdocsToolWindowFactory(
         project: Project,
         runtimeService: PluginRuntimeIntegrationService,
         previewContent: PreviewContent,
+        lifecycleDisposable: Disposable,
     ) {
         visibleAreaListenerRegistrar(
             project,
@@ -720,25 +1176,29 @@ class MkdocsToolWindowFactory(
                     )
                 }
             },
+            lifecycleDisposable,
         )
     }
 
     private fun registerManualScrollSync(
         project: Project,
         previewContent: PreviewContent,
+        lifecycleDisposable: Disposable,
     ) {
         previewContent.setManualScrollListener {
             userScrollLatchByProject[project.locationHash] = true
         }
+        Disposer.register(lifecycleDisposable, Disposable {
+            previewContent.setManualScrollListener(null)
+        })
     }
 
     private fun registerTopicTreeReconciliationTriggers(
         project: Project,
         topicTreePanel: TopicTreeWorkspacePanel,
     ) {
-        val connection = project.messageBus.connect(project)
-        connection.subscribe(
-            VirtualFileManager.VFS_CHANGES,
+        vfsBulkListenerRegistrar(
+            project,
             object : BulkFileListener {
                 override fun after(events: MutableList<out VFileEvent>) {
                     if (project.isDisposed || events.isEmpty()) {
@@ -755,6 +1215,7 @@ class MkdocsToolWindowFactory(
                     }
                 }
             },
+            project,
         )
     }
 
@@ -865,16 +1326,16 @@ class MkdocsToolWindowFactory(
     internal fun applyPreviewRoute(
         project: Project,
         runtimeService: PluginRuntimeIntegrationService,
-        previewContent: PreviewContent,
         selectedPath: String,
     ): Boolean {
+        if (!isPreviewModeActive(project)) {
+            return false
+        }
         val previousUrl = runtimeService.currentPreviewUrl()
         val updatedUrl = runtimeService.navigateToSelectedFile(selectedPath) ?: return false
 
         if (updatedUrl != previousUrl) {
             syncEngine(project.locationHash).invalidateAnchors()
-            previewContent.loadUrl(updatedUrl)
-            resultPresenter(project, "MkDocs preview updated: $updatedUrl", true)
         }
         return true
     }
@@ -882,9 +1343,11 @@ class MkdocsToolWindowFactory(
     internal fun refreshCurrentPreviewForDocsSave(
         project: Project,
         runtimeService: PluginRuntimeIntegrationService,
-        previewContent: PreviewContent,
         selectedPath: String,
     ): Boolean {
+        if (!isPreviewModeActive(project)) {
+            return false
+        }
         if (!runtimeService.isRuntimeRunning()) {
             return false
         }
@@ -893,10 +1356,10 @@ class MkdocsToolWindowFactory(
             return false
         }
 
-        val currentUrl = runtimeService.currentPreviewUrl()?.takeIf { it.isNotBlank() } ?: return false
+        if (runtimeService.currentPreviewUrl().isNullOrBlank()) {
+            return false
+        }
         syncEngine(project.locationHash).invalidateAnchors()
-        previewContent.loadUrl(currentUrl)
-        resultPresenter(project, "MkDocs preview refreshed: $currentUrl", true)
         return true
     }
 
@@ -906,6 +1369,9 @@ class MkdocsToolWindowFactory(
         selectedPath: String,
         document: Document? = null,
     ): Boolean {
+        if (!isPreviewModeActive(project)) {
+            return false
+        }
         if (!isDocsMarkdownPath(selectedPath)) {
             return false
         }
@@ -947,6 +1413,9 @@ class MkdocsToolWindowFactory(
         lineHeightPx: Int,
         rawDelta: Int,
     ): Boolean {
+        if (!isPreviewModeActive(project)) {
+            return false
+        }
         if (!runtimeService.isRuntimeRunning() || !isDocsMarkdownPath(selectedPath) || rawDelta == 0) {
             return false
         }
@@ -1223,7 +1692,13 @@ private fun hasMkdocsConfigInProjectRoot(project: Project): Boolean {
         // Keep tests and non-materialized projects on the previous startup path.
         return true
     }
-    return Files.exists(root.resolve("mkdocs.yml")) || Files.exists(root.resolve("mkdocs.yaml"))
+    return findMkdocsConfig(root) != null
+}
+
+private fun invalidateMkdocsConfigCacheForProject(project: Project) {
+    val basePath = project.basePath ?: return
+    val root = runCatching { Path.of(basePath).toAbsolutePath().normalize() }.getOrNull() ?: return
+    invalidateMkdocsConfigCache(root)
 }
 
 /**
@@ -1282,6 +1757,110 @@ interface PreviewContent {
      * Registers listener invoked when user manually scrolls the preview.
      */
     fun setManualScrollListener(listener: ((Double) -> Unit)?) = Unit
+
+    /**
+     * True when preview supports anchor-aware editor-to-preview synchronization wiring.
+     */
+    fun supportsPreviewEditorSync(): Boolean = false
+
+    /**
+     * True when setup mode should render a native Swing setup panel.
+     */
+    fun prefersSetupPanel(): Boolean = false
+}
+
+private class DeferredPreviewContent(
+    private val syncCapable: Boolean,
+    private val delegateFactory: () -> PreviewContent,
+) : PreviewContent {
+    private val hostPanel = JPanel(BorderLayout())
+    @Volatile private var delegate: PreviewContent? = null
+    @Volatile private var contentReloadListener: (() -> Unit)? = null
+    @Volatile private var manualScrollListener: ((Double) -> Unit)? = null
+
+    override val component: JComponent = hostPanel
+
+    override fun supportsPreviewEditorSync(): Boolean = syncCapable
+
+    override fun prefersSetupPanel(): Boolean = true
+
+    override fun loadUrl(url: String) {
+        ensureDelegateAttached().loadUrl(url)
+    }
+
+    override fun loadSetupPage(onProjectCreate: (String) -> Unit) {
+        hostPanel.removeAll()
+        hostPanel.add(SetupPanel(onProjectCreate), BorderLayout.CENTER)
+        hostPanel.revalidate()
+        hostPanel.repaint()
+    }
+
+    override fun scrollToProgress(progress: Double) {
+        delegate?.scrollToProgress(progress)
+    }
+
+    override fun scrollToY(y: Double, syncToken: Long?) {
+        delegate?.scrollToY(y, syncToken)
+    }
+
+    override fun requestScrollMetrics(callback: (PreviewScrollMetrics?) -> Unit) {
+        val currentDelegate = delegate
+        if (currentDelegate == null) {
+            callback(null)
+            return
+        }
+        currentDelegate.requestScrollMetrics(callback)
+    }
+
+    override fun requestDomSnapshot(callback: (PreviewDomSnapshot?) -> Unit) {
+        val currentDelegate = delegate
+        if (currentDelegate == null) {
+            callback(null)
+            return
+        }
+        currentDelegate.requestDomSnapshot(callback)
+    }
+
+    override fun setContentReloadListener(listener: (() -> Unit)?) {
+        contentReloadListener = listener
+        delegate?.setContentReloadListener(listener)
+    }
+
+    override fun setManualScrollListener(listener: ((Double) -> Unit)?) {
+        manualScrollListener = listener
+        delegate?.setManualScrollListener(listener)
+    }
+
+    private fun ensureDelegateAttached(): PreviewContent {
+        delegate?.let { existing ->
+            attachDelegateComponent(existing)
+            return existing
+        }
+
+        synchronized(this) {
+            delegate?.let { existing ->
+                attachDelegateComponent(existing)
+                return existing
+            }
+
+            val created = delegateFactory()
+            delegate = created
+            created.setContentReloadListener(contentReloadListener)
+            created.setManualScrollListener(manualScrollListener)
+            attachDelegateComponent(created)
+            return created
+        }
+    }
+
+    private fun attachDelegateComponent(delegate: PreviewContent) {
+        if (hostPanel.componentCount == 1 && hostPanel.getComponent(0) === delegate.component) {
+            return
+        }
+        hostPanel.removeAll()
+        hostPanel.add(delegate.component, BorderLayout.CENTER)
+        hostPanel.revalidate()
+        hostPanel.repaint()
+    }
 }
 
 private class JcefPreviewContent(
@@ -1300,6 +1879,10 @@ private class JcefPreviewContent(
     @Volatile private var manualScrollListener: ((Double) -> Unit)? = null
 
     override val component: JComponent = browser.component
+
+    override fun supportsPreviewEditorSync(): Boolean = true
+
+    override fun prefersSetupPanel(): Boolean = true
 
     init {
         metricsQuery.addHandler { payload ->
@@ -2001,9 +2584,12 @@ private class HtmlPreviewContent : PreviewContent {
 }
 
 internal fun createDefaultPreviewContent(): PreviewContent {
-    return if (JBCefApp.isSupported()) {
-        JcefPreviewContent()
-    } else {
-        HtmlPreviewContent()
+    val jcefSupported = JBCefApp.isSupported()
+    return DeferredPreviewContent(syncCapable = jcefSupported) {
+        if (jcefSupported) {
+            JcefPreviewContent()
+        } else {
+            HtmlPreviewContent()
+        }
     }
 }

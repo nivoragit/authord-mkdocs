@@ -18,7 +18,7 @@ class MkDocsProjectCreator(
     private val commandRunner: CommandRunner = ProcessBuilderCommandRunner(),
     private val uvExecutableProvider: UvExecutableProvider = ProjectManagedUvExecutableProvider(),
 ) {
-    fun createProject(projectRootPath: String, @Suppress("UNUSED_PARAMETER") requestedProjectName: String): MkDocsProjectCreationResult {
+    fun createProject(projectRootPath: String, requestedProjectName: String): MkDocsProjectCreationResult {
         val projectRoot = runCatching { Path.of(projectRootPath).toAbsolutePath().normalize() }
             .getOrElse {
                 return MkDocsProjectCreationResult(
@@ -56,7 +56,14 @@ class MkDocsProjectCreator(
                 success = false,
                 message = "MkDocs project was created but mkdocs.yml was not found.",
             )
-        writeBaseConfig(configPath)
+        val resolvedSiteName = resolveSiteName(requestedProjectName, projectRoot)
+        val configWriteResult = writeBaseConfig(configPath, resolvedSiteName)
+        if (!configWriteResult) {
+            return MkDocsProjectCreationResult(
+                success = false,
+                message = "MkDocs project was created but mkdocs.yml could not be updated.",
+            )
+        }
 
         return MkDocsProjectCreationResult(
             success = true,
@@ -76,11 +83,29 @@ class MkDocsProjectCreator(
         return null
     }
 
-    private fun writeBaseConfig(configPath: Path) {
+    private fun writeBaseConfig(configPath: Path, siteName: String): Boolean {
         val configContent = buildString {
-            append("site_name: My Docs\n")
+            append("site_name: '${escapeSingleQuotedYaml(siteName)}'\n")
             append("docs_dir: docs\n")
         }
-        runCatching { Files.writeString(configPath, configContent) }
+        return runCatching { Files.writeString(configPath, configContent) }.isSuccess
+    }
+
+    private fun resolveSiteName(requestedProjectName: String, projectRoot: Path): String {
+        val requested = requestedProjectName.trim()
+        if (requested.isNotBlank()) {
+            return requested
+        }
+
+        val fallbackFromRoot = projectRoot.fileName?.toString()
+            ?.replace('-', ' ')
+            ?.replace('_', ' ')
+            ?.trim()
+            .orEmpty()
+        return fallbackFromRoot.ifBlank { "My Docs" }
+    }
+
+    private fun escapeSingleQuotedYaml(value: String): String {
+        return value.replace("'", "''")
     }
 }
