@@ -117,17 +117,24 @@ class AuthordMarkdownSplitEditorProviderTest {
     }
 
     @Test
-    fun `preferred layout is absent when project setting was never stored`() {
-        val project = IntellijTestFixtures.project(locationHash = "split-layout-empty")
+    fun `preferred layout defaults to editor and preview when project setting was never stored`() {
+        val project = IntellijTestFixtures.project(
+            locationHash = "split-layout-empty",
+            services = mapOf(AuthordSplitEditorLayoutStateService::class.java to AuthordSplitEditorLayoutStateService()),
+        )
 
         val preferred = preferredAuthordSplitLayout(project)
 
-        assertEquals(null, preferred)
+        assertEquals(TextEditorWithPreview.Layout.SHOW_EDITOR_AND_PREVIEW, preferred)
     }
 
     @Test
     fun `store layout persists shared preference for project`() {
-        val project = IntellijTestFixtures.project(locationHash = "split-layout-store")
+        val service = AuthordSplitEditorLayoutStateService()
+        val project = IntellijTestFixtures.project(
+            locationHash = "split-layout-store",
+            services = mapOf(AuthordSplitEditorLayoutStateService::class.java to service),
+        )
         val candidate = TextEditorWithPreview.Layout.entries.firstOrNull {
             it != TextEditorWithPreview.Layout.SHOW_EDITOR_AND_PREVIEW
         } ?: TextEditorWithPreview.Layout.SHOW_EDITOR_AND_PREVIEW
@@ -135,6 +142,7 @@ class AuthordMarkdownSplitEditorProviderTest {
         storeAuthordSplitLayout(project, candidate)
 
         assertEquals(candidate, preferredAuthordSplitLayout(project))
+        assertEquals(candidate.name, service.getState().preferredLayoutName)
     }
 
     @Test

@@ -13,6 +13,7 @@
         <notificationGroup id="Authord MkDocs Notifications" displayType="BALLOON" isLogByDefault="true" />
         <projectService serviceImplementation="com.authord.mkdocs.ui.intellij.PluginRuntimeIntegrationService" />
         <projectService serviceImplementation="com.authord.mkdocs.ui.intellij.MkDocsPreviewBrowserService" />
+        <projectService serviceImplementation="com.authord.mkdocs.ui.intellij.AuthordSplitEditorLayoutStateService" />
         <directoryIndexExcludePolicy implementation="com.authord.mkdocs.ui.intellij.MkdocsVenvDirectoryExcludePolicy" />
         <fileEditorManagerListener implementation="com.authord.mkdocs.ui.intellij.AuthordMarkdownOpenPreviewListener" />
         <fileEditorProvider implementation="com.authord.mkdocs.ui.intellij.AuthordMarkdownSplitEditorProvider" />

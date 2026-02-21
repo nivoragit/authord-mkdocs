@@ -1,7 +1,6 @@
 package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ui.PluginCompositionRoot
-import com.intellij.ide.util.PropertiesComponent
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
@@ -31,14 +30,11 @@ import com.intellij.openapi.vfs.VirtualFile
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.beans.PropertyChangeListener
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JComponent
 import kotlin.math.abs
 
 private const val AUTHORD_MKDOCS_PREVIEW_EDITOR_TYPE_ID = "authord-mkdocs-preview-editor"
-private const val AUTHORD_MKDOCS_SPLIT_LAYOUT_KEY = "authord.mkdocs.splitEditor.layout"
-private val splitLayoutFallbackByProject = ConcurrentHashMap<String, String>()
 
 internal fun isAuthordMkdocsPreviewEligible(projectBasePath: String?, filePath: String): Boolean {
     val basePath = projectBasePath ?: return false
@@ -50,9 +46,11 @@ internal fun isAuthordMkdocsPreviewEligible(projectBasePath: String?, filePath: 
 /**
  * Replaces the default Markdown split preview with an Authord-backed MkDocs preview.
  */
-class AuthordMarkdownSplitEditorProvider(
-    previewProvider: FileEditorProvider = AuthordMarkdownPreviewFileEditorProvider(),
-) : TextEditorWithPreviewProvider(previewProvider), DumbAware {
+class AuthordMarkdownSplitEditorProvider : TextEditorWithPreviewProvider, DumbAware {
+    constructor() : super(AuthordMarkdownPreviewFileEditorProvider())
+
+    internal constructor(previewProvider: FileEditorProvider) : super(previewProvider)
+
     override fun createSplitEditor(firstEditor: TextEditor, secondEditor: FileEditor): FileEditor {
         require(secondEditor is AuthordMarkdownPreviewFileEditor) {
             "Secondary editor should be AuthordMarkdownPreviewFileEditor"
@@ -89,7 +87,6 @@ private class AuthordMarkdownEditorWithPreview(
     init {
         previewEditor.bindSourceEditor(textEditor.editor)
         previewEditor.refreshForSelectedFile(autoStart = false, trigger = PreviewStartTrigger.ACTION)
-        applySharedLayoutPreference()
     }
 
     override fun setState(state: FileEditorState) {
@@ -132,12 +129,9 @@ private class AuthordMarkdownEditorWithPreview(
 
     private fun applySharedLayoutPreference() {
         val project = textEditor.editor.project ?: return
-        val preferred = preferredAuthordSplitLayout(project)
-        if (preferred == null) {
-            storeAuthordSplitLayout(project, layout)
-            return
-        }
-        if (preferred != layout) {
+        val preferred = preferredAuthordSplitLayout(project) ?: return
+        val current = runCatching { super.getLayout() }.getOrNull() ?: return
+        if (preferred != current) {
             super.setLayout(preferred)
         }
     }
@@ -145,16 +139,16 @@ private class AuthordMarkdownEditorWithPreview(
 
 internal fun preferredAuthordSplitLayout(project: Project?): TextEditorWithPreview.Layout? {
     val activeProject = project ?: return null
-    val stored = readStoredLayoutName(activeProject)
-    return parseAuthordSplitLayoutName(stored)
+    val service = runCatching { activeProject.getService(AuthordSplitEditorLayoutStateService::class.java) }.getOrNull()
+        ?: return null
+    return service.preferredLayout()
 }
 
 internal fun storeAuthordSplitLayout(project: Project?, layout: TextEditorWithPreview.Layout) {
     val activeProject = project ?: return
-    splitLayoutFallbackByProject[layoutPreferenceProjectKey(activeProject)] = layout.name
-    runCatching { PropertiesComponent.getInstance(activeProject) }
+    runCatching { activeProject.getService(AuthordSplitEditorLayoutStateService::class.java) }
         .getOrNull()
-        ?.setValue(AUTHORD_MKDOCS_SPLIT_LAYOUT_KEY, layout.name)
+        ?.setPreferredLayout(layout)
 }
 
 internal fun parseAuthordSplitLayoutName(stored: String?): TextEditorWithPreview.Layout? {
@@ -163,25 +157,6 @@ internal fun parseAuthordSplitLayoutName(stored: String?): TextEditorWithPreview
         return null
     }
     return TextEditorWithPreview.Layout.entries.firstOrNull { it.name == normalized }
-}
-
-private fun readStoredLayoutName(project: Project): String {
-    val propertiesValue = runCatching { PropertiesComponent.getInstance(project) }
-        .getOrNull()
-        ?.getValue(AUTHORD_MKDOCS_SPLIT_LAYOUT_KEY)
-        ?.trim()
-        .orEmpty()
-    if (propertiesValue.isNotEmpty()) {
-        return propertiesValue
-    }
-    return splitLayoutFallbackByProject[layoutPreferenceProjectKey(project)].orEmpty()
-}
-
-private fun layoutPreferenceProjectKey(project: Project): String {
-    return runCatching { project.locationHash }
-        .getOrNull()
-        ?.takeIf { it.isNotBlank() }
-        ?: System.identityHashCode(project).toString()
 }
 
 internal class AuthordMarkdownPreviewFileEditor(
