@@ -16,6 +16,7 @@ class StartMkdocsAction(
         PluginCompositionRoot().runtimeIntegration(it)
     },
     private val resultPresenter: (Project, String, Boolean) -> Unit = ::presentPreviewResult,
+    private val isApplicationAvailable: () -> Boolean = { ApplicationManager.getApplication() != null },
     private val compatibilityGateServiceResolver: (Project) -> CompatibilityReleaseGateService = {
         CompatibilityReleaseGateService()
     },
@@ -73,8 +74,7 @@ class StartMkdocsAction(
         }
 
         val runtimeService = runtimeServiceResolver(project)
-        val application = ApplicationManager.getApplication()
-        if (application == null) {
+        if (!isApplicationAvailable()) {
             val result = runtimeService.startPreview(PreviewStartTrigger.ACTION)
             val message = formatPreviewResultMessage(result)
             resultPresenter(project, message, result.success)

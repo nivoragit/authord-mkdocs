@@ -106,4 +106,27 @@ class StartMkdocsActionInvocationTest {
 
         assertFalse(action.invokeForProject(project = null))
     }
+
+    @Test
+    fun `actionPerformed async branch invokes success callback`() {
+        val project = IntellijTestFixtures.project()
+        val service = PluginRuntimeIntegrationService(project)
+        service.setStartupOutputForNextRun("ready at https://preview.example/docs/")
+        val messages = mutableListOf<String>()
+        var successfulStartCallbackInvoked = false
+        val action = StartMkdocsAction(
+            runtimeServiceResolver = { service },
+            resultPresenter = { _, message, _ -> messages += message },
+            isApplicationAvailable = { true },
+        )
+
+        val invoked = action.invokeForProject(project) {
+            successfulStartCallbackInvoked = true
+        }
+
+        assertTrue(invoked)
+        assertTrue(successfulStartCallbackInvoked)
+        assertTrue(messages.isNotEmpty())
+        assertTrue(service.isRuntimeRunning())
+    }
 }
