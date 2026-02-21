@@ -125,7 +125,7 @@ private class ProcessBackedManagedProcessHandle(
 ) : ManagedProcessHandle {
     private val shutdownHook: Thread = Thread(
         { destroyProcessTree(process, forcibly = true) },
-        "authord-mkdocs-$id-shutdown-hook",
+        "authord-$id-shutdown-hook",
     )
     private var shutdownHookRegistered: Boolean = shutdownHookRegistrar.register(shutdownHook)
 
@@ -226,7 +226,7 @@ class ProcessBuilderProcessLauncher(
         val stdoutReaderThread = thread(
             start = true,
             isDaemon = true,
-            name = "authord-mkdocs-$processId-stdout-reader",
+            name = "authord-$processId-stdout-reader",
         ) {
             process.inputStream.bufferedReader().forEachLine { line ->
                 synchronized(outputLock) {
@@ -238,7 +238,7 @@ class ProcessBuilderProcessLauncher(
         val stderrReaderThread = thread(
             start = true,
             isDaemon = true,
-            name = "authord-mkdocs-$processId-stderr-reader",
+            name = "authord-$processId-stderr-reader",
         ) {
             process.errorStream.bufferedReader().forEachLine { line ->
                 synchronized(outputLock) {

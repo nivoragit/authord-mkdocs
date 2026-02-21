@@ -1,7 +1,7 @@
 package com.authord.mkdocs.ui.intellij
 
 /**
- * Renders setup HTML shown when no mkdocs config exists in the project root.
+ * Renders setup HTML shown when no configuration file exists in the project root.
  */
 class SetupPageRenderer {
     fun render(createProjectBridgeScript: String): String {
@@ -11,7 +11,7 @@ class SetupPageRenderer {
               <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
-                <title>Create MkDocs Project</title>
+                <title>Create Project</title>
                 <style>
                   :root {
                     --bg: #f6f8fc;

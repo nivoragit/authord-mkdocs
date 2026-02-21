@@ -5,7 +5,7 @@ import com.intellij.openapi.Disposable
 import com.intellij.openapi.diagnostic.Logger
 
 /**
- * Disposable runtime owner that guarantees MkDocs server shutdown on disposal.
+ * Disposable runtime owner that guarantees Authord runtime shutdown on disposal.
  */
 class MkDocsPreviewService(
     private val processManagerProvider: () -> MkdocsProcessManager,
@@ -24,7 +24,7 @@ class MkDocsPreviewService(
     override fun dispose() {
         val projectId = projectIdProvider()
         val stopped = stopServer()
-        LOG.info("Disposed MkDocs preview service for $projectId (stopped=$stopped)")
+        LOG.info("Disposed Authord preview service for $projectId (stopped=$stopped)")
     }
 
     companion object {

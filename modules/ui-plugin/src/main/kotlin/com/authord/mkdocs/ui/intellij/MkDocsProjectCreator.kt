@@ -12,7 +12,7 @@ data class MkDocsProjectCreationResult(
 )
 
 /**
- * Creates a new MkDocs starter project in the selected IntelliJ project root.
+ * Creates a new documentation starter project in the selected IntelliJ project root.
  */
 class MkDocsProjectCreator(
     private val commandRunner: CommandRunner = ProcessBuilderCommandRunner(),
@@ -47,31 +47,31 @@ class MkDocsProjectCreator(
             val details = commandResult.stderr.ifBlank { commandResult.stdout }
             return MkDocsProjectCreationResult(
                 success = false,
-                message = details.ifBlank { "Failed to create MkDocs project." },
+                message = details.ifBlank { "Failed to create project." },
             )
         }
 
-        val configPath = resolveMkdocsConfigPath(projectRoot)
+        val configPath = resolveConfigPath(projectRoot)
             ?: return MkDocsProjectCreationResult(
                 success = false,
-                message = "MkDocs project was created but mkdocs.yml was not found.",
+                message = "Project was created but configuration file was not found.",
             )
         val resolvedSiteName = resolveSiteName(requestedProjectName, projectRoot)
         val configWriteResult = writeBaseConfig(configPath, resolvedSiteName)
         if (!configWriteResult) {
             return MkDocsProjectCreationResult(
                 success = false,
-                message = "MkDocs project was created but mkdocs.yml could not be updated.",
+                message = "Project was created but configuration file could not be updated.",
             )
         }
 
         return MkDocsProjectCreationResult(
             success = true,
-            message = "MkDocs project created.",
+            message = "Project created.",
         )
     }
 
-    private fun resolveMkdocsConfigPath(projectRoot: Path): Path? {
+    private fun resolveConfigPath(projectRoot: Path): Path? {
         val yml = projectRoot.resolve("mkdocs.yml")
         if (Files.exists(yml)) {
             return yml

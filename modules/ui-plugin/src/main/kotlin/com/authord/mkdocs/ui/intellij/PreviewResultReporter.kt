@@ -5,8 +5,8 @@ import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.project.Project
 
-private const val NOTIFICATION_GROUP_ID = "Authord MkDocs Notifications"
-private const val NOTIFICATION_TITLE = "Authord MkDocs"
+private const val NOTIFICATION_GROUP_ID = "Authord Notifications"
+private const val NOTIFICATION_TITLE = "Authord"
 
 /**
  * Emits preview start results in a way that is visible during runIde sessions.
@@ -15,7 +15,7 @@ internal fun presentPreviewResult(project: Project, message: String, success: Bo
     if (success) {
         val normalized = message.trim()
         if (normalized.isNotEmpty()) {
-            println("[Authord MkDocs][INFO][${project.name}] $normalized")
+            println("[Authord][INFO][${project.name}] $normalized")
         }
         return
     }
@@ -41,7 +41,7 @@ internal fun presentAuthordNotification(
         else -> type.name
     }
     val projectName = project?.name ?: "<no-project>"
-    println("[Authord MkDocs][$level][$projectName] $normalized")
+    println("[Authord][$level][$projectName] $normalized")
 
     val activeProject = project ?: return
     runCatching {
@@ -62,8 +62,8 @@ internal fun formatPreviewResultMessage(result: ActivationResult): String {
 
     val resolvedUrl = result.previewUrl.ifBlank { "<unknown-url>" }
     return if (result.message.equals("Preview already running.", ignoreCase = true)) {
-        "MkDocs preview already running: $resolvedUrl"
+        "Authord preview already running: $resolvedUrl"
     } else {
-        "MkDocs preview started: $resolvedUrl"
+        "Authord preview started: $resolvedUrl"
     }
 }

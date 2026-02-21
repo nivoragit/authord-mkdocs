@@ -19,6 +19,10 @@ internal fun hasMkdocsConfig(projectBasePath: String): Boolean {
     return findMkdocsConfig(base) != null
 }
 
+internal fun hasConfigFile(projectBasePath: String): Boolean {
+    return hasMkdocsConfig(projectBasePath)
+}
+
 internal fun isUnderProject(projectBasePath: String, selectedPath: String): Boolean {
     val projectPath = runCatching { Path.of(projectBasePath).toAbsolutePath().normalize() }.getOrNull() ?: return false
     val candidatePath = runCatching { Path.of(selectedPath).toAbsolutePath().normalize() }.getOrNull() ?: return false

@@ -7,6 +7,7 @@ import com.authord.mkdocs.runtime.RuntimeProcessDiagnostics
 import com.authord.mkdocs.runtime.RuntimeServerConfig
 import com.authord.mkdocs.runtime.UvBootstrapService
 import com.authord.mkdocs.ui.intellij.AuthordUiBundle
+import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
 import java.net.HttpURLConnection
 import java.net.InetAddress
@@ -57,6 +58,14 @@ open class HttpURLConnectionReadinessProbe(
     }
 }
 
+private fun defaultPluginEnvironmentRoot(): Path {
+    val systemPath = runCatching { PathManager.getSystemPath() }
+        .getOrNull()
+        ?.takeIf { it.isNotBlank() }
+    val base = systemPath?.let(Path::of) ?: Path.of(System.getProperty("java.io.tmpdir"))
+    return base.resolve("authord")
+}
+
 /**
  * Result returned by plugin activation flow.
  */
@@ -84,6 +93,7 @@ class PluginActivationService(
     private val maxStartupAttempts: Int = 2,
     private val startupProbeTimeoutMillis: Long = 45_000L,
     private val startupPollIntervalMillis: Long = 150L,
+    private val pluginEnvironmentRootProvider: () -> Path = ::defaultPluginEnvironmentRoot,
 ) {
     private data class StartupAttemptFailure(
         val baseUrl: String,
@@ -102,7 +112,7 @@ class PluginActivationService(
 
     private val siteNameKeyRegex = Regex("""^\s*site_name\s*:""")
     private val themeKeyRegex = Regex("""^(?:theme|["']theme["'])\s*:""")
-    private val fallbackThemeConfigFileName = ".authord-mkdocs.theme.yml"
+    private val fallbackThemeConfigFileName = ".authord.theme.yml"
 
     /**
      * Activates plugin runtime for a project.
@@ -127,7 +137,7 @@ class PluginActivationService(
             )
         }
 
-        if (isMaterializedProjectRoot(projectPath) && resolveMkdocsConfigPath(projectPath) == null) {
+        if (isMaterializedProjectRoot(projectPath) && resolveConfigPath(projectPath) == null) {
             val reason = ActivationFailureReason.START_FAILED
             val details = AuthordUiBundle.message("activation.error.configNotFound", projectPath)
             return ActivationResult(
@@ -165,13 +175,14 @@ class PluginActivationService(
             }
 
             val baseUrl = "http://$host:$port/"
-            LOG.info("Starting MkDocs preview runtime for $projectId at $baseUrl (attempt $attempt/$attempts)")
+            LOG.info("Starting Authord preview runtime for $projectId at $baseUrl (attempt $attempt/$attempts)")
 
             val startResult = processManager.start(
                 projectId = projectId,
                 workingDir = projectPath,
                 config = RuntimeServerConfig(
                     command = parentBoundServeCommand(
+                        projectId = projectId,
                         projectPath = projectPath,
                         runtimePath = bootstrapResult.runtimePath,
                         uvExecutablePath = bootstrapResult.uvExecutablePath,
@@ -186,7 +197,7 @@ class PluginActivationService(
                 logWarnings(diagnostics?.startupOutput.orEmpty())
                 lastFailure = StartupAttemptFailure(
                     baseUrl = baseUrl,
-                    failureSummary = "MkDocs process failed to start.",
+                    failureSummary = "Authord process failed to start.",
                     diagnostics = diagnostics,
                     startupOutput = startResult.startupOutput,
                 )
@@ -200,7 +211,7 @@ class PluginActivationService(
                 logWarnings(diagnostics?.startupOutput.orEmpty())
                 lastFailure = StartupAttemptFailure(
                     baseUrl = baseUrl,
-                    failureSummary = "MkDocs process was already running before startup attempt.",
+                    failureSummary = "Authord process was already running before startup attempt.",
                     diagnostics = diagnostics,
                     startupOutput = startResult.startupOutput,
                 )
@@ -224,7 +235,7 @@ class PluginActivationService(
                     logWarnings(readiness.diagnostics?.startupOutput.orEmpty())
                     lastFailure = StartupAttemptFailure(
                         baseUrl = baseUrl,
-                        failureSummary = "MkDocs process exited before readiness probe succeeded.",
+                        failureSummary = "Authord process exited before readiness probe succeeded.",
                         diagnostics = readiness.diagnostics,
                         startupOutput = startResult.startupOutput,
                     )
@@ -234,7 +245,7 @@ class PluginActivationService(
                     logWarnings(readiness.diagnostics?.startupOutput.orEmpty())
                     lastFailure = StartupAttemptFailure(
                         baseUrl = baseUrl,
-                        failureSummary = "MkDocs readiness probe timed out.",
+                        failureSummary = "Authord readiness probe timed out.",
                         diagnostics = readiness.diagnostics,
                         startupOutput = startResult.startupOutput,
                     )
@@ -344,7 +355,7 @@ class PluginActivationService(
             .filter { it.contains("warning", ignoreCase = true) }
             .take(5)
             .forEach { warningLine ->
-                LOG.info("MkDocs startup warning (non-fatal): $warningLine")
+                LOG.info("Authord startup warning (non-fatal): $warningLine")
             }
     }
 
@@ -387,8 +398,8 @@ class PluginActivationService(
         }
 
         val rootPath = Path.of(projectPath)
-        val hasMkdocsConfig = rootPath.resolve("mkdocs.yml").exists() || rootPath.resolve("mkdocs.yaml").exists()
-        if (!hasMkdocsConfig) {
+        val hasConfigFile = rootPath.resolve("mkdocs.yml").exists() || rootPath.resolve("mkdocs.yaml").exists()
+        if (!hasConfigFile) {
             return AuthordUiBundle.message("activation.error.configNotFound", projectPath)
         }
 
@@ -401,16 +412,17 @@ class PluginActivationService(
     }
 
     private fun parentBoundServeCommand(
+        projectId: String,
         projectPath: String,
         runtimePath: String,
         uvExecutablePath: String,
         host: String,
         port: Int,
     ): List<String> {
-        ensureSiteNameRequiredByMkDocs(projectPath)
+        ensureSiteNameRequiredByConfig(projectPath)
         val scriptPath = ensureParentGuardScript(projectPath)
         val parentPid = ProcessHandle.current().pid().toString()
-        val fallbackThemeConfigPath = ensureFallbackThemeConfig(projectPath)
+        val fallbackThemeConfigPath = ensureFallbackThemeConfig(projectId, projectPath)
         val fallbackThemeConfigArgs = if (fallbackThemeConfigPath != null) {
             listOf("-f", fallbackThemeConfigPath.toString())
         } else {
@@ -438,15 +450,14 @@ class PluginActivationService(
         )
     }
 
-    private fun ensureFallbackThemeConfig(projectPath: String): Path? {
+    private fun ensureFallbackThemeConfig(projectId: String, projectPath: String): Path? {
         if (!shouldUseDefaultThemeOverrides(projectPath)) {
             return null
         }
 
-        val baseConfigPath = resolveMkdocsConfigPath(projectPath) ?: return null
+        val baseConfigPath = resolveConfigPath(projectPath) ?: return null
         val resolvedBaseConfigPath = baseConfigPath.toAbsolutePath().normalize().toString()
-        val projectRootDir = Path.of(projectPath)
-        val fallbackThemeConfigPath = projectRootDir.resolve(fallbackThemeConfigFileName)
+        val fallbackThemeConfigPath = pluginScopedThemeConfigPath(projectId, projectPath)
         val fallbackColorMode = if (runCatching { isDarkIdeTheme() }.getOrDefault(false)) "dark" else "light"
         val fallbackConfig = buildString {
             append("INHERIT: '")
@@ -459,6 +470,7 @@ class PluginActivationService(
         }
 
         val wroteFallbackConfig = runCatching {
+            Files.createDirectories(fallbackThemeConfigPath.parent)
             Files.writeString(
                 fallbackThemeConfigPath,
                 fallbackConfig,
@@ -471,8 +483,21 @@ class PluginActivationService(
         return if (wroteFallbackConfig) fallbackThemeConfigPath else null
     }
 
+    private fun pluginScopedThemeConfigPath(projectId: String, projectPath: String): Path {
+        val normalizedProjectPath = runCatching { Path.of(projectPath).toAbsolutePath().normalize().toString() }
+            .getOrDefault(projectPath)
+        val pathFingerprint = normalizedProjectPath.hashCode().toUInt().toString(16)
+        val safeProjectId = projectId
+            .ifBlank { "default" }
+            .replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        return pluginEnvironmentRootProvider()
+            .resolve("theme")
+            .resolve("${safeProjectId}_$pathFingerprint")
+            .resolve(fallbackThemeConfigFileName)
+    }
+
     private fun shouldUseDefaultThemeOverrides(projectPath: String): Boolean {
-        val configPath = resolveMkdocsConfigPath(projectPath) ?: return true
+        val configPath = resolveConfigPath(projectPath) ?: return true
         val existing = runCatching { Files.readString(configPath) }.getOrNull() ?: return true
         return existing.lineSequence().none { line ->
             val trimmed = line.trimStart()
@@ -482,8 +507,8 @@ class PluginActivationService(
         }
     }
 
-    private fun ensureSiteNameRequiredByMkDocs(projectPath: String) {
-        val configPath = resolveMkdocsConfigPath(projectPath) ?: return
+    private fun ensureSiteNameRequiredByConfig(projectPath: String) {
+        val configPath = resolveConfigPath(projectPath) ?: return
         val existing = runCatching { Files.readString(configPath) }.getOrNull() ?: return
         if (existing.lineSequence().any { line ->
                 val trimmed = line.trimStart()
@@ -505,7 +530,7 @@ class PluginActivationService(
         }
     }
 
-    private fun resolveMkdocsConfigPath(projectPath: String): Path? {
+    private fun resolveConfigPath(projectPath: String): Path? {
         val rootPath = Path.of(projectPath)
         val yml = rootPath.resolve("mkdocs.yml")
         if (yml.exists()) {

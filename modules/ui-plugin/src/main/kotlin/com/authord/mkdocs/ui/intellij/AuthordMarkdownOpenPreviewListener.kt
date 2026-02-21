@@ -10,7 +10,7 @@ import com.intellij.openapi.vfs.VirtualFile
 import java.util.concurrent.atomic.AtomicInteger
 
 private val PREVIEW_ROUTE_REQUEST_GENERATION_KEY: Key<AtomicInteger> =
-    Key.create("authord.mkdocs.markdown.open.previewRouteGeneration")
+    Key.create("authord.markdown.open.previewRouteGeneration")
 
 /**
  * Initializes persistent preview resources only after an eligible docs markdown file is opened.
@@ -42,7 +42,7 @@ class AuthordMarkdownOpenPreviewListener(
         if (!isDocsMarkdownPath(selectedPath)) {
             return
         }
-        if (!isAuthordMkdocsPreviewEligible(project.basePath, selectedPath)) {
+        if (!isAuthordPreviewEligible(project.basePath, selectedPath)) {
             return
         }
 

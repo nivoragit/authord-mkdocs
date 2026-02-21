@@ -91,7 +91,7 @@ class TopicTreeWatcherCoordinator(
                 triggerReconciliation = true,
                 followUp = WatcherFollowUp.NONE,
                 destructiveAction = false,
-                reason = "MkDocs config lifecycle change",
+                reason = "Configuration lifecycle change",
             )
         }
 
@@ -130,7 +130,7 @@ class TopicTreeWatcherCoordinator(
                 triggerReconciliation = true,
                 followUp = WatcherFollowUp.NONE,
                 destructiveAction = false,
-                reason = "MkDocs config rename/move",
+                reason = "Configuration rename/move",
             )
         }
 

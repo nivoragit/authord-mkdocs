@@ -127,7 +127,7 @@ class PluginRuntimeIntegrationService(
         processManagerProvider = { dependencies.processManager },
         projectIdProvider = { project.locationHash },
     )
-    private var lastMkdocsConfigFingerprint: String? = null
+    private var lastConfigFingerprint: String? = null
 
     init {
         Disposer.register(this, previewRuntimeService)
@@ -172,13 +172,13 @@ class PluginRuntimeIntegrationService(
             )
 
         val projectId = project.locationHash
-        val hasKnownConfigFingerprint = lastMkdocsConfigFingerprint != null
-        val configChanged = hasMkdocsConfigChanged(projectPath)
+        val hasKnownConfigFingerprint = lastConfigFingerprint != null
+        val configChanged = hasConfigChanged(projectPath)
         if (previewRuntimeService.isServerRunning() && hasKnownConfigFingerprint && configChanged) {
             return restartPreview(trigger)
         }
         if (previewRuntimeService.isServerRunning() && !hasKnownConfigFingerprint) {
-            syncMkdocsConfigFingerprint(projectPath)
+            syncConfigFingerprint(projectPath)
         }
         val existingPreviewUrl = dependencies.previewPaneCoordinator.currentUrl(projectId)
         if (previewRuntimeService.isServerRunning() && existingPreviewUrl != null) {
@@ -196,7 +196,7 @@ class PluginRuntimeIntegrationService(
             featureFlags = dependencies.featureFlagPolicyService.current(),
         )
         if (activationResult.success) {
-            syncMkdocsConfigFingerprint(projectPath)
+            syncConfigFingerprint(projectPath)
         }
         return activationResult
     }
@@ -254,7 +254,7 @@ class PluginRuntimeIntegrationService(
             dependencies.previewPaneCoordinator.navigate(projectId, previousRoute)
         }
 
-        syncMkdocsConfigFingerprint(projectPath)
+        syncConfigFingerprint(projectPath)
         return restarted.copy(previewUrl = currentPreviewUrl().orEmpty())
     }
 
@@ -317,7 +317,7 @@ class PluginRuntimeIntegrationService(
      */
     override fun dispose() {
         previewRuntimeService.stopServer()
-        lastMkdocsConfigFingerprint = null
+        lastConfigFingerprint = null
     }
 
     private fun runPreviewOperationAsync(
@@ -343,23 +343,23 @@ class PluginRuntimeIntegrationService(
         }
     }
 
-    private fun hasMkdocsConfigChanged(projectPath: String): Boolean {
-        val current = currentMkdocsConfigFingerprint(projectPath)
-        return current != lastMkdocsConfigFingerprint
+    private fun hasConfigChanged(projectPath: String): Boolean {
+        val current = currentConfigFingerprint(projectPath)
+        return current != lastConfigFingerprint
     }
 
-    private fun syncMkdocsConfigFingerprint(projectPath: String) {
-        lastMkdocsConfigFingerprint = currentMkdocsConfigFingerprint(projectPath)
+    private fun syncConfigFingerprint(projectPath: String) {
+        lastConfigFingerprint = currentConfigFingerprint(projectPath)
     }
 
-    private fun currentMkdocsConfigFingerprint(projectPath: String): String? {
-        val configPath = resolveMkdocsConfigPath(projectPath) ?: return null
+    private fun currentConfigFingerprint(projectPath: String): String? {
+        val configPath = resolveConfigPath(projectPath) ?: return null
         val normalizedPath = configPath.toAbsolutePath().normalize()
         val content = runCatching { Files.readString(normalizedPath) }.getOrNull() ?: return null
         return "${normalizedPath}::${content.hashCode()}"
     }
 
-    private fun resolveMkdocsConfigPath(projectPath: String): Path? {
+    private fun resolveConfigPath(projectPath: String): Path? {
         val root = Path.of(projectPath)
         val yml = root.resolve("mkdocs.yml")
         if (Files.exists(yml)) {
@@ -400,7 +400,7 @@ class ProjectUserDataStartupOutputProvider : StartupOutputProvider {
 
     companion object {
         /** Project key storing startup output consumed by base-URL detection. */
-        val KEY: Key<String> = Key.create("authord.mkdocs.startupOutput")
+        val KEY: Key<String> = Key.create("authord.startupOutput")
     }
 }
 

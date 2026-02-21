@@ -4,7 +4,7 @@
             id="com.authord.mkdocs.action.markdownToolbarPreview"
             class="com.authord.mkdocs.ui.intellij.StartMkdocsMarkdownToolbarAction"
             text="Authord Preview"
-            description="Start Authord MkDocs Preview for this project"
+            description="Start Authord Preview for this project"
         >
             <add-to-group group-id="Markdown.Toolbar.Right" anchor="first" />
         </action>

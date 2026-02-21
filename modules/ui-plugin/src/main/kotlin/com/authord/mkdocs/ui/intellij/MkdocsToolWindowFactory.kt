@@ -43,7 +43,9 @@ import com.intellij.openapi.vfs.newvfs.events.VFileEvent
 import com.intellij.openapi.vfs.newvfs.events.VFileMoveEvent
 import com.intellij.openapi.vfs.newvfs.events.VFilePropertyChangeEvent
 import com.intellij.openapi.wm.ToolWindow
+import com.intellij.openapi.wm.ToolWindowAnchor
 import com.intellij.openapi.wm.ToolWindowFactory
+import com.intellij.openapi.wm.ToolWindowType
 import com.intellij.ui.OnePixelSplitter
 import com.intellij.ui.jcef.JBCefApp
 import com.intellij.ui.jcef.JBCefBrowser
@@ -111,7 +113,7 @@ internal enum class ShellLayoutMode(
 }
 
 /**
- * Creates a minimal MkDocs tool window shell for plugin entry-point validation.
+ * Creates a minimal Authord tool window shell for plugin entry-point validation.
  */
 class MkdocsToolWindowFactory(
     private val runtimeServiceResolver: (Project) -> PluginRuntimeIntegrationService = {
@@ -198,6 +200,7 @@ class MkdocsToolWindowFactory(
      * Registers minimal content inside the tool window manager.
      */
     override fun createToolWindowContent(project: Project, toolWindow: ToolWindow) {
+        enforceAuthordToolWindowHost(toolWindow)
         if (toolWindow.id == AUTHORD_TREEVIEW_TOOL_WINDOW_ID) {
             createTreeviewToolWindowContent(project, toolWindow)
             return
@@ -213,7 +216,7 @@ class MkdocsToolWindowFactory(
         val panel = shellContent.panel
         val splitter = shellContent.splitter
         val contentManager = toolWindow.contentManager
-        val content = contentManager.factory.createContent(panel, "", false)
+        val content = contentManager.factory.createContent(panel, project.name, false)
         val projectKey = projectKey(project)
         content.setDisposer(Disposable {
             disposePreviewSyncLifecycle(project, previewContent)
@@ -265,6 +268,14 @@ class MkdocsToolWindowFactory(
         }
     }
 
+    private fun enforceAuthordToolWindowHost(toolWindow: ToolWindow) {
+        runCatching {
+            toolWindow.setAnchor(ToolWindowAnchor.LEFT, null)
+            toolWindow.setType(ToolWindowType.DOCKED, null)
+            toolWindow.isAutoHide = false
+        }
+    }
+
     private fun createTreeviewToolWindowContent(
         project: Project,
         toolWindow: ToolWindow,
@@ -277,7 +288,7 @@ class MkdocsToolWindowFactory(
 
         val panel = JPanel(BorderLayout())
         val contentManager = toolWindow.contentManager
-        val content = contentManager.factory.createContent(panel, "", false)
+        val content = contentManager.factory.createContent(panel, project.name, false)
         content.setDisposer(Disposable {
             disposeModeWatcher(project)
             mkdocsConfigCacheInvalidator(project)
@@ -339,7 +350,7 @@ class MkdocsToolWindowFactory(
         panel.revalidate()
         panel.repaint()
         LOG.info(
-            "Entering setup mode for project `${project.name}` in Authord Treeview: mkdocs.yml/mkdocs.yaml not found in project root.",
+            "Entering setup mode for project `${project.name}` in Authord Treeview: configuration file not found in project root.",
         )
     }
 
@@ -366,7 +377,7 @@ class MkdocsToolWindowFactory(
                 if (!creationResult.success) {
                     resultPresenter(
                         project,
-                        creationResult.message.ifBlank { "Failed to create MkDocs project." },
+                        creationResult.message.ifBlank { "Failed to create project." },
                         false,
                     )
                     return@runOnUiThread
@@ -389,7 +400,7 @@ class MkdocsToolWindowFactory(
     ) {
         val projectId = project.locationHash
         modeWatcherLifecycleByProject.remove(projectId)?.let(Disposer::dispose)
-        val lifecycle = Disposer.newDisposable("authord.mkdocs.treeviewModeWatcher.$projectId")
+        val lifecycle = Disposer.newDisposable("authord.treeviewModeWatcher.$projectId")
         modeWatcherLifecycleByProject[projectId] = lifecycle
         Disposer.register(project, lifecycle)
         vfsBulkListenerRegistrar(
@@ -560,7 +571,7 @@ class MkdocsToolWindowFactory(
             add(createSetShellLayoutModeAction(project, splitter, ShellLayoutMode.TREEVIEW))
         }
         val toolbarComponent = runCatching {
-            val toolbar = ActionManager.getInstance().createActionToolbar("AuthordMkdocsShellToolbar", actionGroup, true)
+            val toolbar = ActionManager.getInstance().createActionToolbar("AuthordShellToolbar", actionGroup, true)
             toolbar.targetComponent = target
             toolbar.component
         }.getOrElse {
@@ -580,7 +591,7 @@ class MkdocsToolWindowFactory(
     ): AnAction {
         return object : com.intellij.openapi.project.DumbAwareAction(
             "Restart plugin",
-            "Restart the MkDocs preview plugin runtime",
+            "Restart the Authord preview plugin runtime",
             AllIcons.Actions.Refresh,
         ) {
             override fun actionPerformed(event: AnActionEvent) {
@@ -739,7 +750,7 @@ class MkdocsToolWindowFactory(
             },
         )
         LOG.info(
-            "Entering setup mode for project `${project.name}`: mkdocs.yml/mkdocs.yaml not found in project root.",
+            "Entering setup mode for project `${project.name}`: configuration file not found in project root.",
         )
     }
 
@@ -840,7 +851,7 @@ class MkdocsToolWindowFactory(
             previewContent.loadUrl(resolvedUrl)
         }
         val message = if (result.success) {
-            "MkDocs preview restarted: ${resolvedUrl.ifBlank { "<unknown-url>" }}"
+            "Authord preview restarted: ${resolvedUrl.ifBlank { "<unknown-url>" }}"
         } else {
             result.message.ifBlank { "Preview restart failed." }
         }
@@ -871,7 +882,7 @@ class MkdocsToolWindowFactory(
         previewContent: PreviewContent,
     ) {
         disposePreviewSyncLifecycle(project, previewContent)
-        val lifecycle = Disposer.newDisposable("authord.mkdocs.previewSync.${project.locationHash}")
+        val lifecycle = Disposer.newDisposable("authord.previewSync.${project.locationHash}")
         previewSyncLifecycleByProject[project.locationHash] = lifecycle
         Disposer.register(project, lifecycle)
         registerPreviewAnchorInvalidation(project, runtimeService, previewContent, lifecycle)
@@ -897,7 +908,7 @@ class MkdocsToolWindowFactory(
     ) {
         val projectId = project.locationHash
         modeWatcherLifecycleByProject.remove(projectId)?.let(Disposer::dispose)
-        val lifecycle = Disposer.newDisposable("authord.mkdocs.modeWatcher.$projectId")
+        val lifecycle = Disposer.newDisposable("authord.modeWatcher.$projectId")
         modeWatcherLifecycleByProject[projectId] = lifecycle
         Disposer.register(project, lifecycle)
         vfsBulkListenerRegistrar(
@@ -1021,7 +1032,7 @@ class MkdocsToolWindowFactory(
                 if (!creationResult.success) {
                     resultPresenter(
                         project,
-                        creationResult.message.ifBlank { "Failed to create MkDocs project." },
+                        creationResult.message.ifBlank { "Failed to create project." },
                         false,
                     )
                     return@runOnUiThread
@@ -1739,7 +1750,7 @@ private fun invalidateMkdocsConfigCacheForProject(project: Project) {
 }
 
 /**
- * Contract for the preview surface embedded in the MkDocs tool window.
+ * Contract for the preview surface embedded in the Authord tool window.
  */
 interface PreviewContent {
     /**
@@ -1755,7 +1766,7 @@ interface PreviewContent {
     fun loadUrl(url: String)
 
     /**
-     * Loads setup page when no MkDocs config exists and forwards create action events.
+     * Loads setup page when no configuration file exists and forwards create action events.
      */
     fun loadSetupPage(onProjectCreate: (String) -> Unit) = Unit
 
@@ -2607,7 +2618,7 @@ private class HtmlPreviewContent : PreviewContent {
         text = """
             <html>
               <body style="font-family:sans-serif;padding:12px;">
-                <p>MkDocs preview will load here after startup.</p>
+                <p>Authord preview will load here after startup.</p>
               </body>
             </html>
         """.trimIndent()
@@ -2636,10 +2647,10 @@ private class HtmlPreviewContent : PreviewContent {
         editorPane.text = """
             <html>
               <body style="font-family:sans-serif;padding:12px;">
-                <h3>Create MkDocs Project</h3>
-                <p>No <code>mkdocs.yml</code> found in the project root.</p>
+                <h3>Create Project</h3>
+                <p>No configuration file (<code>mkdocs.yml</code> or <code>mkdocs.yaml</code>) found in the project root.</p>
                 <p>Embedded browser is unavailable in this runtime, so setup form is not interactive.</p>
-                <p>Create a project manually with <code>uv run mkdocs new .</code> and reopen the tool window.</p>
+                <p>Create a project manually and reopen the tool window.</p>
               </body>
             </html>
         """.trimIndent()

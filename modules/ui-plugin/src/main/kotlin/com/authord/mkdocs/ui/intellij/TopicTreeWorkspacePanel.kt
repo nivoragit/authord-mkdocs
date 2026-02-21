@@ -5,12 +5,16 @@ import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
 import com.intellij.icons.AllIcons
 import com.intellij.notification.NotificationType
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.DefaultActionGroup
+import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.vfs.LocalFileSystem
+import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.ui.JBColor
 import com.intellij.openapi.ui.Messages
-import com.intellij.ui.JBSplitter
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBPanel
 import com.intellij.ui.components.JBScrollPane
@@ -38,7 +42,6 @@ import javax.swing.Icon
 import javax.swing.JButton
 import javax.swing.JComponent
 import javax.swing.JMenuItem
-import javax.swing.JPanel
 import javax.swing.JPopupMenu
 import javax.swing.SwingConstants
 import javax.swing.JToolTip
@@ -55,6 +58,9 @@ private const val ROOT_NODE_ID: String = "root"
 private const val TOC_HEADER_FONT_FAMILY: String = "Inter"
 private const val TOC_HEADER_FONT_SIZE: Int = 13
 private const val TOC_HEADER_LINE_HEIGHT: Int = 17
+private const val TOC_HEADER_TOOLBAR_PLACE: String = "WRS.TocContents.Toolbar"
+private val TOC_HEADER_TOOLBAR_BACKGROUND: Color = JBColor.namedColor("Panel.background", Color(0x191A1C))
+private val TOC_HEADER_TOOLBAR_FOREGROUND: Color = JBColor.namedColor("Panel.foreground", Color(0xD1D3D9))
 private val TOC_TOOLTIP_BACKGROUND: Color = Color(0x343840)
 private val TOC_TOOLTIP_BORDER: Color = Color(0x0E1014)
 private val TOC_TOOLTIP_FOREGROUND: Color = Color(0xDFE1E5)
@@ -152,6 +158,12 @@ internal class TopicTreeWorkspacePanel(
             ) == Messages.OK
         },
 ) {
+    private data class TocHeaderAction(
+        val tooltip: String,
+        val icon: Icon,
+        val perform: () -> Unit,
+    )
+
     private val root = DefaultMutableTreeNode(TopicTreeNodeView.root())
     private val model = DefaultTreeModel(root)
     private val tree = object : JTree(model) {
@@ -186,11 +198,9 @@ internal class TopicTreeWorkspacePanel(
         }
     }
     private val status = JBLabel("")
-    private lateinit var collapseAllButton: JButton
-    private lateinit var addRootTopicButton: JButton
-    private lateinit var tocDeleteButton: JButton
-    private lateinit var tocChildButton: JButton
-    private lateinit var tocRowActionsPanel: JPanel
+    private lateinit var tocHeaderActionsPanel: JComponent
+    private val tocHeaderActionTooltips = mutableListOf<String>()
+    private val tocHeaderActionHandlers = linkedMapOf<String, () -> Unit>()
     private lateinit var tocNewChildMenuItem: JMenuItem
     private lateinit var tocEditTitleMenuItem: JMenuItem
     private lateinit var tocRemoveMenuItem: JMenuItem
@@ -202,7 +212,6 @@ internal class TopicTreeWorkspacePanel(
         preferredSize = java.awt.Dimension(380, 0)
         border = JBUI.Borders.customLine(JBUI.CurrentTheme.CustomFrameDecorations.separatorForeground(), 0, 0, 0, 1)
         add(buildCenter(), BorderLayout.CENTER)
-        add(buildStatusBar(), BorderLayout.SOUTH)
     }
 
     init {
@@ -262,9 +271,9 @@ internal class TopicTreeWorkspacePanel(
             val selectedNode = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
             val userObject = selectedNode?.userObject
             if (project != null && userObject is TopicTreeNodeView && userObject.isNav) {
-                val absolutePath = resolveFilePathInternal(userObject, selectedNode)
-                if (!absolutePath.isNullOrBlank()) {
-                    openFileInEditor(absolutePath)
+                val relativePath = resolveRelativePathForOpen(userObject, selectedNode)
+                if (!relativePath.isNullOrBlank()) {
+                    openRelativePathInEditor(relativePath)
                 }
             }
         }
@@ -323,51 +332,103 @@ internal class TopicTreeWorkspacePanel(
     }
 
     private fun buildCenter(): JComponent {
-        collapseAllButton = iconActionButton(icon = AllIcons.Actions.Collapseall, tooltip = uiMessage("topicTree.tooltip.collapseAll")) { collapseAllTopics() }
-        addRootTopicButton = iconActionButton(icon = AllIcons.General.Add, tooltip = uiMessage("topicTree.tooltip.root")) { addRootTopic() }
-        val tocHeaderActions = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.RIGHT, 2, 0)).apply {
-            add(collapseAllButton)
-            add(addRootTopicButton)
-        }
-
-        tocChildButton = iconActionButton(icon = AllIcons.General.Add, tooltip = uiMessage("topicTree.tooltip.child")) { addChildTopic() }
-        tocDeleteButton = iconActionButton(icon = AllIcons.General.Remove, tooltip = uiMessage("topicTree.tooltip.delete")) { removeTopic() }
-        tocRowActionsPanel = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.RIGHT, 2, 2)).apply {
-            add(tocChildButton)
-            add(tocDeleteButton)
-            isVisible = false
-            border = JBUI.Borders.empty(2, 0, 0, 0)
-        }
-
-        val tocSectionBody = JBPanel<JBPanel<*>>(BorderLayout()).apply {
-            border = JBUI.Borders.empty(0, 8, 8, 8)
-            add(JBScrollPane(tree), BorderLayout.CENTER)
-            add(tocRowActionsPanel, BorderLayout.SOUTH)
-        }
-        val tocSection = buildCollapsibleSection(
-            title = uiMessage("topicTree.section.tableOfContents"),
-            headerActions = tocHeaderActions,
-            body = tocSectionBody,
-            initiallyCollapsed = false,
+        val headerActions = listOf(
+            TocHeaderAction(
+                tooltip = uiMessage("topicTree.tooltip.root"),
+                icon = AllIcons.General.Add,
+                perform = ::addRootTopic,
+            ),
+            TocHeaderAction(
+                tooltip = uiMessage("topicTree.tooltip.expandAll"),
+                icon = AllIcons.Actions.Expandall,
+                perform = ::expandAllTopics,
+            ),
+            TocHeaderAction(
+                tooltip = uiMessage("topicTree.tooltip.collapseAll"),
+                icon = AllIcons.Actions.Collapseall,
+                perform = ::collapseAllTopics,
+            ),
+            TocHeaderAction(
+                tooltip = uiMessage("topicTree.tooltip.syncTocEditor"),
+                icon = AllIcons.General.Locate,
+                perform = ::synchronizeTocAndEditor,
+            ),
         )
+        tocHeaderActionTooltips.clear()
+        tocHeaderActionTooltips += headerActions.map { it.tooltip }
+        tocHeaderActionHandlers.clear()
+        headerActions.forEach { action ->
+            tocHeaderActionHandlers[action.tooltip] = action.perform
+        }
+        tocHeaderActionsPanel = createTocHeaderToolbar(headerActions)
+
+        val tocTreeScrollPane = JBScrollPane(tree).apply {
+            border = JBUI.Borders.empty()
+            viewportBorder = null
+        }
 
         return JBPanel<JBPanel<*>>(BorderLayout()).apply {
-            add(tocSection, BorderLayout.NORTH)
+            border = JBUI.Borders.empty(0, 8, 8, 8)
+            add(buildSectionHeader(title = uiMessage("topicTree.section.tableOfContents"), headerActions = tocHeaderActionsPanel), BorderLayout.NORTH)
+            add(tocTreeScrollPane, BorderLayout.CENTER)
         }
     }
 
-    private fun buildCollapsibleSection(
-        title: String,
-        headerActions: JComponent,
-        body: JComponent,
-        initiallyCollapsed: Boolean,
-    ): JComponent {
-        val bodyContainer = JBPanel<JBPanel<*>>(BorderLayout()).apply {
-            add(body, BorderLayout.CENTER)
-            isVisible = !initiallyCollapsed
+    private fun createTocHeaderToolbar(actions: List<TocHeaderAction>): JComponent {
+        if (ApplicationManager.getApplication() == null) {
+            return JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.RIGHT, 2, 0)).apply {
+                actions.forEach { action ->
+                    add(iconActionButton(icon = action.icon, tooltip = action.tooltip, action = action.perform))
+                }
+                applyToolbarInspectorStyle()
+            }
         }
 
-        val leftHeader = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
+        val actionGroup = DefaultActionGroup().apply {
+            actions.forEach { action ->
+                add(object : DumbAwareAction(action.tooltip, action.tooltip, action.icon) {
+                    override fun actionPerformed(event: AnActionEvent) {
+                        action.perform()
+                    }
+
+                    override fun update(event: AnActionEvent) {
+                        event.presentation.text = action.tooltip
+                        event.presentation.description = action.tooltip
+                    }
+                })
+            }
+        }
+        val toolbarComponent = runCatching {
+            val toolbar = ActionManager.getInstance().createActionToolbar(TOC_HEADER_TOOLBAR_PLACE, actionGroup, true)
+            toolbar.targetComponent = tree
+            toolbar.component
+        }.getOrElse {
+            JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.RIGHT, 2, 0))
+        }
+        return toolbarComponent.applyToolbarInspectorStyle()
+    }
+
+    private fun JComponent.applyToolbarInspectorStyle(): JComponent {
+        border = JBUI.Borders.empty(5, 7)
+        background = TOC_HEADER_TOOLBAR_BACKGROUND
+        foreground = TOC_HEADER_TOOLBAR_FOREGROUND
+        font = Font(TOC_HEADER_FONT_FAMILY, Font.PLAIN, TOC_HEADER_FONT_SIZE)
+        isOpaque = true
+        isDoubleBuffered = true
+        isFocusable = true
+        preferredSize = Dimension(118, 34)
+        minimumSize = Dimension(30, 32)
+        putClientProperty("ActionToolbarImpl.suppressTargetComponentWarning", true)
+        putClientProperty("ActionToolbarImpl.suppressFastTrack", true)
+        putClientProperty("SUPPRESS_BACKGROUND_PREDICATE", true)
+        return this
+    }
+
+    private fun buildSectionHeader(
+        title: String,
+        headerActions: JComponent,
+    ): JComponent {
+        val leftHeader = JBPanel<JBPanel<*>>(BorderLayout()).apply {
             add(
                 JBLabel(title).apply {
                     border = JBUI.Borders.empty(0, 12)
@@ -379,6 +440,7 @@ internal class TopicTreeWorkspacePanel(
                     verticalAlignment = SwingConstants.CENTER
                     horizontalTextPosition = SwingConstants.TRAILING
                     verticalTextPosition = SwingConstants.CENTER
+                    alignmentX = 0.0f
                     isEnabled = false
                     isFocusable = true
                     isOpaque = false
@@ -387,26 +449,16 @@ internal class TopicTreeWorkspacePanel(
                     minimumSize = Dimension(minimumSize.width, TOC_HEADER_LINE_HEIGHT)
                     maximumSize = Dimension(maximumSize.width, TOC_HEADER_LINE_HEIGHT)
                 },
+                BorderLayout.WEST,
             )
         }
 
         val header = JBPanel<JBPanel<*>>(BorderLayout()).apply {
-            border = JBUI.Borders.empty(4, 8, 4, 8)
+            border = JBUI.Borders.empty(0, 8)
             add(leftHeader, BorderLayout.WEST)
             add(headerActions, BorderLayout.EAST)
         }
-
-        return JBPanel<JBPanel<*>>(BorderLayout()).apply {
-            add(header, BorderLayout.NORTH)
-            add(bodyContainer, BorderLayout.CENTER)
-        }
-    }
-
-    private fun buildStatusBar(): JComponent {
-        return JBPanel<JBPanel<*>>(BorderLayout()).apply {
-            border = JBUI.Borders.empty(6, 10)
-            add(status, BorderLayout.CENTER)
-        }
+        return header
     }
 
     private fun iconActionButton(icon: Icon?, tooltip: String, action: () -> Unit): JButton {
@@ -453,6 +505,47 @@ internal class TopicTreeWorkspacePanel(
             tree.collapseRow(row)
         }
         publishStatus(uiMessage("topicTree.status.collapsedAll"))
+    }
+
+    private fun expandAllTopics() {
+        var row = 0
+        while (row < tree.rowCount) {
+            tree.expandRow(row)
+            row += 1
+        }
+        publishStatus(uiMessage("topicTree.status.expandedAll"))
+    }
+
+    private fun synchronizeTocAndEditor() {
+        val currentProject = project ?: run {
+            publishStatus(uiMessage("topicTree.status.syncUnavailable"))
+            return
+        }
+        val selectedFile = FileEditorManager.getInstance(currentProject).selectedFiles.firstOrNull() ?: run {
+            publishStatus(uiMessage("topicTree.status.syncNoOpenEditorFile"))
+            return
+        }
+        val docsDir = activeDocsDirectory() ?: run {
+            publishStatus(uiMessage("topicTree.status.syncUnavailable"))
+            return
+        }
+        val selectedPath = runCatching { Path.of(selectedFile.path).normalize() }.getOrNull() ?: run {
+            publishStatus(uiMessage("topicTree.status.syncUnavailable"))
+            return
+        }
+        val relativePath = runCatching { docsDir.relativize(selectedPath).toString().replace('\\', '/') }.getOrNull()
+        val normalizedRelativePath = normalizeOptionalPath(relativePath)
+        if (normalizedRelativePath.isNullOrBlank() || normalizedRelativePath.startsWith("..")) {
+            publishStatus(uiMessage("topicTree.status.syncFileOutsideDocs"))
+            return
+        }
+
+        val node = findNodeByRelativePath(normalizedRelativePath) ?: run {
+            publishStatus(uiMessage("topicTree.status.syncNoMatchingTopic", normalizedRelativePath))
+            return
+        }
+        focusNode(node)
+        publishStatus(uiMessage("topicTree.status.syncMatched", normalizedRelativePath))
     }
 
     private fun addRootTopic() {
@@ -726,12 +819,6 @@ internal class TopicTreeWorkspacePanel(
         val hasNavSelection = selectedNavNode() != null
         val hasMutableTocSelection = selectedMutableNode() != null
 
-        tocChildButton.isEnabled = hasNavSelection
-        tocDeleteButton.isEnabled = hasMutableTocSelection
-        tocChildButton.isVisible = hasNavSelection
-        tocDeleteButton.isVisible = hasNavSelection
-        tocRowActionsPanel.isVisible = hasNavSelection
-
         tocNewChildMenuItem.isEnabled = hasNavSelection
         tocEditTitleMenuItem.isEnabled = hasMutableTocSelection
         tocRemoveMenuItem.isEnabled = hasMutableTocSelection
@@ -883,7 +970,23 @@ internal class TopicTreeWorkspacePanel(
             }
         }
         val docsDirPath = activeInstance?.docsDirPath?.takeIf { it.isNotBlank() } ?: return null
-        return runCatching { Path.of(docsDirPath).toAbsolutePath().normalize() }.getOrNull()
+        return resolvePathAgainstProjectRoot(docsDirPath)
+    }
+
+    private fun resolvePathAgainstProjectRoot(path: String): Path? {
+        val candidate = runCatching { Path.of(path).normalize() }.getOrNull() ?: return null
+        if (candidate.isAbsolute) {
+            return candidate
+        }
+        val root = resolveProjectRootPath() ?: return null
+        return runCatching { root.resolve(candidate).normalize() }.getOrNull()
+    }
+
+    private fun resolveProjectRootPath(): Path? {
+        val rootPath = project?.basePath?.takeIf { it.isNotBlank() }
+            ?: projectRootPath?.takeIf { it.isNotBlank() }
+            ?: return null
+        return runCatching { Path.of(rootPath).normalize() }.getOrNull()
     }
 
     private fun comparablePath(path: String): String {
@@ -1017,8 +1120,8 @@ internal class TopicTreeWorkspacePanel(
 
     private fun openNodeFileInEditor(node: DefaultMutableTreeNode) {
         val view = node.userObject as? TopicTreeNodeView ?: return
-        val absolutePath = resolveFilePathInternal(view, node) ?: return
-        openFileInEditor(absolutePath)
+        val relativePath = resolveRelativePathForOpen(view, node) ?: return
+        openRelativePathInEditor(relativePath)
     }
 
     private fun openRelativePathInEditor(relativePath: String) {
@@ -1027,11 +1130,11 @@ internal class TopicTreeWorkspacePanel(
         openFileInEditor(docsDir.resolve(normalized).normalize().toString())
     }
 
-    private fun openFileInEditor(absolutePath: String) {
+    private fun openFileInEditor(filePath: String) {
         val currentProject = project ?: return
         val fileSystem = LocalFileSystem.getInstance()
-        val virtualFile = fileSystem.findFileByPath(absolutePath)
-            ?: fileSystem.refreshAndFindFileByPath(absolutePath)
+        val virtualFile = fileSystem.findFileByPath(filePath)
+            ?: fileSystem.refreshAndFindFileByPath(filePath)
             ?: return
         FileEditorManager.getInstance(currentProject).openFile(virtualFile, true)
     }
@@ -1111,23 +1214,7 @@ internal class TopicTreeWorkspacePanel(
 
     internal fun resolveFilePath(node: TopicTreeNodeView): String? {
         val treeNode = findNode(node.nodeId)
-        return resolveFilePathInternal(node, treeNode)
-    }
-
-    private fun resolveFilePathInternal(node: TopicTreeNodeView, treeNode: DefaultMutableTreeNode?): String? {
-        val relativePath = resolveRelativePathForOpen(node, treeNode) ?: return null
-        val controllers = controllersProvider() ?: return null
-        val activeInstanceId = activeTreeId()
-
-        // Try getting active instance first
-        val instanceResult = controllers.instanceRegistryPort?.selectActiveInstance(activeInstanceId)
-        val instance = when (instanceResult) {
-            is TopicGatewayResult.Success -> instanceResult.value
-            else -> null
-        }
-
-        val docsDir = instance?.docsDirPath ?: return null
-        return Path.of(docsDir).resolve(relativePath).normalize().toString()
+        return resolveRelativePathForOpen(node, treeNode)
     }
 
     private fun resolveRelativePathForOpen(
@@ -1278,6 +1365,7 @@ internal class TopicTreeWorkspacePanel(
             }
         }
         visit(component)
+        tooltips += tocHeaderActionTooltips
         return tooltips
     }
 
@@ -1287,34 +1375,33 @@ internal class TopicTreeWorkspacePanel(
             .map { it.text }
     }
 
-    internal fun tocRowActionStatesForTest(): Map<String, Boolean> {
+    internal fun tocContextActionStatesForTest(): Map<String, Boolean> {
         refreshActionEnablement()
         return mapOf(
-            "Child" to tocChildButton.isEnabled,
-            "Delete" to tocDeleteButton.isEnabled,
+            "Child" to tocNewChildMenuItem.isEnabled,
+            "Delete" to tocRemoveMenuItem.isEnabled,
         )
     }
 
     internal fun headerActionVisibilityForTest(): Map<String, Boolean> {
         return mapOf(
-            "Collapse All" to (collapseAllButton.isShowing || collapseAllButton.isVisible),
-            "New Topic" to (addRootTopicButton.isShowing || addRootTopicButton.isVisible),
+            "Expand All" to (tocHeaderActionsPanel.isShowing || tocHeaderActionsPanel.isVisible),
+            "Collapse All" to (tocHeaderActionsPanel.isShowing || tocHeaderActionsPanel.isVisible),
+            "New Topic" to (tocHeaderActionsPanel.isShowing || tocHeaderActionsPanel.isVisible),
+            "Synchronize TOC and Editor" to (tocHeaderActionsPanel.isShowing || tocHeaderActionsPanel.isVisible),
         )
+    }
+
+    internal fun headerActionTooltipsForTest(): List<String> {
+        return tocHeaderActionTooltips.toList()
     }
 
     internal fun statusTextForTest(): String = status.text.orEmpty()
 
     internal fun triggerHeaderActionForTest(label: String): Boolean {
         refreshActionEnablement()
-        val button = when (label) {
-            "Collapse All" -> collapseAllButton
-            "New Topic" -> addRootTopicButton
-            else -> return false
-        }
-        if (!button.isEnabled) {
-            return false
-        }
-        button.doClick()
+        val action = tocHeaderActionHandlers[label] ?: return false
+        action()
         return true
     }
 

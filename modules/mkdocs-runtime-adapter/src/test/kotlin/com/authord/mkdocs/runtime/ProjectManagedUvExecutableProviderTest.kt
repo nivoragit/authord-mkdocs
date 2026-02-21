@@ -48,7 +48,7 @@ class ProjectManagedUvExecutableProviderTest {
 
             val provider = ProjectManagedUvExecutableProvider(
                 env = mapOf(
-                    "AUTHORD_MKDOCS_UV_PATH" to sourceUv.toString(),
+                    "AUTHORD_UV_PATH" to sourceUv.toString(),
                     "PATH" to "",
                 ),
                 includeSystemFallbackCandidates = false,
@@ -121,7 +121,7 @@ class ProjectManagedUvExecutableProviderTest {
             val resolved = provider.resolve(projectRoot.toString())
 
             assertFalse(resolved.success)
-            assertTrue(resolved.errorMessage.contains("AUTHORD_MKDOCS_UV_PATH"))
+            assertTrue(resolved.errorMessage.contains("AUTHORD_UV_PATH"))
             assertTrue(resolved.errorMessage.contains("network unavailable"))
         } finally {
             projectRoot.toFile().deleteRecursively()

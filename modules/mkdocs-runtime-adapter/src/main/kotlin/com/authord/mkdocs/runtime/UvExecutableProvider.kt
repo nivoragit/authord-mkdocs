@@ -212,7 +212,7 @@ class ProjectManagedUvExecutableProvider(
             success = false,
             errorMessage = buildString {
                 append("Unable to provision project-managed 'uv'. ")
-                append("Set AUTHORD_MKDOCS_UV_PATH to an absolute uv binary path. ")
+                append("Set AUTHORD_UV_PATH to an absolute uv binary path. ")
                 append("Details: ${downloadedUv.errorMessage}")
             },
         )
@@ -273,7 +273,8 @@ class ProjectManagedUvExecutableProvider(
     }
 
     private fun explicitConfiguredUvPath(): Path? {
-        val configured = env["AUTHORD_MKDOCS_UV_PATH"]?.trim().orEmpty()
+        val configured = env["AUTHORD_UV_PATH"]?.trim().orEmpty()
+            .ifBlank { env["AUTHORD_MKDOCS_UV_PATH"]?.trim().orEmpty() }
         if (configured.isBlank()) {
             return null
         }

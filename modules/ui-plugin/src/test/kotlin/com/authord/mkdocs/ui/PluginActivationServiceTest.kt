@@ -60,6 +60,7 @@ class PluginActivationServiceTest {
         startupPollIntervalMillis: Long = 150L,
         nowMillisProvider: () -> Long = System::currentTimeMillis,
         sleeper: (Long) -> Unit = { },
+        pluginEnvironmentRoot: Path? = null,
     ): PluginActivationService {
         return PluginActivationService(
             bootstrapService = bootstrap,
@@ -74,7 +75,20 @@ class PluginActivationServiceTest {
             startupPollIntervalMillis = startupPollIntervalMillis,
             nowMillisProvider = nowMillisProvider,
             sleeper = sleeper,
+            pluginEnvironmentRootProvider = {
+                pluginEnvironmentRoot ?: Path.of(System.getProperty("java.io.tmpdir")).resolve("authord-plugin-test-env")
+            },
         )
+    }
+
+    private fun expectedFallbackThemePath(pluginEnvironmentRoot: Path, projectId: String, projectPath: String): Path {
+        val normalizedProjectPath = Path.of(projectPath).toAbsolutePath().normalize().toString()
+        val pathFingerprint = normalizedProjectPath.hashCode().toUInt().toString(16)
+        val safeProjectId = projectId.ifBlank { "default" }.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        return pluginEnvironmentRoot
+            .resolve("theme")
+            .resolve("${safeProjectId}_$pathFingerprint")
+            .resolve(".authord.theme.yml")
     }
 
     private fun createProjectRootWithConfig(prefix: String): Path {
@@ -212,7 +226,7 @@ class PluginActivationServiceTest {
 
             assertFalse(result.success)
             assertEquals(ActivationFailureReason.START_FAILED, result.reason)
-            assertTrue(result.message.contains("No mkdocs.yml or mkdocs.yaml found in project root"))
+            assertTrue(result.message.contains("No configuration file found in project root"))
             assertEquals(0, bootstrapCalls)
             assertTrue(launcher.command.isEmpty())
         } finally {
@@ -304,6 +318,7 @@ class PluginActivationServiceTest {
     @Test
     fun `uses parent guard script command for mkdocs runtime start`() {
         val projectRoot = createTempDirectory(prefix = "plugin-activation-parent-guard-")
+        val pluginEnvRoot = createTempDirectory(prefix = "authord-plugin-env-parent-guard-")
         try {
             Files.writeString(
                 projectRoot.resolve("mkdocs.yml"),
@@ -321,6 +336,7 @@ class PluginActivationServiceTest {
                     uvExecutableProvider = StaticUvExecutableProvider("/tmp/custom-uv"),
                 ),
                 processManager = MkdocsProcessManager(launcher),
+                pluginEnvironmentRoot = pluginEnvRoot,
             )
 
             val result = svc.activate(
@@ -352,7 +368,7 @@ class PluginActivationServiceTest {
             val boundPort = bindAddress.substringAfter(':', missingDelimiterValue = "-1").toIntOrNull()
             assertTrue(boundPort != null && boundPort > 0)
             assertTrue("-f" in launcher.command)
-            val fallbackThemePath = projectRoot.resolve(".authord-mkdocs.theme.yml")
+            val fallbackThemePath = expectedFallbackThemePath(pluginEnvRoot, "project-1", projectRoot.toString())
             assertTrue(fallbackThemePath.toString() in launcher.command)
             assertTrue("--theme" !in launcher.command)
             assertTrue("mkdocs" in launcher.command)
@@ -369,6 +385,7 @@ class PluginActivationServiceTest {
             assertTrue(script.contains("if not parent_alive"))
 
             assertTrue(Files.exists(fallbackThemePath))
+            assertTrue(!Files.exists(projectRoot.resolve(".authord.theme.yml")))
             val fallbackThemeConfig = Files.readString(fallbackThemePath)
             val expectedInheritPath = projectRoot.resolve("mkdocs.yml").toAbsolutePath().normalize().toString()
             assertTrue(fallbackThemeConfig.contains("INHERIT: '$expectedInheritPath'"))
@@ -377,12 +394,14 @@ class PluginActivationServiceTest {
             assertTrue(fallbackThemeConfig.contains("user_color_mode_toggle: true"))
         } finally {
             projectRoot.toFile().deleteRecursively()
+            pluginEnvRoot.toFile().deleteRecursively()
         }
     }
 
     @Test
     fun `adds fallback site_name when mkdocs config omits required key`() {
         val projectRoot = createTempDirectory(prefix = "plugin-activation-site-name-")
+        val pluginEnvRoot = createTempDirectory(prefix = "authord-plugin-env-site-name-")
         try {
             Files.writeString(
                 projectRoot.resolve("mkdocs.yml"),
@@ -400,6 +419,7 @@ class PluginActivationServiceTest {
                     uvExecutableProvider = StaticUvExecutableProvider("/tmp/custom-uv"),
                 ),
                 processManager = MkdocsProcessManager(launcher),
+                pluginEnvironmentRoot = pluginEnvRoot,
             )
 
             val result = svc.activate(
@@ -411,8 +431,9 @@ class PluginActivationServiceTest {
 
             assertTrue(result.success)
             assertTrue("-f" in launcher.command)
-            val fallbackThemePath = projectRoot.resolve(".authord-mkdocs.theme.yml")
+            val fallbackThemePath = expectedFallbackThemePath(pluginEnvRoot, "project-1", projectRoot.toString())
             assertTrue(fallbackThemePath.toString() in launcher.command)
+            assertTrue(!Files.exists(projectRoot.resolve(".authord.theme.yml")))
             assertTrue("--theme" !in launcher.command)
             assertTrue("theme.color_mode=auto" !in launcher.command)
             assertTrue("theme.user_color_mode_toggle=true" !in launcher.command)
@@ -423,12 +444,14 @@ class PluginActivationServiceTest {
             assertTrue(fallbackThemeConfig.contains("INHERIT: '$expectedInheritPath'"))
         } finally {
             projectRoot.toFile().deleteRecursively()
+            pluginEnvRoot.toFile().deleteRecursively()
         }
     }
 
     @Test
     fun `does not use fallback theme config when mkdocs config defines theme`() {
         val projectRoot = createTempDirectory(prefix = "plugin-activation-theme-present-")
+        val pluginEnvRoot = createTempDirectory(prefix = "authord-plugin-env-theme-present-")
         try {
             Files.writeString(
                 projectRoot.resolve("mkdocs.yml"),
@@ -448,6 +471,7 @@ class PluginActivationServiceTest {
                     uvExecutableProvider = StaticUvExecutableProvider("/tmp/custom-uv"),
                 ),
                 processManager = MkdocsProcessManager(launcher),
+                pluginEnvironmentRoot = pluginEnvRoot,
             )
 
             val result = svc.activate(
@@ -459,7 +483,7 @@ class PluginActivationServiceTest {
 
             assertTrue(result.success)
             assertTrue("-f" !in launcher.command)
-            val fallbackThemePath = projectRoot.resolve(".authord-mkdocs.theme.yml")
+            val fallbackThemePath = expectedFallbackThemePath(pluginEnvRoot, "project-1", projectRoot.toString())
             assertTrue(fallbackThemePath.toString() !in launcher.command)
             assertTrue("--theme" !in launcher.command)
             assertTrue("theme.color_mode=auto" !in launcher.command)
@@ -467,12 +491,14 @@ class PluginActivationServiceTest {
             assertTrue(!Files.exists(fallbackThemePath))
         } finally {
             projectRoot.toFile().deleteRecursively()
+            pluginEnvRoot.toFile().deleteRecursively()
         }
     }
 
     @Test
     fun `does not use fallback theme config when theme key is indented`() {
         val projectRoot = createTempDirectory(prefix = "plugin-activation-indented-theme-present-")
+        val pluginEnvRoot = createTempDirectory(prefix = "authord-plugin-env-indented-theme-")
         try {
             Files.writeString(
                 projectRoot.resolve("mkdocs.yml"),
@@ -492,6 +518,7 @@ class PluginActivationServiceTest {
                     uvExecutableProvider = StaticUvExecutableProvider("/tmp/custom-uv"),
                 ),
                 processManager = MkdocsProcessManager(launcher),
+                pluginEnvironmentRoot = pluginEnvRoot,
             )
 
             val result = svc.activate(
@@ -503,7 +530,7 @@ class PluginActivationServiceTest {
 
             assertTrue(result.success)
             assertTrue("-f" !in launcher.command)
-            val fallbackThemePath = projectRoot.resolve(".authord-mkdocs.theme.yml")
+            val fallbackThemePath = expectedFallbackThemePath(pluginEnvRoot, "project-1", projectRoot.toString())
             assertTrue(fallbackThemePath.toString() !in launcher.command)
             assertTrue("--theme" !in launcher.command)
             assertTrue("theme.color_mode=auto" !in launcher.command)
@@ -511,6 +538,7 @@ class PluginActivationServiceTest {
             assertTrue(!Files.exists(fallbackThemePath))
         } finally {
             projectRoot.toFile().deleteRecursively()
+            pluginEnvRoot.toFile().deleteRecursively()
         }
     }
 
@@ -557,6 +585,7 @@ class PluginActivationServiceTest {
     @Test
     fun `writes dark color mode to fallback theme config when ide theme is dark`() {
         val projectRoot = createTempDirectory(prefix = "plugin-activation-dark-theme-")
+        val pluginEnvRoot = createTempDirectory(prefix = "authord-plugin-env-dark-theme-")
         try {
             Files.writeString(
                 projectRoot.resolve("mkdocs.yml"),
@@ -575,6 +604,7 @@ class PluginActivationServiceTest {
                 ),
                 processManager = MkdocsProcessManager(launcher),
                 isDarkIdeTheme = true,
+                pluginEnvironmentRoot = pluginEnvRoot,
             )
 
             val result = svc.activate(
@@ -586,7 +616,7 @@ class PluginActivationServiceTest {
 
             assertTrue(result.success)
             val fallbackThemeConfig = Files.readString(
-                projectRoot.resolve(".authord-mkdocs.theme.yml"),
+                expectedFallbackThemePath(pluginEnvRoot, "project-1", projectRoot.toString()),
             )
             assertTrue(fallbackThemeConfig.contains("name: mkdocs"))
             assertTrue(fallbackThemeConfig.contains("color_mode: dark"))
@@ -594,6 +624,7 @@ class PluginActivationServiceTest {
             assertTrue(fallbackThemeConfig.contains("user_color_mode_toggle: true"))
         } finally {
             projectRoot.toFile().deleteRecursively()
+            pluginEnvRoot.toFile().deleteRecursively()
         }
     }
 }

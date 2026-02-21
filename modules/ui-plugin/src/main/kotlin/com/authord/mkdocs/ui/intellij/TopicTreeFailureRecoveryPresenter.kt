@@ -48,7 +48,7 @@ class TopicTreeFailureRecoveryPresenter {
 
             TopicSyncErrorCode.INSTANCE_SCOPE -> TopicTreeRecoveryMessage(
                 summary = "$operation is out of active instance scope",
-                guidance = "Select the intended MkDocs instance and retry. Detail: $detail",
+                guidance = "Select the intended Authord instance and retry. Detail: $detail",
             )
 
             TopicSyncErrorCode.RECONCILIATION -> TopicTreeRecoveryMessage(
@@ -57,7 +57,7 @@ class TopicTreeFailureRecoveryPresenter {
             )
 
             TopicSyncErrorCode.CONFIG_PARSE -> TopicTreeRecoveryMessage(
-                summary = "$operation could not read MkDocs config",
+                summary = "$operation could not read project config",
                 guidance = "Correct config syntax/path and retry the operation. Detail: $detail",
             )
 

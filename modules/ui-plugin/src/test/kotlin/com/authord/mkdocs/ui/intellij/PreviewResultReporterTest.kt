@@ -18,7 +18,7 @@ class PreviewResultReporterTest {
 
         val formatted = formatPreviewResultMessage(result)
 
-        assertEquals("MkDocs preview started: http://127.0.0.1:8000/", formatted)
+        assertEquals("Authord preview started: http://127.0.0.1:8000/", formatted)
     }
 
     @Test
@@ -70,7 +70,7 @@ class PreviewResultReporterTest {
 
         val formatted = formatPreviewResultMessage(result)
 
-        assertEquals("MkDocs preview started: <unknown-url>", formatted)
+        assertEquals("Authord preview started: <unknown-url>", formatted)
     }
 
     @Test

@@ -9,7 +9,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.DumbAware
 
 /**
- * IntelliJ action entry point for starting MkDocs preview shell flow.
+ * IntelliJ action entry point for starting Authord preview shell flow.
  */
 class StartMkdocsAction(
     private val runtimeServiceResolver: (Project) -> PluginRuntimeIntegrationService = {
@@ -21,7 +21,7 @@ class StartMkdocsAction(
         CompatibilityReleaseGateService()
     },
     private val compatibilityRegressionsProvider: (Project) -> List<CompatibilityRegression> = { emptyList() },
-) : AnAction("Start MkDocs Preview"), DumbAware {
+) : AnAction("Start Authord Preview"), DumbAware {
     /**
      * Uses background update thread to respect action-system threading guidance.
      */

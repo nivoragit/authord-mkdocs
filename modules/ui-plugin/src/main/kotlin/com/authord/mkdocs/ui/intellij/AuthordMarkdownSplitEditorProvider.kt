@@ -34,17 +34,17 @@ import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JComponent
 import kotlin.math.abs
 
-private const val AUTHORD_MKDOCS_PREVIEW_EDITOR_TYPE_ID = "authord-mkdocs-preview-editor"
+private const val AUTHORD_PREVIEW_EDITOR_TYPE_ID = "authord-preview-editor"
 
-internal fun isAuthordMkdocsPreviewEligible(projectBasePath: String?, filePath: String): Boolean {
+internal fun isAuthordPreviewEligible(projectBasePath: String?, filePath: String): Boolean {
     val basePath = projectBasePath ?: return false
     return isMarkdownPath(filePath) &&
-        hasMkdocsConfig(basePath) &&
+        hasConfigFile(basePath) &&
         isUnderProject(basePath, filePath)
 }
 
 /**
- * Replaces the default Markdown split preview with an Authord-backed MkDocs preview.
+ * Replaces the default Markdown split preview with an Authord-backed preview.
  */
 class AuthordMarkdownSplitEditorProvider : TextEditorWithPreviewProvider, DumbAware {
     constructor() : super(AuthordMarkdownPreviewFileEditorProvider())
@@ -63,14 +63,14 @@ class AuthordMarkdownSplitEditorProvider : TextEditorWithPreviewProvider, DumbAw
 
 private class AuthordMarkdownPreviewFileEditorProvider : FileEditorProvider, DumbAware {
     override fun accept(project: Project, file: VirtualFile): Boolean {
-        return isAuthordMkdocsPreviewEligible(project.basePath, file.path)
+        return isAuthordPreviewEligible(project.basePath, file.path)
     }
 
     override fun createEditor(project: Project, file: VirtualFile): FileEditor {
         return AuthordMarkdownPreviewFileEditor(project, file)
     }
 
-    override fun getEditorTypeId(): String = AUTHORD_MKDOCS_PREVIEW_EDITOR_TYPE_ID
+    override fun getEditorTypeId(): String = AUTHORD_PREVIEW_EDITOR_TYPE_ID
 
     override fun getPolicy(): FileEditorPolicy = FileEditorPolicy.PLACE_AFTER_DEFAULT_EDITOR
 }
@@ -103,7 +103,7 @@ private class AuthordMarkdownEditorWithPreview(
         return DefaultActionGroup(
             object : DumbAwareAction(
                 "Restart Authord Preview",
-                "Restart MkDocs runtime and refresh Authord preview",
+                "Restart Authord runtime and refresh preview",
                 AllIcons.Actions.Refresh,
             ) {
                 override fun actionPerformed(event: AnActionEvent) {
@@ -244,7 +244,7 @@ internal class AuthordMarkdownPreviewFileEditor(
     }
 
     internal fun restartPreviewAndRefresh() {
-        if (!hasMkdocsConfig()) {
+        if (!hasConfigFile()) {
             resultPresenter(project, missingConfigMessage(), false)
             return
         }
@@ -268,7 +268,7 @@ internal class AuthordMarkdownPreviewFileEditor(
         if (project.isDisposed || !file.isValid) {
             return false
         }
-        if (!hasMkdocsConfig()) {
+        if (!hasConfigFile()) {
             if (autoStart) {
                 resultPresenter(project, missingConfigMessage(), false)
             }
@@ -485,9 +485,9 @@ internal class AuthordMarkdownPreviewFileEditor(
         }
     }
 
-    private fun hasMkdocsConfig(): Boolean {
+    private fun hasConfigFile(): Boolean {
         val basePath = project.basePath ?: return false
-        return hasMkdocsConfig(basePath)
+        return hasConfigFile(basePath)
     }
 
     private fun missingConfigMessage(): String {

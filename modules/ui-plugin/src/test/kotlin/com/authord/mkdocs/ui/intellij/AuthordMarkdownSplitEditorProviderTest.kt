@@ -16,11 +16,11 @@ class AuthordMarkdownSplitEditorProviderTest {
         try {
             val filePath = projectRoot.resolve("docs").resolve("index.md").toString()
 
-            assertFalse(isAuthordMkdocsPreviewEligible(projectRoot.toString(), filePath))
+            assertFalse(isAuthordPreviewEligible(projectRoot.toString(), filePath))
 
             Files.writeString(projectRoot.resolve("mkdocs.yml"), "site_name: docs\n")
             invalidateMkdocsConfigCache(projectRoot)
-            assertTrue(isAuthordMkdocsPreviewEligible(projectRoot.toString(), filePath))
+            assertTrue(isAuthordPreviewEligible(projectRoot.toString(), filePath))
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -34,7 +34,7 @@ class AuthordMarkdownSplitEditorProviderTest {
             Files.writeString(projectRoot.resolve("mkdocs.yml"), "site_name: docs\n")
             val outsideFilePath = outsideRoot.resolve("docs").resolve("index.md").toString()
 
-            assertFalse(isAuthordMkdocsPreviewEligible(projectRoot.toString(), outsideFilePath))
+            assertFalse(isAuthordPreviewEligible(projectRoot.toString(), outsideFilePath))
         } finally {
             projectRoot.toFile().deleteRecursively()
             outsideRoot.toFile().deleteRecursively()

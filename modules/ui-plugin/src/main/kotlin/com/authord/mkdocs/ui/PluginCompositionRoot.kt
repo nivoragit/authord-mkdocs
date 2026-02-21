@@ -99,19 +99,19 @@ class PluginCompositionRoot {
 private class NoOpMkDocsConfigGateway : MkDocsConfigGateway {
     override fun loadConfig(instance: TopicInstanceRef): TopicGatewayResult<MkDocsConfigDocument> {
         return TopicGatewayResult.Failure(
-            DefaultTopicSyncError(TopicSyncErrorCode.UNSUPPORTED, "MkDocs config gateway is not wired"),
+            DefaultTopicSyncError(TopicSyncErrorCode.UNSUPPORTED, "Configuration gateway is not wired"),
         )
     }
 
     override fun writeConfig(instance: TopicInstanceRef, document: MkDocsConfigDocument): TopicGatewayResult<Unit> {
         return TopicGatewayResult.Failure(
-            DefaultTopicSyncError(TopicSyncErrorCode.UNSUPPORTED, "MkDocs config gateway is not wired"),
+            DefaultTopicSyncError(TopicSyncErrorCode.UNSUPPORTED, "Configuration gateway is not wired"),
         )
     }
 
     override fun serializeDeterministically(document: MkDocsConfigDocument): TopicGatewayResult<String> {
         return TopicGatewayResult.Failure(
-            DefaultTopicSyncError(TopicSyncErrorCode.UNSUPPORTED, "MkDocs config gateway is not wired"),
+            DefaultTopicSyncError(TopicSyncErrorCode.UNSUPPORTED, "Configuration gateway is not wired"),
         )
     }
 }

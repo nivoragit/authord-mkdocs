@@ -24,13 +24,23 @@ class TopicTreeWorkspacePanelUiContractTest {
         val tooltips = panel.tooltipTextsForTest().toSet()
 
         listOf(
-            "Delete",
             "New Topic",
-            "Child",
+            "Expand All",
             "Collapse All",
+            "Synchronize TOC and Editor",
         ).forEach { expected ->
             assertTrue(tooltips.contains(expected), "Missing tooltip '$expected'")
         }
+    }
+
+    @Test
+    fun `header actions follow required toc order`() {
+        val panel = panelWithDefaults()
+
+        assertEquals(
+            listOf("New Topic", "Expand All", "Collapse All", "Synchronize TOC and Editor"),
+            panel.headerActionTooltipsForTest(),
+        )
     }
 
     @Test
@@ -47,18 +57,41 @@ class TopicTreeWorkspacePanelUiContractTest {
         val panel = panelWithDefaults()
         panel.render(sampleState())
 
-        val tocWithoutSelection = panel.tocRowActionStatesForTest()
+        val tocWithoutSelection = panel.tocContextActionStatesForTest()
         assertFalse(tocWithoutSelection.getValue("Child"))
         assertFalse(tocWithoutSelection.getValue("Delete"))
 
         assertTrue(panel.selectTreeNodeForTest("n1"))
-        val tocWithSelection = panel.tocRowActionStatesForTest()
+        val tocWithSelection = panel.tocContextActionStatesForTest()
         assertTrue(tocWithSelection.getValue("Child"))
         assertTrue(tocWithSelection.getValue("Delete"))
 
         val headerVisibility = panel.headerActionVisibilityForTest()
+        assertTrue(headerVisibility.getValue("Expand All"))
         assertTrue(headerVisibility.getValue("Collapse All"))
         assertTrue(headerVisibility.getValue("New Topic"))
+        assertTrue(headerVisibility.getValue("Synchronize TOC and Editor"))
+    }
+
+    @Test
+    fun `expand all header action publishes expanded status`() {
+        val panel = panelWithDefaults()
+        panel.render(sampleState())
+
+        val triggered = panel.triggerHeaderActionForTest("Expand All")
+
+        assertTrue(triggered)
+        assertEquals("Expanded all topics", panel.statusTextForTest())
+    }
+
+    @Test
+    fun `sync toc and editor header action reports unavailable without project`() {
+        val panel = panelWithDefaults()
+
+        val triggered = panel.triggerHeaderActionForTest("Synchronize TOC and Editor")
+
+        assertTrue(triggered)
+        assertEquals("Synchronize TOC and Editor is unavailable", panel.statusTextForTest())
     }
 
     @Test
@@ -362,7 +395,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         )
     }
     @Test
-    fun `resolves absolute file path using active instance docs dir`() {
+    fun `resolves relative file path for active instance node`() {
         val panel = panelWithDefaults()
         panel.render(sampleState())
 
@@ -381,8 +414,7 @@ class TopicTreeWorkspacePanelUiContractTest {
 
         val resolved = panel.resolveFilePath(view)
 
-        // The default instance in panelWithDefaults has docsDirPath = "/tmp/project/docs"
-        assertEquals("/tmp/project/docs/guide/index.md", resolved)
+        assertEquals("guide/index.md", resolved)
     }
 
     @Test
@@ -399,7 +431,7 @@ class TopicTreeWorkspacePanelUiContractTest {
 
         val resolved = panel.resolveFilePath(folderView)
 
-        assertEquals("/tmp/project/docs/install/index.md", resolved)
+        assertEquals("install/index.md", resolved)
     }
 
     @Test

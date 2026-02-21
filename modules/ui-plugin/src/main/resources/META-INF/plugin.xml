@@ -1,16 +1,16 @@
 <idea-plugin>
     <id>com.authord.mkdocs.plugin</id>
-    <name>Authord MkDocs Plugin</name>
+    <name>Authord Plugin</name>
     <vendor>Authord</vendor>
     <description>
-        IntelliJ MkDocs MVP with extension-ready seams and plugin-shell entry points.
+        IntelliJ Authord plugin with extension-ready seams and plugin-shell entry points.
     </description>
 
     <depends>com.intellij.modules.platform</depends>
     <depends optional="true" config-file="markdown-toolbar.xml">org.intellij.plugins.markdown</depends>
 
     <extensions defaultExtensionNs="com.intellij">
-        <notificationGroup id="Authord MkDocs Notifications" displayType="BALLOON" isLogByDefault="true" />
+        <notificationGroup id="Authord Notifications" displayType="BALLOON" isLogByDefault="true" />
         <projectService serviceImplementation="com.authord.mkdocs.ui.intellij.PluginRuntimeIntegrationService" />
         <projectService serviceImplementation="com.authord.mkdocs.ui.intellij.MkDocsPreviewBrowserService" />
         <projectService serviceImplementation="com.authord.mkdocs.ui.intellij.AuthordSplitEditorLayoutStateService" />
@@ -20,7 +20,7 @@
         <toolWindow
             id="Authord"
             factoryClass="com.authord.mkdocs.ui.intellij.MkdocsToolWindowFactory"
-            anchor="right"
+            anchor="left"
             canCloseContents="false"
         />
 
@@ -30,8 +30,8 @@
         <action
             id="com.authord.mkdocs.action.startPreview"
             class="com.authord.mkdocs.ui.intellij.StartMkdocsAction"
-            text="Start MkDocs Preview"
-            description="Start MkDocs Preview for the active project"
+            text="Start Authord Preview"
+            description="Start Authord Preview for the active project"
         >
             <add-to-group group-id="ToolsMenu" anchor="last" />
         </action>

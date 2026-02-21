@@ -26,7 +26,7 @@ import javax.swing.SwingConstants
 /**
  * Native JetBrains Swing panel for the empty-state "Create Documentation" form.
  *
- * Displayed when no `mkdocs.yml` is found in the project root.
+ * Displayed when no configuration file is found in the project root.
  * Follows IntelliJ UI standards and automatically adapts to the IDE theme.
  *
  * @param onProjectCreate callback invoked with the entered project name when the user clicks Create or presses Enter.
