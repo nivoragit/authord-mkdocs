@@ -5,6 +5,7 @@ import com.authord.mkdocs.ports.topic.InstanceRegistryPort
 import com.authord.mkdocs.ports.topic.AddChildTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
+import com.authord.mkdocs.ports.topic.RenameTopicNodeCommand
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
@@ -184,10 +185,99 @@ class TopicTreeWorkspacePanelUiContractTest {
         assertTrue(uiService.dispatched.filterIsInstance<AddTopicNodeCommand>().isEmpty())
     }
 
+    @Test
+    fun `rename topic keeps status bar unchanged while dispatching rename command`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Renamed Guide"))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+        )
+        panel.render(sampleState())
+        assertTrue(panel.selectTreeNodeForTest("n2"))
+
+        val triggered = panel.triggerTocContextActionForTest("Edit Title")
+
+        assertTrue(triggered)
+        assertTrue(uiService.dispatched.any { it is RenameTopicNodeCommand })
+        assertEquals("", panel.statusTextForTest())
+    }
+
+    @Test
+    fun `rename in fallback mode keeps selection on renamed node when id changes`() {
+        var state = sampleFallbackState()
+        val uiService = object : TopicTreeUiService {
+            override fun dispatch(command: TopicTreeCommand): TopicGatewayResult<TopicSyncOutcome> {
+                if (command is RenameTopicNodeCommand && command.nodeId == "page:install.md") {
+                    state = state.copy(
+                        nodes = listOf(
+                            com.authord.mkdocs.ports.topic.TopicNavNode(
+                                nodeId = "page:index.md",
+                                title = "Index",
+                                path = "index.md",
+                            ),
+                            com.authord.mkdocs.ports.topic.TopicNavNode(
+                                nodeId = "page:guides.md",
+                                title = command.newTitle,
+                                path = "guides.md",
+                            ),
+                        ),
+                        navOrderedPaths = listOf("index.md", "guides.md"),
+                    )
+                }
+                return TopicGatewayResult.Success(
+                    TopicSyncOutcome(
+                        transactionId = command.commandId,
+                        applied = true,
+                        rolledBack = false,
+                        compensated = false,
+                        message = "Applied",
+                    ),
+                )
+            }
+
+            override fun refreshActiveTree(): TopicGatewayResult<TopicSyncOutcome> {
+                return TopicGatewayResult.Success(
+                    TopicSyncOutcome(
+                        transactionId = "refresh",
+                        applied = true,
+                        rolledBack = false,
+                        compensated = false,
+                        message = "Refreshed",
+                    ),
+                )
+            }
+
+            override fun selectInstance(instanceId: String): TopicGatewayResult<TopicInstanceRef> {
+                return TopicGatewayResult.Success(
+                    TopicInstanceRef(
+                        instanceId = instanceId,
+                        configPath = "/tmp/project/mkdocs.yml",
+                        docsDirPath = "/tmp/project/docs",
+                    ),
+                )
+            }
+        }
+        val prompts = ArrayDeque(listOf("Guides"))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+            reconcileStateProvider = { state },
+        )
+        panel.render(state)
+        assertTrue(panel.selectTreeNodeForTest("page:install.md"))
+
+        val triggered = panel.triggerTocContextActionForTest("Edit Title")
+
+        assertTrue(triggered)
+        assertEquals("page:guides.md", panel.selectedTreeNodeIdForTest())
+    }
+
     private fun panelWithDefaults(
-        uiService: RecordingUiService = RecordingUiService(),
+        uiService: TopicTreeUiService = RecordingUiService(),
         promptInputProvider: (title: String, message: String, initial: String?) -> String? = { _, _, _ -> null },
         duplicatePathPrompt: (requestedPath: String, suggestedPath: String) -> Boolean = { _, _ -> true },
+        reconcileStateProvider: () -> StartupTreeState? = { sampleState() },
     ): TopicTreeWorkspacePanel {
         val registry = RecordingInstanceRegistryPort(
             instances = mutableListOf(
@@ -220,7 +310,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         return TopicTreeWorkspacePanel(
             project = null,
             controllersProvider = { controllers },
-            reconcileStateProvider = { sampleState() },
+            reconcileStateProvider = reconcileStateProvider,
             promptInputProvider = promptInputProvider,
             duplicatePathPrompt = duplicatePathPrompt,
         )

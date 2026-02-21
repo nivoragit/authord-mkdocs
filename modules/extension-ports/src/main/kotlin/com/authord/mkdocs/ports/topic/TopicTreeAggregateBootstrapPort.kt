@@ -12,3 +12,16 @@ interface TopicTreeAggregateBootstrapPort {
      */
     fun bootstrapTreeFromNav(treeId: String, nav: List<TopicNavNode>)
 }
+
+/**
+ * Optional extension port for forcing aggregate state replacement from nav snapshots.
+ *
+ * Intended for reconciliation flows where the backing tree must mirror current disk/config
+ * state even after prior mutations have populated in-memory nodes.
+ */
+interface TopicTreeAggregateRefreshPort {
+    /**
+     * Replaces aggregate backing [treeId] with a new tree hydrated from [nav].
+     */
+    fun refreshTreeFromNav(treeId: String, nav: List<TopicNavNode>)
+}

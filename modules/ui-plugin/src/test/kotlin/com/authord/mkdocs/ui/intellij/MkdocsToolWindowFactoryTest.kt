@@ -977,6 +977,54 @@ class MkdocsToolWindowFactoryTest {
     }
 
     @Test
+    fun `tool window does not auto-start preview before markdown activation when browser service exists`() {
+        val serviceHostProject = IntellijTestFixtures.project(locationHash = "factory-preview-browser-host")
+        val runtimeService = PluginRuntimeIntegrationService(serviceHostProject)
+        runtimeService.setStartupOutputForNextRun("ready at https://preview.example/")
+        val browserService = MkDocsPreviewBrowserService(serviceHostProject)
+        val projectWithServices = IntellijTestFixtures.project(
+            locationHash = "factory-preview-browser-container",
+            services = mapOf(
+                PluginRuntimeIntegrationService::class.java to runtimeService,
+                MkDocsPreviewBrowserService::class.java to browserService,
+            ),
+        )
+        val factory = MkdocsToolWindowFactory(
+            mkdocsConfigPresenceResolver = { true },
+        )
+        val fixture = IntellijTestFixtures.toolWindowFixture()
+
+        factory.createToolWindowContent(projectWithServices, fixture.toolWindow)
+
+        assertFalse(runtimeService.isRuntimeRunning())
+    }
+
+    @Test
+    fun `tool window auto-starts preview after markdown activation when browser service exists`() {
+        val serviceHostProject = IntellijTestFixtures.project(locationHash = "factory-preview-browser-activated-host")
+        val runtimeService = PluginRuntimeIntegrationService(serviceHostProject)
+        runtimeService.setStartupOutputForNextRun("ready at https://preview.example/")
+        val browserService = MkDocsPreviewBrowserService(serviceHostProject).apply {
+            markMarkdownActivated()
+        }
+        val projectWithServices = IntellijTestFixtures.project(
+            locationHash = "factory-preview-browser-activated-container",
+            services = mapOf(
+                PluginRuntimeIntegrationService::class.java to runtimeService,
+                MkDocsPreviewBrowserService::class.java to browserService,
+            ),
+        )
+        val factory = MkdocsToolWindowFactory(
+            mkdocsConfigPresenceResolver = { true },
+        )
+        val fixture = IntellijTestFixtures.toolWindowFixture()
+
+        factory.createToolWindowContent(projectWithServices, fixture.toolWindow)
+
+        assertTrue(runtimeService.isRuntimeRunning())
+    }
+
+    @Test
     fun `tool window does not load preview when runtime cannot start`() {
         val project = IntellijTestFixtures.project()
         val service = PluginRuntimeIntegrationService(project)

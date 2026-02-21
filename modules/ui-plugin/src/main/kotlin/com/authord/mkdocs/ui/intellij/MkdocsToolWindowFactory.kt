@@ -175,6 +175,9 @@ class MkdocsToolWindowFactory(
         }
     },
     private val markdownPreviewRefresher: (Project, PreviewStartTrigger) -> Boolean = ::refreshOpenAuthordMarkdownPreviews,
+    private val previewBrowserServiceResolver: (Project) -> MkDocsPreviewBrowserService? = { project ->
+        runCatching { project.getService(MkDocsPreviewBrowserService::class.java) }.getOrNull()
+    },
 ) : ToolWindowFactory, DumbAware {
     private val expandedTreeProportionByProject = ConcurrentHashMap<String, Float>()
     private val shellLayoutModeByProject = ConcurrentHashMap<String, ShellLayoutMode>()
@@ -201,7 +204,7 @@ class MkdocsToolWindowFactory(
         }
 
         val runtimeService = runtimeServiceResolver(project)
-        val previewContent = previewContentFactory()
+        val previewContent = resolvePreviewContent(project)
         val projectCreator = mkDocsProjectCreatorResolver(project)
         wireTopicTreeControllers(project)
         val topicTreePanel = createTopicTreePanel(project)
@@ -211,12 +214,21 @@ class MkdocsToolWindowFactory(
         val splitter = shellContent.splitter
         val contentManager = toolWindow.contentManager
         val content = contentManager.factory.createContent(panel, "", false)
+        val projectKey = projectKey(project)
         content.setDisposer(Disposable {
-            runtimeService.stopPreview()
             disposePreviewSyncLifecycle(project, previewContent)
             disposeModeWatcher(project)
             mkdocsConfigCacheInvalidator(project)
             previewModeByProject.remove(project.locationHash)
+            expandedTreeProportionByProject.remove(projectKey)
+            shellLayoutModeByProject.remove(projectKey)
+            typingGenerationByProject.remove(project.locationHash)
+            lastTypingTimestampByProject.remove(project.locationHash)
+            userScrollLatchByProject.remove(project.locationHash)
+            lastSyncedEditorTopByProject.remove(project.locationHash)
+            topicTreePanelsByProject.remove(project.locationHash)
+            topicTreeControllersByProject.remove(project.locationHash)
+            topicTreeUiServicesByProject.remove(project.locationHash)
         })
         contentManager.removeAllContents(true)
         contentManager.addContent(content)
@@ -447,6 +459,21 @@ class MkdocsToolWindowFactory(
         }
     }
 
+    private fun resolvePreviewContent(project: Project): PreviewContent {
+        val browserService = previewBrowserServiceResolver(project)
+        return browserService?.ensurePreviewContent() ?: previewContentFactory()
+    }
+
+    private fun shouldAutoStartPreviewRuntime(project: Project): Boolean {
+        val browserService = previewBrowserServiceResolver(project) ?: return true
+        return browserService.markdownPreviewActivated()
+    }
+
+    private fun shouldLoadLivePreview(project: Project): Boolean {
+        val browserService = previewBrowserServiceResolver(project) ?: return true
+        return browserService.markdownPreviewActivated()
+    }
+
     /**
      * Keeps the tool window available for all open projects.
      */
@@ -502,7 +529,7 @@ class MkdocsToolWindowFactory(
         panel.add(content, BorderLayout.CENTER)
 
         runtimeService.currentPreviewUrl()?.takeIf { it.isNotBlank() }?.let { url ->
-            if (mkdocsConfigPresenceResolver(project)) {
+            if (mkdocsConfigPresenceResolver(project) && shouldLoadLivePreview(project)) {
                 previewContent.loadUrl(url)
             }
         }
@@ -756,6 +783,16 @@ class MkdocsToolWindowFactory(
             startupStateListener(project, startupState)
         }
 
+        if (!shouldAutoStartPreviewRuntime(project)) {
+            if (runtimeService.isRuntimeRunning() && shouldLoadLivePreview(project)) {
+                val existingUrl = runtimeService.currentPreviewUrl().orEmpty()
+                if (existingUrl.isNotBlank()) {
+                    previewContent.loadUrl(existingUrl)
+                }
+            }
+            return
+        }
+
         runtimeService.startPreviewAsync(trigger) { initialResult ->
             if (project.isDisposed) {
                 return@startPreviewAsync
@@ -763,7 +800,7 @@ class MkdocsToolWindowFactory(
             val initialMessage = formatPreviewResultMessage(initialResult)
             if (initialResult.success) {
                 val resolvedUrl = initialResult.previewUrl.ifBlank { runtimeService.currentPreviewUrl().orEmpty() }
-                if (resolvedUrl.isNotBlank()) {
+                if (resolvedUrl.isNotBlank() && shouldLoadLivePreview(project)) {
                     previewContent.loadUrl(resolvedUrl)
                 }
                 markdownPreviewRefresher(project, trigger)
@@ -798,7 +835,7 @@ class MkdocsToolWindowFactory(
         if (result.success) {
             refreshTopicTreeAfterRestart(project)
         }
-        if (result.success && resolvedUrl.isNotBlank()) {
+        if (result.success && resolvedUrl.isNotBlank() && shouldLoadLivePreview(project)) {
             syncEngine(project.locationHash).resetSyncState()
             previewContent.loadUrl(resolvedUrl)
         }
@@ -1767,6 +1804,11 @@ interface PreviewContent {
      * True when setup mode should render a native Swing setup panel.
      */
     fun prefersSetupPanel(): Boolean = false
+
+    /**
+     * Releases preview resources owned by this surface.
+     */
+    fun dispose() = Unit
 }
 
 private class DeferredPreviewContent(
@@ -1860,6 +1902,18 @@ private class DeferredPreviewContent(
         hostPanel.add(delegate.component, BorderLayout.CENTER)
         hostPanel.revalidate()
         hostPanel.repaint()
+    }
+
+    override fun dispose() {
+        synchronized(this) {
+            delegate?.dispose()
+            delegate = null
+            contentReloadListener = null
+            manualScrollListener = null
+            hostPanel.removeAll()
+            hostPanel.revalidate()
+            hostPanel.repaint()
+        }
     }
 }
 
@@ -2477,6 +2531,20 @@ private class JcefPreviewContent(
     private fun loadHtml(html: String) {
         val base64 = Base64.getEncoder().encodeToString(html.toByteArray(StandardCharsets.UTF_8))
         browser.loadURL("data:text/html;charset=utf-8;base64,$base64")
+    }
+
+    override fun dispose() {
+        pendingMetricsCallback = null
+        pendingDomSnapshotCallback = null
+        setupProjectCreateHandler = null
+        contentReloadListener = null
+        manualScrollListener = null
+        runCatching { metricsQuery.dispose() }
+        runCatching { domSnapshotQuery.dispose() }
+        runCatching { domMutationQuery.dispose() }
+        runCatching { manualScrollQuery.dispose() }
+        runCatching { setupProjectCreateQuery.dispose() }
+        runCatching { browser.dispose() }
     }
 }
 

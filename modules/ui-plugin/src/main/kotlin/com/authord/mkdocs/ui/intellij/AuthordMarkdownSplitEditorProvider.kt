@@ -1,6 +1,7 @@
 package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ui.PluginCompositionRoot
+import com.intellij.ide.util.PropertiesComponent
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
@@ -30,11 +31,14 @@ import com.intellij.openapi.vfs.VirtualFile
 import java.awt.event.ComponentAdapter
 import java.awt.event.ComponentEvent
 import java.beans.PropertyChangeListener
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JComponent
 import kotlin.math.abs
 
 private const val AUTHORD_MKDOCS_PREVIEW_EDITOR_TYPE_ID = "authord-mkdocs-preview-editor"
+private const val AUTHORD_MKDOCS_SPLIT_LAYOUT_KEY = "authord.mkdocs.splitEditor.layout"
+private val splitLayoutFallbackByProject = ConcurrentHashMap<String, String>()
 
 internal fun isAuthordMkdocsPreviewEligible(projectBasePath: String?, filePath: String): Boolean {
     val basePath = projectBasePath ?: return false
@@ -80,11 +84,22 @@ private class AuthordMarkdownEditorWithPreview(
     textEditor,
     previewEditor,
     "Authord Preview",
-    Layout.SHOW_EDITOR_AND_PREVIEW,
+    preferredAuthordSplitLayout(textEditor.editor.project) ?: Layout.SHOW_EDITOR_AND_PREVIEW,
 ) {
     init {
         previewEditor.bindSourceEditor(textEditor.editor)
         previewEditor.refreshForSelectedFile(autoStart = false, trigger = PreviewStartTrigger.ACTION)
+        applySharedLayoutPreference()
+    }
+
+    override fun setState(state: FileEditorState) {
+        super.setState(state)
+        applySharedLayoutPreference()
+    }
+
+    override fun setLayout(layout: Layout) {
+        super.setLayout(layout)
+        storeAuthordSplitLayout(textEditor.editor.project, layout)
     }
 
     override fun createRightToolbarActionGroup(): ActionGroup {
@@ -114,6 +129,59 @@ private class AuthordMarkdownEditorWithPreview(
     internal fun refreshPreviewAfterRuntimeStart(trigger: PreviewStartTrigger): Boolean {
         return previewEditor.refreshForSelectedFile(autoStart = false, trigger = trigger)
     }
+
+    private fun applySharedLayoutPreference() {
+        val project = textEditor.editor.project ?: return
+        val preferred = preferredAuthordSplitLayout(project)
+        if (preferred == null) {
+            storeAuthordSplitLayout(project, layout)
+            return
+        }
+        if (preferred != layout) {
+            super.setLayout(preferred)
+        }
+    }
+}
+
+internal fun preferredAuthordSplitLayout(project: Project?): TextEditorWithPreview.Layout? {
+    val activeProject = project ?: return null
+    val stored = readStoredLayoutName(activeProject)
+    return parseAuthordSplitLayoutName(stored)
+}
+
+internal fun storeAuthordSplitLayout(project: Project?, layout: TextEditorWithPreview.Layout) {
+    val activeProject = project ?: return
+    splitLayoutFallbackByProject[layoutPreferenceProjectKey(activeProject)] = layout.name
+    runCatching { PropertiesComponent.getInstance(activeProject) }
+        .getOrNull()
+        ?.setValue(AUTHORD_MKDOCS_SPLIT_LAYOUT_KEY, layout.name)
+}
+
+internal fun parseAuthordSplitLayoutName(stored: String?): TextEditorWithPreview.Layout? {
+    val normalized = stored?.trim().orEmpty()
+    if (normalized.isEmpty()) {
+        return null
+    }
+    return TextEditorWithPreview.Layout.entries.firstOrNull { it.name == normalized }
+}
+
+private fun readStoredLayoutName(project: Project): String {
+    val propertiesValue = runCatching { PropertiesComponent.getInstance(project) }
+        .getOrNull()
+        ?.getValue(AUTHORD_MKDOCS_SPLIT_LAYOUT_KEY)
+        ?.trim()
+        .orEmpty()
+    if (propertiesValue.isNotEmpty()) {
+        return propertiesValue
+    }
+    return splitLayoutFallbackByProject[layoutPreferenceProjectKey(project)].orEmpty()
+}
+
+private fun layoutPreferenceProjectKey(project: Project): String {
+    return runCatching { project.locationHash }
+        .getOrNull()
+        ?.takeIf { it.isNotBlank() }
+        ?: System.identityHashCode(project).toString()
 }
 
 internal class AuthordMarkdownPreviewFileEditor(
@@ -161,6 +229,7 @@ internal class AuthordMarkdownPreviewFileEditor(
     @Volatile
     private var lastTypingTimestampMs: Long = 0L
     private val typingGeneration = AtomicInteger(0)
+    private val routeLoadGeneration = AtomicInteger(0)
     private val typingRefreshDelaysMs = listOf(2000L)
     private val typingScrollGuardMs: Long = 800L
 
@@ -213,7 +282,10 @@ internal class AuthordMarkdownPreviewFileEditor(
             val resolvedUrl = routedUrl ?: restartResult.previewUrl.ifBlank {
                 runtimeService.currentPreviewUrl().orEmpty()
             }
-            resolvedUrl.takeIf { it.isNotBlank() }?.let(::loadUrlIfChanged)
+            if (resolvedUrl.isNotBlank()) {
+                lastLoadedUrl = null
+                loadRouteWithReadinessGuard(resolvedUrl)
+            }
         }
     }
 
@@ -240,7 +312,7 @@ internal class AuthordMarkdownPreviewFileEditor(
                 val resolvedAfterStart = routedAfterStart ?: startResult.previewUrl.ifBlank {
                     runtimeService.currentPreviewUrl().orEmpty()
                 }
-                resolvedAfterStart.takeIf { it.isNotBlank() }?.let(::loadUrlIfChanged)
+                resolvedAfterStart.takeIf { it.isNotBlank() }?.let(::loadRouteWithReadinessGuard)
                 return resolvedAfterStart.isNotBlank()
             } else {
                 runtimeService.startPreviewAsync(trigger) { startResult ->
@@ -252,7 +324,7 @@ internal class AuthordMarkdownPreviewFileEditor(
                     val resolvedAfterStart = routedAfterStart ?: startResult.previewUrl.ifBlank {
                         runtimeService.currentPreviewUrl().orEmpty()
                     }
-                    resolvedAfterStart.takeIf { it.isNotBlank() }?.let(::loadUrlIfChanged)
+                    resolvedAfterStart.takeIf { it.isNotBlank() }?.let(::loadRouteWithReadinessGuard)
                 }
                 return true
             }
@@ -260,14 +332,25 @@ internal class AuthordMarkdownPreviewFileEditor(
 
         val routedUrl = runtimeService.navigateToSelectedFile(file.path)
         val resolvedUrl = routedUrl ?: runtimeService.currentPreviewUrl()
-        if (lastLoadedUrl == null) {
-            resolvedUrl?.takeIf { it.isNotBlank() }?.let(::loadUrlIfChanged)
+        if (!resolvedUrl.isNullOrBlank() && resolvedUrl != lastLoadedUrl) {
+            loadRouteWithReadinessGuard(resolvedUrl)
         }
         return resolvedUrl != null
     }
 
-    private fun loadUrlIfChanged(url: String) {
-        if (lastLoadedUrl == url) {
+    private fun loadRouteWithReadinessGuard(url: String) {
+        val generation = routeLoadGeneration.incrementAndGet()
+        loadPreviewRouteWithReadinessGuard(
+            project = project,
+            targetUrl = url,
+            isRequestCurrent = { routeLoadGeneration.get() == generation },
+            isRuntimeRunning = runtimeService::isRuntimeRunning,
+            loadUrl = { resolvedUrl, forceReload -> loadUrlIfChanged(resolvedUrl, forceReload) },
+        )
+    }
+
+    private fun loadUrlIfChanged(url: String, forceReload: Boolean = false) {
+        if (!forceReload && lastLoadedUrl == url) {
             return
         }
         lastLoadedUrl = url

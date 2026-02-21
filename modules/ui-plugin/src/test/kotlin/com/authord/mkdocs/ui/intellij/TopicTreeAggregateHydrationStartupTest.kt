@@ -8,6 +8,7 @@ import com.authord.mkdocs.ports.topic.DocsFileGateway
 import com.authord.mkdocs.ports.topic.InstanceRegistryPort
 import com.authord.mkdocs.ports.topic.MkDocsConfigDocument
 import com.authord.mkdocs.ports.topic.MkDocsConfigGateway
+import com.authord.mkdocs.ports.topic.AddChildTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RenameTopicNodeCommand
 import com.authord.mkdocs.ports.topic.TopicDeleteMode
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
@@ -173,6 +174,182 @@ class TopicTreeAggregateHydrationStartupTest {
         )
         val persistedPath = configGateway.current.nav.single().path
         assertEquals("guide-updated.md", persistedPath)
+    }
+
+    @Test
+    fun `orchestrator synthesizes fallback nav from docs when config nav is missing for rename`() {
+        val projectRoot = createTempDirectory(prefix = "orchestrator-no-nav-rename-")
+        try {
+            val docsDir = projectRoot.resolve("docs")
+            Files.createDirectories(docsDir)
+            Files.writeString(docsDir.resolve("index.md"), "# Home\n")
+            val instance = TopicInstanceRef(
+                instanceId = "default",
+                configPath = projectRoot.resolve("mkdocs.yml").toString(),
+                docsDirPath = docsDir.toString(),
+            )
+            val configGateway = HydrationConfigGateway(
+                MkDocsConfigDocument(
+                    docsDir = "docs",
+                    nav = emptyList(),
+                    navPresent = false,
+                ),
+            )
+            val docsGateway = HydrationRecordingDocsGateway()
+            val topicTreePort = TopicTreeMutationService()
+            val orchestrator = TopicTreeSyncOrchestratorService(
+                topicTreePort = topicTreePort,
+                mkDocsConfigGateway = configGateway,
+                docsFileGateway = docsGateway,
+            )
+
+            val outcome = requireSuccess(
+                orchestrator.apply(
+                    TopicSyncTransaction(
+                        transactionId = "tx-no-nav-rename",
+                        instance = instance,
+                        command = RenameTopicNodeCommand(
+                            commandId = "cmd-no-nav-rename",
+                            treeId = instance.instanceId,
+                            nodeId = "page:index.md",
+                            newTitle = "Home Updated",
+                        ),
+                    ),
+                ),
+            )
+
+            assertTrue(outcome.applied)
+            assertEquals(
+                listOf(
+                    "rename:index.md->home-updated.md",
+                    "rewrite:index.md->home-updated.md",
+                ),
+                docsGateway.calls,
+            )
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `orchestrator synthesizes fallback nav from docs when config nav is missing for add child`() {
+        val projectRoot = createTempDirectory(prefix = "orchestrator-no-nav-add-child-")
+        try {
+            val docsDir = projectRoot.resolve("docs")
+            Files.createDirectories(docsDir)
+            Files.writeString(docsDir.resolve("index.md"), "# Home\n")
+            val instance = TopicInstanceRef(
+                instanceId = "default",
+                configPath = projectRoot.resolve("mkdocs.yml").toString(),
+                docsDirPath = docsDir.toString(),
+            )
+            val configGateway = HydrationConfigGateway(
+                MkDocsConfigDocument(
+                    docsDir = "docs",
+                    nav = emptyList(),
+                    navPresent = false,
+                ),
+            )
+            val docsGateway = HydrationRecordingDocsGateway()
+            val topicTreePort = TopicTreeMutationService()
+            val orchestrator = TopicTreeSyncOrchestratorService(
+                topicTreePort = topicTreePort,
+                mkDocsConfigGateway = configGateway,
+                docsFileGateway = docsGateway,
+            )
+
+            val outcome = requireSuccess(
+                orchestrator.apply(
+                    TopicSyncTransaction(
+                        transactionId = "tx-no-nav-add-child",
+                        instance = instance,
+                        command = AddChildTopicNodeCommand(
+                            commandId = "cmd-no-nav-add-child",
+                            treeId = instance.instanceId,
+                            targetNodeId = "page:index.md",
+                            childNodeId = "install",
+                            childTitle = "Install",
+                            childOrderIndex = 1,
+                            childSourcePath = null,
+                        ),
+                    ),
+                ),
+            )
+
+            assertTrue(outcome.applied)
+            assertEquals(listOf("create:install.md"), docsGateway.calls)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `no-nav mode refreshes aggregate from docs snapshot between transactions`() {
+        val instance = TopicInstanceRef(
+            instanceId = "default",
+            configPath = "/tmp/project/mkdocs.yml",
+            docsDirPath = "/tmp/project/docs",
+        )
+        val configGateway = HydrationConfigGateway(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = emptyList(),
+                navPresent = false,
+            ),
+        )
+        val docsGateway = HydrationRecordingDocsGateway()
+        val snapshots = listOf(
+            listOf("/tmp/project/docs/index.md", "/tmp/project/docs/install.md"),
+            listOf("/tmp/project/docs/index.md", "/tmp/project/docs/guide.md"),
+        )
+        var snapshotCursor = 0
+        val orchestrator = TopicTreeSyncOrchestratorService(
+            topicTreePort = TopicTreeMutationService(),
+            mkDocsConfigGateway = configGateway,
+            docsFileGateway = docsGateway,
+            docsMarkdownPathCollector = {
+                val index = snapshotCursor.coerceAtMost(snapshots.lastIndex)
+                snapshotCursor += 1
+                snapshots[index]
+            },
+        )
+
+        requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-no-nav-refresh-prime",
+                    instance = instance,
+                    command = ValidateTopicTreeCommand(
+                        commandId = "cmd-no-nav-refresh-prime",
+                        treeId = instance.instanceId,
+                    ),
+                ),
+            ),
+        )
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-no-nav-refresh-rename",
+                    instance = instance,
+                    command = RenameTopicNodeCommand(
+                        commandId = "cmd-no-nav-refresh-rename",
+                        treeId = instance.instanceId,
+                        nodeId = "page:guide.md",
+                        newTitle = "Guide Updated",
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertEquals(
+            listOf(
+                "rename:guide.md->guide-updated.md",
+                "rewrite:guide.md->guide-updated.md",
+            ),
+            docsGateway.calls,
+        )
     }
 
     @Test

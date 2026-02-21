@@ -18,8 +18,10 @@ import com.authord.mkdocs.ports.topic.TopicDeleteMode
 import com.authord.mkdocs.ports.topic.TopicFileOperation
 import com.authord.mkdocs.ports.topic.TopicFileOperationKind
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
+import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.authord.mkdocs.ports.topic.TopicTreeAggregateBootstrapPort
+import com.authord.mkdocs.ports.topic.TopicTreeAggregateRefreshPort
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
 import com.authord.mkdocs.ports.topic.TopicSyncOutcome
 import com.authord.mkdocs.ports.topic.TopicSyncTransaction
@@ -28,6 +30,8 @@ import com.authord.mkdocs.ports.topic.TopicTreeCommandStatus
 import com.authord.mkdocs.ports.topic.ValidateTopicTreeCommand
 import com.authord.mkdocs.ports.topic.TreeSyncOrchestrator
 import com.authord.mkdocs.runtime.MarkdownHeadingSupport
+import java.nio.file.Files
+import java.nio.file.Path
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
 
@@ -38,6 +42,8 @@ class TopicTreeSyncOrchestratorService(
     private val topicTreePort: TopicTreePort,
     private val mkDocsConfigGateway: MkDocsConfigGateway,
     private val docsFileGateway: DocsFileGateway,
+    private val fallbackBuilder: TopicTreeFallbackBuilder = TopicTreeFallbackBuilder(),
+    private val docsMarkdownPathCollector: (String) -> List<String> = ::collectDocsMarkdownPaths,
 ) : TreeSyncOrchestrator {
     private data class ConfigMutationResult(
         val document: MkDocsConfigDocument,
@@ -149,10 +155,17 @@ class TopicTreeSyncOrchestratorService(
         config: MkDocsConfigDocument,
     ) {
         configStateByInstanceId[instanceId] = config
-        (topicTreePort as? TopicTreeAggregateBootstrapPort)?.bootstrapTreeFromNav(
-            treeId = treeId,
-            nav = config.nav,
-        )
+        when (val port = topicTreePort) {
+            is TopicTreeAggregateRefreshPort -> port.refreshTreeFromNav(
+                treeId = treeId,
+                nav = config.nav,
+            )
+
+            is TopicTreeAggregateBootstrapPort -> port.bootstrapTreeFromNav(
+                treeId = treeId,
+                nav = config.nav,
+            )
+        }
     }
 
     /**
@@ -177,16 +190,105 @@ class TopicTreeSyncOrchestratorService(
         val instanceId = transaction.instance.instanceId
         val cached = configStateByInstanceId[instanceId]
         if (cached != null) {
-            return TopicGatewayResult.Success(cached)
+            if (cached.navPresent) {
+                return TopicGatewayResult.Success(cached)
+            }
+            val refreshed = hydrateNoNavConfigFromDocs(
+                instance = transaction.instance,
+                loadedConfig = cached,
+            )
+            val rebased = refreshed.copy(
+                nav = rebindNoNavNodeIds(
+                    previousNodes = cached.nav,
+                    currentNodes = refreshed.nav,
+                ),
+            )
+            configStateByInstanceId[instanceId] = rebased
+            return TopicGatewayResult.Success(rebased)
         }
         return when (val loaded = mkDocsConfigGateway.loadConfig(transaction.instance)) {
             is TopicGatewayResult.Success -> {
-                configStateByInstanceId[instanceId] = loaded.value
-                TopicGatewayResult.Success(loaded.value)
+                val hydrated = hydrateNoNavConfigFromDocs(
+                    instance = transaction.instance,
+                    loadedConfig = loaded.value,
+                )
+                configStateByInstanceId[instanceId] = hydrated
+                TopicGatewayResult.Success(hydrated)
             }
 
             is TopicGatewayResult.Failure -> loaded
         }
+    }
+
+    private fun hydrateNoNavConfigFromDocs(
+        instance: TopicInstanceRef,
+        loadedConfig: MkDocsConfigDocument,
+    ): MkDocsConfigDocument {
+        if (loadedConfig.navPresent) {
+            return loadedConfig
+        }
+
+        val docsMarkdownPaths = runCatching {
+            docsMarkdownPathCollector(instance.docsDirPath)
+        }.getOrElse {
+            emptyList()
+        }
+        if (docsMarkdownPaths.isEmpty()) {
+            return loadedConfig
+        }
+
+        val synthesizedNodes = fallbackBuilder.build(
+            docsDir = instance.docsDirPath,
+            docsMarkdownPaths = docsMarkdownPaths,
+        )
+        if (synthesizedNodes.isEmpty()) {
+            return loadedConfig
+        }
+        return loadedConfig.copy(nav = synthesizedNodes)
+    }
+
+    private fun rebindNoNavNodeIds(
+        previousNodes: List<TopicNavNode>,
+        currentNodes: List<TopicNavNode>,
+    ): List<TopicNavNode> {
+        if (previousNodes.isEmpty() || currentNodes.isEmpty()) {
+            return currentNodes
+        }
+
+        val nodeIdByLogicalKey = linkedMapOf<String, String>()
+        fun collect(nodes: List<TopicNavNode>) {
+            nodes.forEach { node ->
+                noNavLogicalKey(node)?.let { key ->
+                    nodeIdByLogicalKey[key] = node.nodeId
+                }
+                collect(node.children)
+            }
+        }
+        collect(previousNodes)
+
+        fun rebind(nodes: List<TopicNavNode>): List<TopicNavNode> {
+            return nodes.map { node ->
+                val reboundChildren = rebind(node.children)
+                val current = node.copy(children = reboundChildren)
+                val reboundId = noNavLogicalKey(current)?.let(nodeIdByLogicalKey::get)
+                if (reboundId.isNullOrBlank()) {
+                    current
+                } else {
+                    current.copy(nodeId = reboundId)
+                }
+            }
+        }
+
+        return rebind(currentNodes)
+    }
+
+    private fun noNavLogicalKey(node: TopicNavNode): String? {
+        val pagePath = normalizePath(node.path)
+        if (pagePath != null) {
+            return "page:$pagePath"
+        }
+        val directory = deriveNoNavDirectoryForNode(node) ?: return null
+        return "section:$directory"
     }
 
     private fun applyCommandToConfig(
@@ -1114,5 +1216,29 @@ class TopicTreeSyncOrchestratorService(
 
     private companion object {
         private const val ROOT_NODE_ID: String = "root"
+
+        private fun collectDocsMarkdownPaths(docsDirPath: String): List<String> {
+            val docsDir = runCatching { Path.of(docsDirPath).toAbsolutePath().normalize() }.getOrNull()
+                ?: return emptyList()
+            if (!Files.isDirectory(docsDir)) {
+                return emptyList()
+            }
+
+            val markdownPaths = mutableListOf<String>()
+            Files.walk(docsDir).use { stream ->
+                stream
+                    .filter { Files.isRegularFile(it) }
+                    .filter { path ->
+                        path.fileName
+                            ?.toString()
+                            ?.endsWith(".md", ignoreCase = true)
+                            ?: false
+                    }
+                    .forEach { path ->
+                        markdownPaths += path.toAbsolutePath().normalize().toString().replace('\\', '/')
+                    }
+            }
+            return markdownPaths.sorted()
+        }
     }
 }

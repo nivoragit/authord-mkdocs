@@ -1,5 +1,6 @@
 package com.authord.mkdocs.ui.intellij
 
+import com.intellij.openapi.fileEditor.TextEditorWithPreview
 import com.intellij.testFramework.LightVirtualFile
 import java.nio.file.Files
 import javax.swing.JPanel
@@ -113,5 +114,33 @@ class AuthordMarkdownSplitEditorProviderTest {
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
+    }
+
+    @Test
+    fun `preferred layout is absent when project setting was never stored`() {
+        val project = IntellijTestFixtures.project(locationHash = "split-layout-empty")
+
+        val preferred = preferredAuthordSplitLayout(project)
+
+        assertEquals(null, preferred)
+    }
+
+    @Test
+    fun `store layout persists shared preference for project`() {
+        val project = IntellijTestFixtures.project(locationHash = "split-layout-store")
+        val candidate = TextEditorWithPreview.Layout.entries.firstOrNull {
+            it != TextEditorWithPreview.Layout.SHOW_EDITOR_AND_PREVIEW
+        } ?: TextEditorWithPreview.Layout.SHOW_EDITOR_AND_PREVIEW
+
+        storeAuthordSplitLayout(project, candidate)
+
+        assertEquals(candidate, preferredAuthordSplitLayout(project))
+    }
+
+    @Test
+    fun `invalid stored layout value is ignored`() {
+        val preferred = parseAuthordSplitLayoutName("INVALID_LAYOUT")
+
+        assertEquals(null, preferred)
     }
 }

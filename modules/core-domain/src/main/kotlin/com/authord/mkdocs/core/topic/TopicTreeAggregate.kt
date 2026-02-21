@@ -12,6 +12,7 @@ import com.authord.mkdocs.ports.topic.ReorderTopicNodesCommand
 import com.authord.mkdocs.ports.topic.ReparentTopicNodeCommand
 import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.authord.mkdocs.ports.topic.TopicTreeAggregateBootstrapPort
+import com.authord.mkdocs.ports.topic.TopicTreeAggregateRefreshPort
 import com.authord.mkdocs.ports.topic.TopicTreeCommand
 import com.authord.mkdocs.ports.topic.TopicTreeCommandResult
 import com.authord.mkdocs.ports.topic.TopicTreeCommandStatus
@@ -465,7 +466,7 @@ class TopicTreeAggregate(
  */
 class TopicTreeMutationService(
     private val aggregateByTreeId: MutableMap<String, TopicTreeAggregate> = mutableMapOf(),
-) : TopicTreePort, TopicTreeAggregateBootstrapPort {
+) : TopicTreePort, TopicTreeAggregateBootstrapPort, TopicTreeAggregateRefreshPort {
     /**
      * Executes command against a tree aggregate, creating aggregate state on first access.
      */
@@ -480,5 +481,13 @@ class TopicTreeMutationService(
     override fun bootstrapTreeFromNav(treeId: String, nav: List<TopicNavNode>) {
         val aggregate = aggregateByTreeId.getOrPut(treeId) { TopicTreeAggregate(treeId) }
         aggregate.bootstrapFromNav(nav)
+    }
+
+    /**
+     * Replaces one aggregate from persisted/reconciled nav regardless of existing in-memory state.
+     */
+    override fun refreshTreeFromNav(treeId: String, nav: List<TopicNavNode>) {
+        val aggregate = TopicTreeAggregate(treeId).also { it.bootstrapFromNav(nav) }
+        aggregateByTreeId[treeId] = aggregate
     }
 }

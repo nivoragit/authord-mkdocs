@@ -20,6 +20,8 @@ class PluginDescriptorRegistrationTest {
         assertTrue(
             content.contains("implementation=\"com.authord.mkdocs.ui.intellij.MkdocsVenvDirectoryExcludePolicy\""),
         )
+        assertTrue(content.contains("serviceImplementation=\"com.authord.mkdocs.ui.intellij.MkDocsPreviewBrowserService\""))
+        assertTrue(content.contains("implementation=\"com.authord.mkdocs.ui.intellij.AuthordMarkdownOpenPreviewListener\""))
         assertTrue(content.contains("factoryClass=\"com.authord.mkdocs.ui.intellij.MkdocsToolWindowFactory\""))
         assertFalse(content.contains("implementation=\"com.authord.mkdocs.ui.intellij.MarkdownAutoOpenPreviewStartupActivity\""))
         assertTrue(content.contains("class=\"com.authord.mkdocs.ui.intellij.StartMkdocsAction\""))

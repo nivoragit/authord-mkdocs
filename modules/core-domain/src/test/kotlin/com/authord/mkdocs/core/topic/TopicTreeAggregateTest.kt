@@ -427,6 +427,62 @@ class TopicTreeAggregateTest {
     }
 
     @Test
+    fun `mutation service refresh replaces aggregate state with latest nav snapshot`() {
+        val service = TopicTreeMutationService()
+        service.bootstrapTreeFromNav(
+            treeId = "tree-refresh",
+            nav = listOf(
+                TopicNavNode(
+                    nodeId = "n-initial",
+                    title = "Initial",
+                    path = "initial.md",
+                ),
+            ),
+        )
+
+        val seededRename = service.execute(
+            RenameTopicNodeCommand(
+                commandId = "rename-initial",
+                treeId = "tree-refresh",
+                nodeId = "n-initial",
+                newTitle = "Initial Updated",
+            ),
+        )
+        assertEquals(TopicTreeCommandStatus.SUCCESS, seededRename.status)
+
+        service.refreshTreeFromNav(
+            treeId = "tree-refresh",
+            nav = listOf(
+                TopicNavNode(
+                    nodeId = "n-fresh",
+                    title = "Fresh",
+                    path = "fresh.md",
+                ),
+            ),
+        )
+
+        val staleRename = service.execute(
+            RenameTopicNodeCommand(
+                commandId = "rename-stale",
+                treeId = "tree-refresh",
+                nodeId = "n-initial",
+                newTitle = "Should Reject",
+            ),
+        )
+        assertEquals(TopicTreeCommandStatus.REJECTED, staleRename.status)
+
+        val freshRename = service.execute(
+            RenameTopicNodeCommand(
+                commandId = "rename-fresh",
+                treeId = "tree-refresh",
+                nodeId = "n-fresh",
+                newTitle = "Fresh Updated",
+            ),
+        )
+        assertEquals(TopicTreeCommandStatus.SUCCESS, freshRename.status)
+    }
+
+    @Test
     fun `aggregate bootstrap maps section page and external nodes from nav`() {
         val aggregate = TopicTreeAggregate("tree-bootstrap-kind-matrix")
 

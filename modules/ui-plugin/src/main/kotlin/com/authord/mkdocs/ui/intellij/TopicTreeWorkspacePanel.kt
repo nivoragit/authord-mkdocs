@@ -2,7 +2,9 @@ package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicNavNode
+import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
 import com.intellij.icons.AllIcons
+import com.intellij.notification.NotificationType
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.vfs.LocalFileSystem
 import com.intellij.openapi.util.SystemInfoRt
@@ -140,11 +142,11 @@ internal class TopicTreeWorkspacePanel(
     private lateinit var tocRemoveMenuItem: JMenuItem
     private val tocContextMenu = JPopupMenu()
     private var currentState: StartupTreeState? = null
+    private var suppressSelectionFileOpen: Boolean = false
 
     val component: JComponent = JBPanel<JBPanel<*>>(BorderLayout()).apply {
         preferredSize = java.awt.Dimension(380, 0)
         border = JBUI.Borders.customLine(JBUI.CurrentTheme.CustomFrameDecorations.separatorForeground(), 0, 0, 0, 1)
-        add(buildHeader(), BorderLayout.NORTH)
         add(buildCenter(), BorderLayout.CENTER)
         add(buildStatusBar(), BorderLayout.SOUTH)
     }
@@ -180,6 +182,9 @@ internal class TopicTreeWorkspacePanel(
         }
         tree.addTreeSelectionListener {
             refreshActionEnablement()
+            if (suppressSelectionFileOpen) {
+                return@addTreeSelectionListener
+            }
 
             // Open file in editor on selection
             val selectedNode = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
@@ -243,17 +248,6 @@ internal class TopicTreeWorkspacePanel(
         restoreExpandedNodeIds(expandedNodeIds)
         selectedNodeId?.let { selectNodeById(it) }
         refreshActionEnablement()
-    }
-
-    private fun buildHeader(): JComponent {
-        val title = JBLabel(uiMessage("topicTree.header.brand")).apply {
-            font = JBFont.label().deriveFont(JBFont.label().size + 2f)
-        }
-
-        return JBPanel<JBPanel<*>>(BorderLayout()).apply {
-            border = JBUI.Borders.empty(8, 10, 4, 10)
-            add(title, BorderLayout.CENTER)
-        }
     }
 
     private fun buildCenter(): JComponent {
@@ -355,7 +349,9 @@ internal class TopicTreeWorkspacePanel(
         }
         val row = tree.getRowForLocation(event.x, event.y)
         if (row >= 0) {
-            tree.setSelectionRow(row)
+            withSelectionFileOpenSuppressed {
+                tree.setSelectionRow(row)
+            }
         }
         refreshActionEnablement()
         tocContextMenu.show(event.component, event.x, event.y)
@@ -471,11 +467,17 @@ internal class TopicTreeWorkspacePanel(
             nodeId = selected.nodeId,
             newTitle = newTitle,
         )
-        handleDispatchResult(result, uiMessage("topicTree.status.renamedTopic", newTitle)) {
+        handleDispatchResult(
+            dispatch = result,
+            successMessage = uiMessage("topicTree.status.renamedTopic", newTitle),
+            publishSuccessStatus = false,
+        ) {
             reconcileAfterMutation(
                 preferredNodeId = selected.nodeId,
                 preferredPath = selected.path.orEmpty(),
                 preferredParentNodeId = selected.parentNodeId,
+                preferredTitle = newTitle,
+                openPreferredPathFallback = false,
             )
         }
     }
@@ -651,6 +653,7 @@ internal class TopicTreeWorkspacePanel(
     private fun handleDispatchResult(
         dispatch: TopicMutationDispatchResult,
         successMessage: String,
+        publishSuccessStatus: Boolean = true,
         onSuccess: () -> Unit,
     ) {
         when (dispatch.result) {
@@ -659,18 +662,32 @@ internal class TopicTreeWorkspacePanel(
                 if (!outcome.applied) {
                     val summary = uiMessage("topicTree.summary.operationFailedSafely")
                     publishStatus(summary)
+                    publishOperationNotification(summary, NotificationType.WARNING)
                     return
                 }
                 onSuccess()
-                publishStatus(successMessage)
+                if (publishSuccessStatus) {
+                    publishStatus(successMessage)
+                }
+                publishOperationNotification(successMessage, NotificationType.INFORMATION)
             }
 
             is TopicGatewayResult.Failure -> {
                 val recovery = dispatch.recovery
                 val summary = recovery?.summary ?: uiMessage("topicTree.summary.operationFailed")
                 publishStatus(summary)
+                val failureType = if (dispatch.result.error.code == TopicSyncErrorCode.VALIDATION) {
+                    NotificationType.WARNING
+                } else {
+                    NotificationType.ERROR
+                }
+                publishOperationNotification(summary, failureType)
             }
         }
+    }
+
+    private fun publishOperationNotification(message: String, notificationType: NotificationType) {
+        presentAuthordNotification(project, message, notificationType)
     }
 
     private fun publishStatus(message: String) {
@@ -786,9 +803,13 @@ internal class TopicTreeWorkspacePanel(
         preferredNodeId: String,
         preferredPath: String,
         preferredParentNodeId: String?,
+        preferredTitle: String? = null,
+        openPreferredPathFallback: Boolean = true,
     ) {
         reconcileFromDisk()
-        val preferredNode = findNode(preferredNodeId) ?: findNodeByRelativePath(preferredPath)
+        val preferredNode = findNode(preferredNodeId)
+            ?: findNodeByRelativePath(preferredPath)
+            ?: preferredTitle?.let { findNodeByTitleAndParent(title = it, parentNodeId = preferredParentNodeId) }
         if (preferredNode != null) {
             focusNode(preferredNode)
             openNodeFileInEditor(preferredNode)
@@ -800,7 +821,9 @@ internal class TopicTreeWorkspacePanel(
                 tree.expandPath(TreePath(parentNode.path))
                 focusNode(parentNode)
             }
-        openRelativePathInEditor(preferredPath)
+        if (openPreferredPathFallback) {
+            openRelativePathInEditor(preferredPath)
+        }
     }
 
     private fun captureExpandedNodeIds(): Set<String> {
@@ -854,8 +877,47 @@ internal class TopicTreeWorkspacePanel(
 
     private fun focusNode(node: DefaultMutableTreeNode) {
         val path = TreePath(node.path)
-        tree.selectionPath = path
-        tree.scrollPathToVisible(path)
+        withSelectionFileOpenSuppressed {
+            tree.selectionPath = path
+            tree.scrollPathToVisible(path)
+        }
+    }
+
+    private fun findNodeByTitleAndParent(title: String, parentNodeId: String?): DefaultMutableTreeNode? {
+        val normalizedTitle = title.trim()
+        if (normalizedTitle.isEmpty()) {
+            return null
+        }
+        fun visit(node: DefaultMutableTreeNode): DefaultMutableTreeNode? {
+            val view = node.userObject as? TopicTreeNodeView
+            if (
+                view != null &&
+                view.kind == TopicTreeNodeKind.NAV &&
+                view.parentNodeId == parentNodeId &&
+                view.title.trim().equals(normalizedTitle, ignoreCase = true)
+            ) {
+                return node
+            }
+            for (index in 0 until node.childCount) {
+                val child = node.getChildAt(index) as? DefaultMutableTreeNode ?: continue
+                val match = visit(child)
+                if (match != null) {
+                    return match
+                }
+            }
+            return null
+        }
+        return visit(root)
+    }
+
+    private fun <T> withSelectionFileOpenSuppressed(action: () -> T): T {
+        val previous = suppressSelectionFileOpen
+        suppressSelectionFileOpen = true
+        return try {
+            action()
+        } finally {
+            suppressSelectionFileOpen = previous
+        }
     }
 
     private fun openNodeFileInEditor(node: DefaultMutableTreeNode) {
@@ -1099,6 +1161,8 @@ internal class TopicTreeWorkspacePanel(
         )
     }
 
+    internal fun statusTextForTest(): String = status.text.orEmpty()
+
     internal fun triggerHeaderActionForTest(label: String): Boolean {
         refreshActionEnablement()
         val button = when (label) {
@@ -1117,6 +1181,11 @@ internal class TopicTreeWorkspacePanel(
         val targetNode = findNode(nodeId) ?: return false
         focusNode(targetNode)
         return true
+    }
+
+    internal fun selectedTreeNodeIdForTest(): String? {
+        val selectedNode = tree.selectionPath?.lastPathComponent as? DefaultMutableTreeNode ?: return null
+        return (selectedNode.userObject as? TopicTreeNodeView)?.nodeId
     }
 
     internal fun triggerTocContextActionForTest(label: String): Boolean {
