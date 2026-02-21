@@ -422,6 +422,13 @@ class MkdocsToolWindowFactoryTest {
                         panel.collectComponents().none { it is SetupPanel }
                 },
             )
+            val activeInstance = when (
+                val result = factory.topicTreeControllers(project)?.instanceRegistryPort?.activeInstance()
+            ) {
+                is com.authord.mkdocs.ports.topic.TopicGatewayResult.Success -> result.value
+                else -> null
+            }
+            assertEquals("default", activeInstance?.instanceId)
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -584,6 +591,13 @@ class MkdocsToolWindowFactoryTest {
                         splitter.secondComponent.isVisible
                 },
             )
+            val activeInstance = when (
+                val result = factory.topicTreeControllers(project)?.instanceRegistryPort?.activeInstance()
+            ) {
+                is com.authord.mkdocs.ports.topic.TopicGatewayResult.Success -> result.value
+                else -> null
+            }
+            assertEquals("default", activeInstance?.instanceId)
             assertTrue(Files.exists(projectRoot.resolve("mkdocs.yml")))
             val config = Files.readString(projectRoot.resolve("mkdocs.yml"))
             assertTrue(config.contains("site_name: 'demo-site'"))

@@ -1632,16 +1632,13 @@ class MkdocsToolWindowFactory(
             runCatching { Path.of(basePath).toAbsolutePath().normalize() }.getOrNull()
         } ?: return null
 
-        val defaultInstance = when (val result = defaultInstanceResolver(projectRoot.toString())) {
-            is TopicGatewayResult.Success -> result.value
-            is TopicGatewayResult.Failure -> null
-        }
+        val scopedInstance = resolveScopedStartupInstance(project, projectRoot)
 
-        val docsDirPath = defaultInstance
+        val docsDirPath = scopedInstance
             ?.let { instance -> runCatching { Path.of(instance.docsDirPath).toAbsolutePath().normalize() }.getOrNull() }
             ?: projectRoot.resolve("docs").normalize()
 
-        val configDocument = defaultInstance
+        val configDocument = scopedInstance
             ?.let { instance ->
                 when (val result = configLoader(instance)) {
                     is TopicGatewayResult.Success -> result.value.copy(
@@ -1660,7 +1657,7 @@ class MkdocsToolWindowFactory(
                 config = configDocument,
                 docsMarkdownPaths = docsMarkdownPaths,
                 projectId = project.locationHash,
-                instanceId = defaultInstance?.instanceId ?: "default",
+                instanceId = scopedInstance?.instanceId ?: "default",
             )
         }.getOrNull() ?: return null
 
@@ -1668,12 +1665,51 @@ class MkdocsToolWindowFactory(
         val hydratedConfig = configDocument.copy(nav = startupState.nodes)
         hydrateAggregateFromStartupConfig(
             project = project,
-            treeId = defaultInstance?.instanceId ?: "default",
-            instanceId = defaultInstance?.instanceId ?: "default",
+            treeId = scopedInstance?.instanceId ?: "default",
+            instanceId = scopedInstance?.instanceId ?: "default",
             configDocument = hydratedConfig,
         )
 
         return startupState
+    }
+
+    private fun resolveScopedStartupInstance(project: Project, projectRoot: Path): TopicInstanceRef? {
+        val registry = topicTreeControllers(project)?.instanceRegistryPort
+        if (registry == null) {
+            return when (val result = defaultInstanceResolver(projectRoot.toString())) {
+                is TopicGatewayResult.Success -> result.value
+                is TopicGatewayResult.Failure -> null
+            }
+        }
+
+        val discoveredDefault = when (val result = registry.discoverDefaultInstance(projectRoot.toString())) {
+            is TopicGatewayResult.Success -> result.value
+            is TopicGatewayResult.Failure -> null
+        }
+        val activeInstance = when (val result = registry.activeInstance()) {
+            is TopicGatewayResult.Success -> result.value
+            is TopicGatewayResult.Failure -> null
+        }
+
+        val usableActive = activeInstance?.takeIf(::isUsableScopedInstance)
+        if (usableActive != null) {
+            return usableActive
+        }
+
+        if (discoveredDefault != null) {
+            runCatching {
+                registry.selectActiveInstance(discoveredDefault.instanceId)
+            }
+            return discoveredDefault
+        }
+
+        return activeInstance
+    }
+
+    private fun isUsableScopedInstance(instance: TopicInstanceRef): Boolean {
+        return runCatching {
+            Files.exists(Path.of(instance.configPath).toAbsolutePath().normalize())
+        }.getOrDefault(false)
     }
 
     private fun hydrateAggregateFromStartupConfig(
