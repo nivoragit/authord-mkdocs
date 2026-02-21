@@ -532,7 +532,11 @@ internal class TopicTreeWorkspacePanel(
             sourcePath = sourcePath,
             childNodeId = nodeId,
         )
-        handleDispatchResult(result, uiMessage("topicTree.status.addedChildTopic", title)) {
+        handleDispatchResult(
+            result,
+            uiMessage("topicTree.status.addedChildTopic", title),
+            publishSuccessStatus = false,
+        ) {
             reconcileAfterMutation(
                 preferredNodeId = nodeId,
                 preferredPath = sourcePath,
