@@ -176,6 +176,12 @@ class SetupPageRenderer {
                     color: var(--muted);
                     line-height: 1.4;
                   }
+                  .error {
+                    margin: 8px 0 0;
+                    font-size: 12px;
+                    color: #d64f4f;
+                    line-height: 1.4;
+                  }
                   .hint kbd {
                     display: inline-block;
                     background: var(--code-bg);
@@ -214,13 +220,14 @@ class SetupPageRenderer {
                     </p>
                     <label for="project-name-input">Project name</label>
                     <div class="input-group">
-                      <input id="project-name-input" type="text" value="my-project"
+                      <input id="project-name-input" type="text" value=""
                              maxlength="64" placeholder="e.g. my-project" autocomplete="off" spellcheck="false" />
                       <button id="create-project-button" type="button">
                         <span class="btn-label">Create</span>
                         <span class="spinner"></span>
                       </button>
                     </div>
+                    <p id="project-name-error" class="error" hidden></p>
                     <p class="hint">
                       Press <kbd>Enter</kbd> or click Create.
                       Files will be added to the current project root.
@@ -231,7 +238,19 @@ class SetupPageRenderer {
                   (function() {
                     var input = document.getElementById("project-name-input");
                     var button = document.getElementById("create-project-button");
+                    var error = document.getElementById("project-name-error");
                     var submitted = false;
+
+                    function setValidation(message) {
+                      if (!error) return;
+                      var normalized = String(message || "").trim();
+                      error.textContent = normalized;
+                      error.hidden = normalized.length === 0;
+                    }
+
+                    function hasValidName() {
+                      return String((input && input.value) || "").trim().length > 0;
+                    }
 
                     function setLoading(loading) {
                       if (loading) {
@@ -240,32 +259,46 @@ class SetupPageRenderer {
                         input.disabled = true;
                       } else {
                         button.classList.remove("loading");
-                        button.disabled = false;
+                        button.disabled = !hasValidName();
                         input.disabled = false;
                       }
                     }
 
                     function submit() {
                       if (submitted) return;
+                      if (!hasValidName()) {
+                        setValidation("Project name is required.");
+                        if (input) input.focus();
+                        return;
+                      }
                       submitted = true;
                       setLoading(true);
-                      var value = ((input && input.value) || "").trim() || "my-project";
+                      setValidation("");
+                      var value = ((input && input.value) || "").trim();
                       var payload = encodeURIComponent(value);
                       ${createProjectBridgeScript}
+                    }
+
+                    function onInputChanged() {
+                      setValidation("");
+                      if (!submitted && button) {
+                        button.disabled = !hasValidName();
+                      }
                     }
 
                     if (button) {
                       button.addEventListener("click", submit);
                     }
                     if (input) {
+                      input.addEventListener("input", onInputChanged);
                       input.addEventListener("keydown", function(event) {
                         if (event.key === "Enter") {
                           event.preventDefault();
                           submit();
                         }
                       });
+                      onInputChanged();
                       input.focus();
-                      input.select();
                     }
                   })();
                 </script>

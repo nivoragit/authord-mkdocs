@@ -22,6 +22,8 @@ import javax.swing.JComponent
 import javax.swing.JPanel
 import javax.swing.KeyStroke
 import javax.swing.SwingConstants
+import javax.swing.event.DocumentEvent
+import javax.swing.event.DocumentListener
 
 /**
  * Native JetBrains Swing panel for the empty-state "Create Documentation" form.
@@ -48,6 +50,7 @@ internal class SetupPanel(
         foreground = JBColor.GRAY
         font = JBFont.small()
     }
+    private val requiredNameMessage = AuthordUiBundle.message("setup.error.projectNameRequired")
 
     init {
         buildUi()
@@ -61,6 +64,7 @@ internal class SetupPanel(
         nameField.isEnabled = !loading
         createButton.isEnabled = !loading
         createButton.text = if (loading) AuthordUiBundle.message("setup.button.creating") else AuthordUiBundle.message("setup.button.create")
+        statusLabel.foreground = JBColor.GRAY
         statusLabel.text = if (loading) AuthordUiBundle.message("setup.status.creating") else ""
     }
 
@@ -162,10 +166,32 @@ internal class SetupPanel(
                 }
             },
         )
+        nameField.document.addDocumentListener(
+            object : DocumentListener {
+                override fun insertUpdate(e: DocumentEvent?) = clearValidation()
+
+                override fun removeUpdate(e: DocumentEvent?) = clearValidation()
+
+                override fun changedUpdate(e: DocumentEvent?) = clearValidation()
+            },
+        )
     }
 
     private fun submitForm() {
-        val name = nameField.text.trim().ifBlank { AuthordUiBundle.message("setup.defaultProjectName") }
+        val name = nameField.text.trim()
+        if (name.isBlank()) {
+            statusLabel.foreground = JBColor.RED
+            statusLabel.text = requiredNameMessage
+            return
+        }
+        clearValidation()
         onProjectCreate(name)
+    }
+
+    private fun clearValidation() {
+        if (statusLabel.text == requiredNameMessage) {
+            statusLabel.foreground = JBColor.GRAY
+            statusLabel.text = ""
+        }
     }
 }

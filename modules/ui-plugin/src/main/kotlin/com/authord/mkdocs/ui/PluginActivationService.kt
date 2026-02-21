@@ -111,6 +111,7 @@ class PluginActivationService(
     }
 
     private val siteNameKeyRegex = Regex("""^\s*site_name\s*:""")
+    private val docsDirKeyRegex = Regex("""^\s*docs_dir\s*:\s*(.+)$""")
     private val themeKeyRegex = Regex("""^(?:theme|["']theme["'])\s*:""")
     private val fallbackThemeConfigFileName = ".authord.theme.yml"
 
@@ -429,6 +430,7 @@ class PluginActivationService(
             emptyList()
         }
         val hostBindingArgs = listOf("--dev-addr", "$host:$port")
+        val runtimePythonExecutable = resolveRuntimePythonExecutable(runtimePath)
 
         return listOf(
             uvExecutablePath,
@@ -442,12 +444,33 @@ class PluginActivationService(
             "--working-dir",
             projectPath,
             "--",
+            runtimePythonExecutable,
+            "-m",
             "mkdocs",
             "serve",
         ) + hostBindingArgs + fallbackThemeConfigArgs + listOf(
             "--livereload",
             "--dirty",
         )
+    }
+
+    private fun resolveRuntimePythonExecutable(runtimePath: String): String {
+        val runtimeRoot = Path.of(runtimePath)
+        val windowsPython = runtimeRoot.resolve("Scripts").resolve("python.exe")
+        if (windowsPython.exists()) {
+            return windowsPython.toString()
+        }
+
+        val unixPython = runtimeRoot.resolve("bin").resolve("python")
+        if (unixPython.exists()) {
+            return unixPython.toString()
+        }
+
+        return if (System.getProperty("os.name").contains("win", ignoreCase = true)) {
+            windowsPython.toString()
+        } else {
+            unixPython.toString()
+        }
     }
 
     private fun ensureFallbackThemeConfig(projectId: String, projectPath: String): Path? {
@@ -457,11 +480,15 @@ class PluginActivationService(
 
         val baseConfigPath = resolveConfigPath(projectPath) ?: return null
         val resolvedBaseConfigPath = baseConfigPath.toAbsolutePath().normalize().toString()
+        val resolvedDocsDirPath = resolveDocsDirPath(projectPath, baseConfigPath).toAbsolutePath().normalize().toString()
         val fallbackThemeConfigPath = pluginScopedThemeConfigPath(projectId, projectPath)
         val fallbackColorMode = if (runCatching { isDarkIdeTheme() }.getOrDefault(false)) "dark" else "light"
         val fallbackConfig = buildString {
             append("INHERIT: '")
             append(escapeSingleQuotedYaml(resolvedBaseConfigPath))
+            append("'\n")
+            append("docs_dir: '")
+            append(escapeSingleQuotedYaml(resolvedDocsDirPath))
             append("'\n")
             append("theme:\n")
             append("  name: mkdocs\n")
@@ -505,6 +532,41 @@ class PluginActivationService(
                 !trimmed.startsWith("#") &&
                 themeKeyRegex.containsMatchIn(trimmed)
         }
+    }
+
+    private fun resolveDocsDirPath(projectPath: String, configPath: Path): Path {
+        val configuredDocsDir = runCatching { Files.readString(configPath) }
+            .getOrNull()
+            ?.lineSequence()
+            ?.map { it.trim() }
+            ?.filter { it.isNotEmpty() && !it.startsWith("#") }
+            ?.mapNotNull { line ->
+                val match = docsDirKeyRegex.find(line) ?: return@mapNotNull null
+                parseYamlScalar(match.groupValues[1])
+            }
+            ?.firstOrNull()
+            ?.takeIf { it.isNotBlank() }
+            ?: "docs"
+
+        val configuredPath = runCatching { Path.of(configuredDocsDir) }.getOrNull()
+        return if (configuredPath != null && configuredPath.isAbsolute) {
+            configuredPath
+        } else {
+            Path.of(projectPath).resolve(configuredDocsDir)
+        }
+    }
+
+    private fun parseYamlScalar(rawValue: String): String {
+        val trimmed = rawValue.trim()
+        if (trimmed.length >= 2 && trimmed.startsWith('\'') && trimmed.endsWith('\'')) {
+            return trimmed.substring(1, trimmed.length - 1).replace("''", "'")
+        }
+        if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
+            return trimmed.substring(1, trimmed.length - 1)
+                .replace("\\\"", "\"")
+                .replace("\\\\", "\\")
+        }
+        return trimmed.substringBefore('#').trim()
     }
 
     private fun ensureSiteNameRequiredByConfig(projectPath: String) {

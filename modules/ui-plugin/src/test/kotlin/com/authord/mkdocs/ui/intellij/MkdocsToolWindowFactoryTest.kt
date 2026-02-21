@@ -143,7 +143,10 @@ private fun dispatchVfsEvents(
     }
 }
 
-private fun triggerSetupPanelCreate(panel: SetupPanel) {
+private fun triggerSetupPanelCreate(panel: SetupPanel, name: String = "demo-site") {
+    val nameField = panel::class.java.getDeclaredField("nameField")
+    nameField.isAccessible = true
+    (nameField.get(panel) as? javax.swing.JTextField)?.text = name
     val submitForm = panel::class.java.getDeclaredMethod("submitForm")
     submitForm.isAccessible = true
     submitForm.invoke(panel)

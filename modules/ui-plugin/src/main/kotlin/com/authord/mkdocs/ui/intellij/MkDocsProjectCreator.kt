@@ -1,5 +1,6 @@
 package com.authord.mkdocs.ui.intellij
 
+import com.authord.mkdocs.runtime.CommandResult
 import com.authord.mkdocs.runtime.CommandRunner
 import com.authord.mkdocs.runtime.ProjectManagedUvExecutableProvider
 import com.authord.mkdocs.runtime.UvExecutableProvider
@@ -18,6 +19,12 @@ class MkDocsProjectCreator(
     private val commandRunner: CommandRunner = ProcessBuilderCommandRunner(),
     private val uvExecutableProvider: UvExecutableProvider = ProjectManagedUvExecutableProvider(),
 ) {
+    private val runtimeVenvDirName: String = ".mkdocs-plugin-venv"
+    private val uvInstallUrl: String = "https://docs.astral.sh/uv/getting-started/installation/"
+    private val defaultDocsDirName: String = "docs"
+    private val defaultIndexRelativePath: String = "index.md"
+    private val defaultWelcomeTitle: String = "Welcome to Authord"
+
     fun createProject(projectRootPath: String, requestedProjectName: String): MkDocsProjectCreationResult {
         val projectRoot = runCatching { Path.of(projectRootPath).toAbsolutePath().normalize() }
             .getOrElse {
@@ -32,36 +39,65 @@ class MkDocsProjectCreator(
                 message = "Project root does not exist: $projectRoot",
             )
         }
+        val projectName = requestedProjectName.trim()
+        if (projectName.isBlank()) {
+            return MkDocsProjectCreationResult(
+                success = false,
+                message = AuthordUiBundle.message("setup.error.projectNameRequired"),
+            )
+        }
 
         val uvResolution = uvExecutableProvider.resolve(projectRoot.toString())
         if (!uvResolution.success) {
             return MkDocsProjectCreationResult(
                 success = false,
-                message = uvResolution.errorMessage.ifBlank { "Unable to resolve uv executable." },
+                message = uvMissingMessage(uvResolution.errorMessage),
             )
         }
+        val uvExecutable = uvResolution.executablePath
+        val runtimePath = projectRoot.resolve(runtimeVenvDirName).toString()
 
-        val command = listOf(uvResolution.executablePath, "run", "mkdocs", "new", ".")
-        val commandResult = commandRunner.run(command, projectRoot.toString())
-        if (commandResult.exitCode != 0) {
-            val details = commandResult.stderr.ifBlank { commandResult.stdout }
+        val venvCommand = listOf(uvExecutable, "venv", runtimePath)
+        val venvResult = commandRunner.run(venvCommand, projectRoot.toString())
+        if (venvResult.exitCode != 0 && !isExistingRuntimeError(venvResult)) {
+            val details = venvResult.stderr.ifBlank { venvResult.stdout }
             return MkDocsProjectCreationResult(
                 success = false,
-                message = details.ifBlank { "Failed to create project." },
+                message = if (looksLikeUvMissing(details)) {
+                    uvMissingMessage(details)
+                } else {
+                    details.ifBlank { "Failed to create project runtime." }
+                },
             )
         }
 
-        val configPath = resolveConfigPath(projectRoot)
-            ?: return MkDocsProjectCreationResult(
+        val installMkdocsCommand = listOf(uvExecutable, "pip", "install", "--python", runtimePath, "mkdocs")
+        val installMkdocsResult = commandRunner.run(installMkdocsCommand, projectRoot.toString())
+        if (installMkdocsResult.exitCode != 0) {
+            val details = installMkdocsResult.stderr.ifBlank { installMkdocsResult.stdout }
+            return MkDocsProjectCreationResult(
                 success = false,
-                message = "Project was created but configuration file was not found.",
+                message = if (looksLikeUvMissing(details)) {
+                    uvMissingMessage(details)
+                } else {
+                    details.ifBlank { "Failed to install mkdocs into project runtime." }
+                },
             )
-        val resolvedSiteName = resolveSiteName(requestedProjectName, projectRoot)
-        val configWriteResult = writeBaseConfig(configPath, resolvedSiteName)
+        }
+
+        val configPath = resolveConfigPath(projectRoot) ?: projectRoot.resolve("mkdocs.yml")
+        val configWriteResult = writeBaseConfig(configPath, projectName)
         if (!configWriteResult) {
             return MkDocsProjectCreationResult(
                 success = false,
                 message = "Project was created but configuration file could not be updated.",
+            )
+        }
+        val welcomeWriteResult = writeWelcomeIndex(projectRoot)
+        if (!welcomeWriteResult) {
+            return MkDocsProjectCreationResult(
+                success = false,
+                message = "Project was created but docs index could not be updated.",
             )
         }
 
@@ -86,26 +122,54 @@ class MkDocsProjectCreator(
     private fun writeBaseConfig(configPath: Path, siteName: String): Boolean {
         val configContent = buildString {
             append("site_name: '${escapeSingleQuotedYaml(siteName)}'\n")
-            append("docs_dir: docs\n")
+            append("docs_dir: $defaultDocsDirName\n")
+            append("nav:\n")
+            append("  - '$defaultWelcomeTitle': $defaultIndexRelativePath\n")
         }
         return runCatching { Files.writeString(configPath, configContent) }.isSuccess
     }
 
-    private fun resolveSiteName(requestedProjectName: String, projectRoot: Path): String {
-        val requested = requestedProjectName.trim()
-        if (requested.isNotBlank()) {
-            return requested
+    private fun writeWelcomeIndex(projectRoot: Path): Boolean {
+        val docsDirectory = projectRoot.resolve(defaultDocsDirName)
+        val indexPath = docsDirectory.resolve(defaultIndexRelativePath)
+        val content = buildString {
+            append("# ")
+            append(defaultWelcomeTitle)
+            append("\n\n")
+            append("Start writing your documentation here.\n")
         }
-
-        val fallbackFromRoot = projectRoot.fileName?.toString()
-            ?.replace('-', ' ')
-            ?.replace('_', ' ')
-            ?.trim()
-            .orEmpty()
-        return fallbackFromRoot.ifBlank { "My Docs" }
+        return runCatching {
+            Files.createDirectories(docsDirectory)
+            Files.writeString(indexPath, content)
+        }.isSuccess
     }
 
     private fun escapeSingleQuotedYaml(value: String): String {
         return value.replace("'", "''")
+    }
+
+    private fun isExistingRuntimeError(result: CommandResult): Boolean {
+        val normalized = buildString {
+            append(result.stderr)
+            append('\n')
+            append(result.stdout)
+        }.lowercase()
+        return "virtual environment already exists" in normalized || "already exists at" in normalized
+    }
+
+    private fun looksLikeUvMissing(details: String): Boolean {
+        val normalized = details.lowercase()
+        return (("uv" in normalized) && ("not found" in normalized || "no such file or directory" in normalized)) ||
+            "failed to spawn: `uv`" in normalized
+    }
+
+    private fun uvMissingMessage(details: String): String {
+        val resolvedDetails = details.trim().ifBlank { "Unable to resolve uv executable." }
+        return buildString {
+            append("uv is required to create an Authord project. Install uv and retry: ")
+            append(uvInstallUrl)
+            append(". Details: ")
+            append(resolvedDetails)
+        }
     }
 }

@@ -32,16 +32,10 @@ private class StaticUvProvider(
 
 class MkDocsProjectCreatorTest {
     @Test
-    fun `createProject resolves uv and runs mkdocs new in project root`() {
+    fun `createProject resolves uv writes authord scaffold and nav in project root`() {
         val projectRoot = createTempDirectory(prefix = "mkdocs-project-creator-")
         try {
-            val runner = RecordingCommandRunner { _, workingDir ->
-                Files.writeString(
-                    java.nio.file.Path.of(workingDir).resolve("mkdocs.yml"),
-                    "site_name: 'My Docs'\n",
-                )
-                CommandResult(exitCode = 0)
-            }
+            val runner = RecordingCommandRunner { _, _ -> CommandResult(exitCode = 0) }
             val creator = MkDocsProjectCreator(
                 commandRunner = runner,
                 uvExecutableProvider = StaticUvProvider(UvExecutableResult(success = true, executablePath = "/tmp/uv")),
@@ -50,20 +44,32 @@ class MkDocsProjectCreatorTest {
             val result = creator.createProject(projectRoot.toString(), "demo-site")
 
             assertTrue(result.success)
-            assertEquals(1, runner.commands.size)
-            assertEquals(listOf("/tmp/uv", "run", "mkdocs", "new", "."), runner.commands.single())
-            assertEquals(projectRoot.toString(), runner.workingDirs.single())
+            val runtimePath = projectRoot.resolve(".mkdocs-plugin-venv").toString()
+            assertEquals(
+                listOf(
+                    listOf("/tmp/uv", "venv", runtimePath),
+                    listOf("/tmp/uv", "pip", "install", "--python", runtimePath, "mkdocs"),
+                ),
+                runner.commands,
+            )
+            assertEquals(listOf(projectRoot.toString(), projectRoot.toString()), runner.workingDirs)
             val config = Files.readString(projectRoot.resolve("mkdocs.yml"))
             assertTrue(config.contains("site_name: 'demo-site'"))
             assertTrue(config.contains("docs_dir: docs"))
+            assertTrue(config.contains("nav:"))
+            assertTrue(config.contains("Welcome to Authord"))
+
+            val index = Files.readString(projectRoot.resolve("docs").resolve("index.md"))
+            assertTrue(index.contains("Welcome to Authord"))
+            assertFalse(index.contains("Welcome to MkDocs"))
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
     }
 
     @Test
-    fun `createProject falls back to sensible site name when request is blank`() {
-        val projectRoot = createTempDirectory(prefix = "mkdocs-project-creator-fallback-name-")
+    fun `createProject fails when project name is blank`() {
+        val projectRoot = createTempDirectory(prefix = "mkdocs-project-creator-blank-name-")
         try {
             val runner = RecordingCommandRunner { _, workingDir ->
                 Files.writeString(
@@ -79,14 +85,9 @@ class MkDocsProjectCreatorTest {
 
             val result = creator.createProject(projectRoot.toString(), "   ")
 
-            assertTrue(result.success)
-            val config = Files.readString(projectRoot.resolve("mkdocs.yml"))
-            val expectedFallbackSiteName = projectRoot.fileName.toString()
-                .replace('-', ' ')
-                .replace('_', ' ')
-                .trim()
-            assertTrue(config.contains("site_name: '${expectedFallbackSiteName}'"))
-            assertTrue(config.contains("docs_dir: docs"))
+            assertFalse(result.success)
+            assertTrue(result.message.contains("Project name is required"))
+            assertTrue(runner.commands.isEmpty())
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -108,6 +109,7 @@ class MkDocsProjectCreatorTest {
 
             assertFalse(result.success)
             assertTrue(result.message.contains("uv not found"))
+            assertTrue(result.message.contains("Install uv"))
             assertTrue(runner.commands.isEmpty())
         } finally {
             projectRoot.toFile().deleteRecursively()

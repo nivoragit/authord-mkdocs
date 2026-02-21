@@ -385,6 +385,7 @@ class MkdocsToolWindowFactory(
 
                 refreshProjectRoot(projectPath)
                 mkdocsConfigCacheInvalidator(project)
+                openDefaultIndexInEditor(project, projectPath)
                 enterTreeviewMode(project, panel, topicTreePanel)
                 startRuntimeForConfirmedConfig(project, runtimeService, PreviewStartTrigger.TOOL_WINDOW)
             }
@@ -1040,6 +1041,7 @@ class MkdocsToolWindowFactory(
 
                 refreshProjectRoot(projectPath)
                 mkdocsConfigCacheInvalidator(project)
+                openDefaultIndexInEditor(project, projectPath)
                 enterPreviewMode(
                     project = project,
                     runtimeService = runtimeService,
@@ -1076,6 +1078,27 @@ class MkdocsToolWindowFactory(
             val root = Path.of(projectPath).toAbsolutePath().normalize().toFile()
             val rootVirtualFile = LocalFileSystem.getInstance().refreshAndFindFileByIoFile(root)
             rootVirtualFile?.refresh(true, true)
+        }
+    }
+
+    private fun openDefaultIndexInEditor(project: Project, projectPath: String) {
+        if (ApplicationManager.getApplication() == null) {
+            return
+        }
+        val indexPath = runCatching {
+            Path.of(projectPath)
+                .toAbsolutePath()
+                .normalize()
+                .resolve("docs")
+                .resolve("index.md")
+                .toString()
+        }.getOrNull() ?: return
+        val fileSystem = LocalFileSystem.getInstance()
+        val virtualFile = fileSystem.findFileByPath(indexPath)
+            ?: fileSystem.refreshAndFindFileByPath(indexPath)
+            ?: return
+        runCatching {
+            FileEditorManager.getInstance(project).openFile(virtualFile, true)
         }
     }
 
@@ -1835,7 +1858,7 @@ private class DeferredPreviewContent(
 
     override fun supportsPreviewEditorSync(): Boolean = syncCapable
 
-    override fun prefersSetupPanel(): Boolean = true
+    override fun prefersSetupPanel(): Boolean = false
 
     override fun loadUrl(url: String) {
         ensureDelegateAttached().loadUrl(url)
@@ -1995,7 +2018,7 @@ private class JcefPreviewContent(
             val decoded = runCatching {
                 URLDecoder.decode(payload.orEmpty(), StandardCharsets.UTF_8)
             }.getOrDefault(payload.orEmpty())
-            val projectName = decoded.trim().ifBlank { "my-project" }
+            val projectName = decoded.trim()
             ApplicationManager.getApplication().invokeLater(
                 { handler(projectName) },
                 ModalityState.any(),
