@@ -14,11 +14,12 @@ import com.intellij.ui.JBSplitter
 import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBPanel
 import com.intellij.ui.components.JBScrollPane
-import com.intellij.util.ui.JBFont
 import com.intellij.util.ui.JBUI
 import java.awt.BorderLayout
 import java.awt.Color
 import java.awt.Component
+import java.awt.Dimension
+import java.awt.Font
 import java.awt.FlowLayout
 import java.awt.GraphicsEnvironment
 import java.awt.datatransfer.DataFlavor
@@ -35,6 +36,7 @@ import javax.swing.JComponent
 import javax.swing.JMenuItem
 import javax.swing.JPanel
 import javax.swing.JPopupMenu
+import javax.swing.SwingConstants
 import javax.swing.JTree
 import javax.swing.TransferHandler
 import javax.swing.tree.DefaultMutableTreeNode
@@ -44,6 +46,9 @@ import javax.swing.tree.TreePath
 import javax.swing.tree.TreeSelectionModel
 
 private const val ROOT_NODE_ID: String = "root"
+private const val TOC_HEADER_FONT_FAMILY: String = "Inter"
+private const val TOC_HEADER_FONT_SIZE: Int = 13
+private const val TOC_HEADER_LINE_HEIGHT: Int = 17
 
 private fun uiMessage(key: String, vararg params: Any): String = AuthordUiBundle.message(key, *params)
 
@@ -296,7 +301,26 @@ internal class TopicTreeWorkspacePanel(
         }
 
         val leftHeader = JBPanel<JBPanel<*>>(FlowLayout(FlowLayout.LEFT, 6, 0)).apply {
-            add(JBLabel(title).apply { font = JBFont.label().deriveFont(JBFont.label().size + 1f) })
+            add(
+                JBLabel(title).apply {
+                    border = JBUI.Borders.empty(0, 12)
+                    iconTextGap = 4
+                    font = Font(TOC_HEADER_FONT_FAMILY, Font.PLAIN, TOC_HEADER_FONT_SIZE)
+                    foreground = Color(0xD1D3D9)
+                    background = Color(0x191A1C)
+                    horizontalAlignment = SwingConstants.LEADING
+                    verticalAlignment = SwingConstants.CENTER
+                    horizontalTextPosition = SwingConstants.TRAILING
+                    verticalTextPosition = SwingConstants.CENTER
+                    isEnabled = false
+                    isFocusable = true
+                    isOpaque = false
+                    isDoubleBuffered = false
+                    preferredSize = Dimension(preferredSize.width, TOC_HEADER_LINE_HEIGHT)
+                    minimumSize = Dimension(minimumSize.width, TOC_HEADER_LINE_HEIGHT)
+                    maximumSize = Dimension(maximumSize.width, TOC_HEADER_LINE_HEIGHT)
+                },
+            )
         }
 
         val header = JBPanel<JBPanel<*>>(BorderLayout()).apply {
@@ -437,7 +461,7 @@ internal class TopicTreeWorkspacePanel(
             treeId = activeTreeId(),
             targetNodeId = target.nodeId,
             title = title,
-            orderIndex = targetNode.childCount,
+            orderIndex = toActualChildOrderIndex(target.nodeId, targetNode.childCount),
             sourcePath = sourcePath,
             childNodeId = nodeId,
         )
@@ -564,7 +588,7 @@ internal class TopicTreeWorkspacePanel(
             treeId = activeTreeId(),
             nodeId = draggedNodeId,
             newParentNodeId = newParentNodeId,
-            newOrderIndex = newOrderIndex.coerceAtLeast(0),
+            newOrderIndex = toActualChildOrderIndex(newParentNodeId, newOrderIndex.coerceAtLeast(0)),
         )
 
         return when (result.result) {
@@ -1108,19 +1132,65 @@ internal class TopicTreeWorkspacePanel(
         node: TopicNavNode,
         parentNodeId: String,
     ): DefaultMutableTreeNode {
+        val directPath = normalizeOptionalPath(node.path)
+        val hiddenSectionIndexPaths = hiddenSectionIndexPaths(node)
+        val representativeSectionPath = hiddenSectionIndexPaths.firstOrNull()
         val treeNode = DefaultMutableTreeNode(
             TopicTreeNodeView(
                 nodeId = node.nodeId,
                 title = node.title,
                 parentNodeId = parentNodeId,
-                path = node.path,
+                path = directPath ?: representativeSectionPath,
                 externalUrl = node.externalUrl,
             ),
         )
         node.children.forEach { child ->
+            val childPath = normalizeOptionalPath(child.path)
+            if (directPath == null && childPath != null && hiddenSectionIndexPaths.contains(childPath)) {
+                return@forEach
+            }
             treeNode.add(toTreeNode(child, node.nodeId))
         }
         return treeNode
+    }
+
+    private fun hiddenSectionIndexPaths(node: TopicNavNode): Set<String> {
+        if (node.path != null) {
+            return emptySet()
+        }
+        return node.children
+            .mapNotNull { child -> normalizeOptionalPath(child.path) }
+            .filter(::isIndexMarkdownPath)
+            .toSet()
+    }
+
+    private fun toActualChildOrderIndex(parentNodeId: String, uiChildIndex: Int): Int {
+        val parentStateNode = findStateNodeById(parentNodeId) ?: return uiChildIndex
+        if (parentStateNode.path != null) {
+            return uiChildIndex
+        }
+        val hiddenIndexChildrenCount = parentStateNode.children.count { child ->
+            val childPath = normalizeOptionalPath(child.path) ?: return@count false
+            isIndexMarkdownPath(childPath)
+        }
+        return uiChildIndex + hiddenIndexChildrenCount
+    }
+
+    private fun findStateNodeById(nodeId: String): TopicNavNode? {
+        fun visit(nodes: List<TopicNavNode>): TopicNavNode? {
+            nodes.forEach { node ->
+                if (node.nodeId == nodeId) {
+                    return node
+                }
+                val nested = visit(node.children)
+                if (nested != null) {
+                    return nested
+                }
+            }
+            return null
+        }
+
+        return visit(currentState?.nodes.orEmpty())
     }
 
     internal fun tooltipTextsForTest(): List<String> {
@@ -1157,7 +1227,7 @@ internal class TopicTreeWorkspacePanel(
     internal fun headerActionVisibilityForTest(): Map<String, Boolean> {
         return mapOf(
             "Collapse All" to (collapseAllButton.isShowing || collapseAllButton.isVisible),
-            "Root" to (addRootTopicButton.isShowing || addRootTopicButton.isVisible),
+            "New Topic" to (addRootTopicButton.isShowing || addRootTopicButton.isVisible),
         )
     }
 
@@ -1167,7 +1237,7 @@ internal class TopicTreeWorkspacePanel(
         refreshActionEnablement()
         val button = when (label) {
             "Collapse All" -> collapseAllButton
-            "Root" -> addRootTopicButton
+            "New Topic" -> addRootTopicButton
             else -> return false
         }
         if (!button.isEnabled) {
@@ -1186,6 +1256,13 @@ internal class TopicTreeWorkspacePanel(
     internal fun selectedTreeNodeIdForTest(): String? {
         val selectedNode = tree.selectionPath?.lastPathComponent as? DefaultMutableTreeNode ?: return null
         return (selectedNode.userObject as? TopicTreeNodeView)?.nodeId
+    }
+
+    internal fun childNodeIdsForTest(parentNodeId: String): List<String> {
+        val parent = findNode(parentNodeId) ?: return emptyList()
+        return (0 until parent.childCount)
+            .mapNotNull { index -> parent.getChildAt(index) as? DefaultMutableTreeNode }
+            .mapNotNull { child -> (child.userObject as? TopicTreeNodeView)?.nodeId }
     }
 
     internal fun triggerTocContextActionForTest(label: String): Boolean {

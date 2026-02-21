@@ -16,3 +16,16 @@ internal fun showAuthordToolWindow(project: Project) {
     }
     toolWindow.activate(null)
 }
+
+internal fun toggleAuthordToolWindow(project: Project) {
+    val manager = ToolWindowManager.getInstance(project)
+    val toolWindow = manager.getToolWindow(AUTHORD_TREEVIEW_TOOL_WINDOW_ID)
+        ?: manager.getToolWindow(AUTHORD_LEGACY_TOOL_WINDOW_ID)
+        ?: return
+    if (toolWindow.isVisible) {
+        toolWindow.hide(null)
+        return
+    }
+    toolWindow.show(null)
+    toolWindow.activate(null)
+}

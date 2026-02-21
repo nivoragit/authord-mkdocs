@@ -313,7 +313,57 @@ class TopicTreeFileMutationDerivationTest {
             ),
             docsGateway.calls.toSet(),
         )
+        assertEquals(listOf("heading:guides/index.md=Guides"), docsGateway.headingUpdates)
         assertTrue(configGateway.writes.isEmpty())
+    }
+
+    @Test
+    fun `rename section in nav mode updates section index heading without renaming file`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(
+                        nodeId = "guides",
+                        title = "Guides",
+                        children = listOf(
+                            TopicNavNode(
+                                nodeId = "guides__page",
+                                title = "Guides",
+                                path = "guides/index.md",
+                            ),
+                            TopicNavNode(
+                                nodeId = "guides-install",
+                                title = "Install",
+                                path = "guides/install.md",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-rename-nav-section",
+                    instance = instance,
+                    command = RenameTopicNodeCommand(
+                        commandId = "cmd-rename-nav-section",
+                        treeId = "default",
+                        nodeId = "guides",
+                        newTitle = "How To",
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertTrue(docsGateway.calls.isEmpty())
+        assertEquals(listOf("heading:guides/index.md=How To"), docsGateway.headingUpdates)
+        assertEquals("How To", configGateway.writes.last().nav.single().title)
     }
 
     @Test

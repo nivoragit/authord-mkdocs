@@ -111,13 +111,13 @@ private class AuthordMarkdownEditorWithPreview(
                 }
             },
             object : DumbAwareAction(
-                "Open Authord Treeview",
-                "Show the Authord Treeview tool window",
+                "Toggle Authord Treeview",
+                "Show or hide the Authord Treeview tool window",
                 AllIcons.Nodes.Folder,
             ) {
                 override fun actionPerformed(event: AnActionEvent) {
                     val project = event.project ?: textEditor.editor.project ?: return
-                    showAuthordToolWindow(project)
+                    toggleAuthordToolWindow(project)
                 }
             },
         )

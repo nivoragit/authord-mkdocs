@@ -122,7 +122,7 @@ class TopicTreeSyncOrchestratorService(
             }
         }
 
-        when (val titleSync = synchronizeMarkdownHeadingForCommand(transaction, mutation.document)) {
+        when (val titleSync = synchronizeMarkdownHeadingForCommand(transaction, config, mutation.document)) {
             is TopicGatewayResult.Success -> Unit
             is TopicGatewayResult.Failure -> {
                 val compensationSucceeded = runCompensationStack(compensationStack)
@@ -1109,19 +1109,30 @@ class TopicTreeSyncOrchestratorService(
 
     private fun synchronizeMarkdownHeadingForCommand(
         transaction: TopicSyncTransaction,
-        document: MkDocsConfigDocument,
+        beforeMutation: MkDocsConfigDocument,
+        afterMutation: MkDocsConfigDocument,
     ): TopicGatewayResult<String> {
         val renameCommand = transaction.command as? RenameTopicNodeCommand
             ?: return TopicGatewayResult.Success("")
-        val resolved = resolveNodeContext(document.nav, renameCommand.nodeId)?.node
+        val resolved = resolveNodeContext(afterMutation.nav, renameCommand.nodeId)?.node ?: run {
+            val nodeBeforeMutation = resolveNodeContext(beforeMutation.nav, renameCommand.nodeId)?.node
+                ?: return TopicGatewayResult.Success("")
+            resolveNodeContext(afterMutation.nav, nodeBeforeMutation.nodeId)?.node
+        }
             ?: return TopicGatewayResult.Success("")
-        val normalizedPath = normalizePath(resolved.path)
-            ?: return TopicGatewayResult.Success("")
+        val normalizedPath = resolveHeadingTargetPath(resolved) ?: return TopicGatewayResult.Success("")
         return docsFileGateway.upsertMarkdownTitleHeading(
             instance = transaction.instance,
             relativePath = normalizedPath,
             title = resolved.title,
         )
+    }
+
+    private fun resolveHeadingTargetPath(node: TopicNavNode): String? {
+        normalizePath(node.path)?.let { return it }
+        val subtreePaths = collectPaths(node).mapNotNull(::normalizePath)
+        val indexPath = subtreePaths.firstOrNull(::isIndexMarkdownPath)
+        return indexPath ?: subtreePaths.firstOrNull()
     }
 
     private fun initialContentForCreate(document: MkDocsConfigDocument, sourcePath: String): String {

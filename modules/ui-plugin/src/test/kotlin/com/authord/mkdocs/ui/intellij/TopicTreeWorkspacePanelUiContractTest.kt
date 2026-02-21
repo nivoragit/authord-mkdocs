@@ -25,7 +25,7 @@ class TopicTreeWorkspacePanelUiContractTest {
 
         listOf(
             "Delete",
-            "Root",
+            "New Topic",
             "Child",
             "Collapse All",
         ).forEach { expected ->
@@ -58,7 +58,7 @@ class TopicTreeWorkspacePanelUiContractTest {
 
         val headerVisibility = panel.headerActionVisibilityForTest()
         assertTrue(headerVisibility.getValue("Collapse All"))
-        assertTrue(headerVisibility.getValue("Root"))
+        assertTrue(headerVisibility.getValue("New Topic"))
     }
 
     @Test
@@ -138,7 +138,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         )
         panel.render(sampleState())
 
-        val triggered = panel.triggerHeaderActionForTest("Root")
+        val triggered = panel.triggerHeaderActionForTest("New Topic")
 
         assertTrue(triggered)
         val command = uiService.dispatched.filterIsInstance<AddTopicNodeCommand>().last()
@@ -160,7 +160,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         )
         panel.render(sampleState())
 
-        val triggered = panel.triggerHeaderActionForTest("Root")
+        val triggered = panel.triggerHeaderActionForTest("New Topic")
 
         assertTrue(triggered)
         val command = uiService.dispatched.filterIsInstance<AddTopicNodeCommand>().last()
@@ -179,7 +179,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         )
         panel.render(sampleState())
 
-        val triggered = panel.triggerHeaderActionForTest("Root")
+        val triggered = panel.triggerHeaderActionForTest("New Topic")
 
         assertTrue(triggered)
         assertTrue(uiService.dispatched.filterIsInstance<AddTopicNodeCommand>().isEmpty())
@@ -400,6 +400,16 @@ class TopicTreeWorkspacePanelUiContractTest {
         val resolved = panel.resolveFilePath(folderView)
 
         assertEquals("/tmp/project/docs/install/index.md", resolved)
+    }
+
+    @Test
+    fun `fallback section index node is hidden from toc children`() {
+        val panel = panelWithDefaults()
+        panel.render(sampleFallbackSectionState())
+
+        val childNodeIds = panel.childNodeIdsForTest("section:install")
+
+        assertEquals(listOf("page:install/a1.md"), childNodeIds)
     }
 
     private fun sampleFallbackSectionState(): StartupTreeState {
