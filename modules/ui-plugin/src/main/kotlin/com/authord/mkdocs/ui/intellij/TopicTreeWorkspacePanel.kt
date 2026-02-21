@@ -21,7 +21,11 @@ import java.awt.Component
 import java.awt.Dimension
 import java.awt.Font
 import java.awt.FlowLayout
+import java.awt.Graphics
+import java.awt.Graphics2D
 import java.awt.GraphicsEnvironment
+import java.awt.Point
+import java.awt.RenderingHints
 import java.awt.datatransfer.DataFlavor
 import java.awt.datatransfer.Transferable
 import java.awt.event.MouseAdapter
@@ -37,7 +41,9 @@ import javax.swing.JMenuItem
 import javax.swing.JPanel
 import javax.swing.JPopupMenu
 import javax.swing.SwingConstants
+import javax.swing.JToolTip
 import javax.swing.JTree
+import javax.swing.ToolTipManager
 import javax.swing.TransferHandler
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeCellRenderer
@@ -49,6 +55,10 @@ private const val ROOT_NODE_ID: String = "root"
 private const val TOC_HEADER_FONT_FAMILY: String = "Inter"
 private const val TOC_HEADER_FONT_SIZE: Int = 13
 private const val TOC_HEADER_LINE_HEIGHT: Int = 17
+private val TOC_TOOLTIP_BACKGROUND: Color = Color(0x343840)
+private val TOC_TOOLTIP_BORDER: Color = Color(0x0E1014)
+private val TOC_TOOLTIP_FOREGROUND: Color = Color(0xDFE1E5)
+private const val TOC_TOOLTIP_ARC: Int = 12
 
 private fun uiMessage(key: String, vararg params: Any): String = AuthordUiBundle.message(key, *params)
 
@@ -72,14 +82,7 @@ internal data class TopicTreeNodeView(
     val isMutable: Boolean
         get() = kind == TopicTreeNodeKind.NAV
 
-    override fun toString(): String {
-        return when {
-            kind == TopicTreeNodeKind.ROOT -> title
-            path != null -> "$title ($path)"
-            externalUrl != null -> "$title ($externalUrl)"
-            else -> title
-        }
-    }
+    override fun toString(): String = title
 
     companion object {
         fun root(): TopicTreeNodeView = TopicTreeNodeView(
@@ -134,7 +137,37 @@ internal class TopicTreeWorkspacePanel(
 ) {
     private val root = DefaultMutableTreeNode(TopicTreeNodeView.root())
     private val model = DefaultTreeModel(root)
-    private val tree = JTree(model)
+    private val tree = object : JTree(model) {
+        override fun getToolTipText(event: MouseEvent?): String? {
+            val mouseEvent = event ?: return null
+            val treeNode = getPathForLocation(mouseEvent.x, mouseEvent.y)
+                ?.lastPathComponent as? DefaultMutableTreeNode
+                ?: return null
+            val view = treeNode.userObject as? TopicTreeNodeView ?: return null
+            if (!view.isNav) {
+                return null
+            }
+            val relativePath = resolveRelativePathForOpen(view, treeNode) ?: return null
+            val normalized = normalizeOptionalPath(relativePath) ?: return null
+            return normalized.substringAfterLast('/').takeIf { it.isNotBlank() }
+        }
+
+        override fun getToolTipLocation(event: MouseEvent?): Point? {
+            val mouseEvent = event ?: return null
+            val row = getRowForLocation(mouseEvent.x, mouseEvent.y)
+            if (row < 0) {
+                return null
+            }
+            val bounds = getRowBounds(row) ?: return null
+            return Point(bounds.x + JBUI.scale(14), bounds.y + bounds.height + JBUI.scale(6))
+        }
+
+        override fun createToolTip(): JToolTip {
+            return TocTreeFileNameToolTip().also { tooltip ->
+                tooltip.component = this
+            }
+        }
+    }
     private val treeSelectionBandColor = JBColor(Color(0xD7E8FF), Color(0x304D80))
     private val status = JBLabel("")
     private lateinit var collapseAllButton: JButton
@@ -157,6 +190,7 @@ internal class TopicTreeWorkspacePanel(
     }
 
     init {
+        ToolTipManager.sharedInstance().registerComponent(tree)
         tree.isRootVisible = false
         tree.showsRootHandles = true
         tree.toggleClickCount = 0
@@ -1294,6 +1328,30 @@ internal class TopicTreeWorkspacePanel(
             return null
         }
         return visit(root)
+    }
+}
+
+private class TocTreeFileNameToolTip : JToolTip() {
+    init {
+        isOpaque = false
+        border = JBUI.Borders.empty(10, 18)
+        font = Font(TOC_HEADER_FONT_FAMILY, Font.PLAIN, TOC_HEADER_FONT_SIZE + 1)
+        foreground = TOC_TOOLTIP_FOREGROUND
+        background = TOC_TOOLTIP_BACKGROUND
+    }
+
+    override fun paintComponent(graphics: Graphics) {
+        val g2 = graphics.create() as Graphics2D
+        try {
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+            g2.color = background
+            g2.fillRoundRect(0, 0, width - 1, height - 1, TOC_TOOLTIP_ARC, TOC_TOOLTIP_ARC)
+            g2.color = TOC_TOOLTIP_BORDER
+            g2.drawRoundRect(0, 0, width - 1, height - 1, TOC_TOOLTIP_ARC, TOC_TOOLTIP_ARC)
+        } finally {
+            g2.dispose()
+        }
+        super.paintComponent(graphics)
     }
 }
 
