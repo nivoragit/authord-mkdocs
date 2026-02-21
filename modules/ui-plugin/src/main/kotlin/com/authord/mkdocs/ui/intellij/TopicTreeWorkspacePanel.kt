@@ -59,6 +59,23 @@ private val TOC_TOOLTIP_BACKGROUND: Color = Color(0x343840)
 private val TOC_TOOLTIP_BORDER: Color = Color(0x0E1014)
 private val TOC_TOOLTIP_FOREGROUND: Color = Color(0xDFE1E5)
 private const val TOC_TOOLTIP_ARC: Int = 12
+private val TOC_TREE_BACKGROUND: Color = JBColor.namedColor("ToolWindow.background", Color(0x191A1C))
+private val TOC_TREE_SELECTION_BACKGROUND_ACTIVE: Color = JBColor.namedColor(
+    "Tree.selectionBackground",
+    JBColor(Color(0xD7E8FF), Color(0x2E436E)),
+)
+private val TOC_TREE_SELECTION_FOREGROUND_ACTIVE: Color = JBColor.namedColor(
+    "Tree.selectionForeground",
+    JBColor(Color(0x1E1F22), Color(0xDFE1E5)),
+)
+private val TOC_TREE_SELECTION_BACKGROUND_INACTIVE: Color = JBColor.namedColor(
+    "Tree.selectionInactiveBackground",
+    JBColor(Color(0xE7EEF7), Color(0x393B40)),
+)
+private val TOC_TREE_SELECTION_FOREGROUND_INACTIVE: Color = JBColor.namedColor(
+    "Tree.selectionInactiveForeground",
+    JBColor(Color(0x1E1F22), Color(0xDFE1E5)),
+)
 
 private fun uiMessage(key: String, vararg params: Any): String = AuthordUiBundle.message(key, *params)
 
@@ -168,7 +185,6 @@ internal class TopicTreeWorkspacePanel(
             }
         }
     }
-    private val treeSelectionBandColor = JBColor(Color(0xD7E8FF), Color(0x304D80))
     private val status = JBLabel("")
     private lateinit var collapseAllButton: JButton
     private lateinit var addRootTopicButton: JButton
@@ -195,6 +211,7 @@ internal class TopicTreeWorkspacePanel(
         tree.showsRootHandles = true
         tree.toggleClickCount = 0
         tree.selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
+        tree.background = TOC_TREE_BACKGROUND
         tree.cellRenderer = object : DefaultTreeCellRenderer() {
             override fun getTreeCellRendererComponent(
                 tree: JTree,
@@ -206,13 +223,29 @@ internal class TopicTreeWorkspacePanel(
                 hasFocus: Boolean,
             ): Component {
                 val component = super.getTreeCellRendererComponent(tree, value, selected, expanded, leaf, row, hasFocus)
+                val isActiveSelection = tree.isFocusOwner
+                val selectionBackground = if (isActiveSelection) {
+                    TOC_TREE_SELECTION_BACKGROUND_ACTIVE
+                } else {
+                    TOC_TREE_SELECTION_BACKGROUND_INACTIVE
+                }
+                val selectionForeground = if (isActiveSelection) {
+                    TOC_TREE_SELECTION_FOREGROUND_ACTIVE
+                } else {
+                    TOC_TREE_SELECTION_FOREGROUND_INACTIVE
+                }
                 icon = null
                 openIcon = null
                 closedIcon = null
                 leafIcon = null
-                backgroundSelectionColor = treeSelectionBandColor
+                backgroundSelectionColor = selectionBackground
+                textSelectionColor = selectionForeground
+                backgroundNonSelectionColor = TOC_TREE_BACKGROUND
+                if (selected) {
+                    foreground = selectionForeground
+                }
                 border = if (selected) {
-                    JBUI.Borders.customLine(treeSelectionBandColor, 0, 4, 0, 0)
+                    JBUI.Borders.customLine(selectionBackground, 0, 4, 0, 0)
                 } else {
                     JBUI.Borders.emptyLeft(4)
                 }
