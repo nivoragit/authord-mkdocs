@@ -168,6 +168,8 @@ class PluginRuntimeIntegrationService(
     private var topicMutationConfigVerificationPending: Boolean = false
     @Volatile
     private var lastVerifiedTopicMutationConfigFingerprint: String? = null
+    @Volatile
+    private var navPresentFromParsedConfigState: Boolean = false
 
     init {
         Disposer.register(this, previewRuntimeService)
@@ -465,18 +467,26 @@ class PluginRuntimeIntegrationService(
     /**
      * Signals that a filesystem mutation affecting docs/nav has been committed.
      *
-     * In `--livereload --dirty` mode this proactively triggers a watcher nudge so route publication
-     * catches up before navigation intent requests arrive.
+     * The latest parsed config nav-state is supplied by topic-tree UI flows and persisted so each
+     * mutation can decide whether a full preview restart is required.
      *
      * Each invocation is treated as a mutation batch boundary and rebuilds the verified preview
      * URL cache from disk before any follow-up navigation.
      */
-    fun onTopicMutationCommitted(): Boolean {
+    fun onTopicMutationCommitted(navPresent: Boolean = navPresentFromParsedConfigState): Boolean {
+        navPresentFromParsedConfigState = navPresent
         val browserService = runCatching {
             project.getService(MkDocsPreviewBrowserService::class.java)
         }.getOrNull()
         browserService?.resetLastLoadedUrl()
         topicMutationConfigVerificationPending = true
+
+        if (isRuntimeRunning() && navPresentFromParsedConfigState) {
+            val restarted = restartPreview(PreviewStartTrigger.ACTION)
+            rebuildVerifiedPreviewRouteCacheFromDisk()
+            return restarted.success
+        }
+
         rebuildVerifiedPreviewRouteCacheFromDisk()
         if (!isRuntimeRunning() || !usesDirtyLivereloadServeMode()) {
             return false
@@ -874,6 +884,7 @@ class PluginRuntimeIntegrationService(
     private fun clearTopicMutationConfigVerification() {
         topicMutationConfigVerificationPending = false
         lastVerifiedTopicMutationConfigFingerprint = null
+        navPresentFromParsedConfigState = false
     }
 
     private fun resolvePreviewRouteEntry(

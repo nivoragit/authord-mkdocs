@@ -213,6 +213,7 @@ internal class TopicTreeWorkspacePanel(
     private lateinit var tocRemoveMenuItem: JMenuItem
     private val tocContextMenu = JPopupMenu()
     private var currentState: StartupTreeState? = null
+    private var navPresentFromParsedConfigState: Boolean = false
     private var suppressSelectionFileOpen: Boolean = false
 
     val component: JComponent = JBPanel<JBPanel<*>>(BorderLayout()).apply {
@@ -309,6 +310,7 @@ internal class TopicTreeWorkspacePanel(
             ?.userObject
             ?.let { it as? TopicTreeNodeView }
             ?.nodeId
+        navPresentFromParsedConfigState = state.source == StartupTreeSource.NAV
         currentState = state
         root.removeAllChildren()
 
@@ -970,7 +972,7 @@ internal class TopicTreeWorkspacePanel(
         openPreferredPathFallback: Boolean = true,
     ) {
         reconcileFromDisk()
-        runtimeServiceOrNull()?.onTopicMutationCommitted()
+        runtimeServiceOrNull()?.onTopicMutationCommitted(navPresent = navPresentFromParsedConfigState)
         val preferredNode = findNode(preferredNodeId)
             ?: findNodeByRelativePath(preferredPath)
             ?: preferredTitle?.let { findNodeByTitleAndParent(title = it, parentNodeId = preferredParentNodeId) }

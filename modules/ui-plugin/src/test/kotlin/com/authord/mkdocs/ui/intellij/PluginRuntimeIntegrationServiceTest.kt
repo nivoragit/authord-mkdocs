@@ -765,6 +765,61 @@ class PluginRuntimeIntegrationServiceTest {
     }
 
     @Test
+    fun `onTopicMutationCommitted restarts preview for nav-backed toc mutations`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-topic-mutation-nav-restart-")
+        try {
+            val configPath = projectRoot.resolve("mkdocs.yml")
+            Files.writeString(
+                configPath,
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                    nav: []
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "mutation-nav-restart")
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            val previewPane = PreviewPaneCoordinator()
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "ready at https://preview.example/" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+            val started = service.startPreview()
+            assertTrue(started.success)
+            assertEquals(1, launcher.launchCount)
+
+            val firstMutation = service.onTopicMutationCommitted(navPresent = true)
+            val secondMutation = service.onTopicMutationCommitted(navPresent = true)
+
+            assertTrue(firstMutation)
+            assertTrue(secondMutation)
+            assertEquals(3, launcher.launchCount)
+            assertTrue(service.isRuntimeRunning())
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `topic mutation preview dispatch loads verified local route immediately`() {
         val projectRoot = createTempDirectory(prefix = "runtime-dispatch-local-immediate-")
         try {
@@ -1017,6 +1072,7 @@ class PluginRuntimeIntegrationServiceTest {
             assertFalse(nudged)
             assertEquals(listOf(currentUrl), recordingPreview.loadedUrls)
             assertNull(sharedLastLoadedUrl(browserService))
+            assertEquals(1, launcher.launchCount)
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
