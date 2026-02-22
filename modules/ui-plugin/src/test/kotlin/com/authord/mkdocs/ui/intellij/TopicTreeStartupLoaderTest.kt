@@ -84,6 +84,26 @@ class TopicTreeStartupLoaderTest {
     }
 
     @Test
+    fun `keeps canonical nav mode when nav key is present but empty`() {
+        val loader = TopicTreeStartupLoader()
+        val config = MkDocsConfigDocument(
+            docsDir = "docs",
+            nav = emptyList(),
+            navPresent = true,
+        )
+
+        val state = loader.load(
+            config = config,
+            docsMarkdownPaths = listOf("docs/index.md", "docs/guide/install.md"),
+        )
+
+        assertEquals(StartupTreeSource.NAV, state.source)
+        assertTrue(state.nodes.isEmpty())
+        assertEquals(emptyList(), state.navOrderedPaths)
+        assertEquals(listOf("docs/guide/install.md", "docs/index.md"), state.unlinkedPaths)
+    }
+
+    @Test
     fun `resolves nav display title from markdown h1 when present`() {
         val root = Files.createTempDirectory("startup-loader-h1-nav")
         val docs = Files.createDirectories(root.resolve("docs"))

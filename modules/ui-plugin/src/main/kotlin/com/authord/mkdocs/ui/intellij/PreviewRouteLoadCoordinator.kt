@@ -47,6 +47,7 @@ internal fun loadPreviewRouteWithReadinessGuard(
     val attempts = maxAttempts.coerceAtLeast(1)
     backgroundRunner {
         var sawTransientUnavailable = false
+        val fallbackCandidateUrls = fallbackRouteCandidates(normalizedUrl)
 
         for (attempt in 1..attempts) {
             if (project.isDisposed || !isRequestCurrent() || !isRuntimeRunning()) {
@@ -71,6 +72,21 @@ internal fun loadPreviewRouteWithReadinessGuard(
                     return@backgroundRunner
                 }
             }
+        }
+
+        val fallbackUrl = fallbackCandidateUrls.firstOrNull { candidate ->
+            if (project.isDisposed || !isRequestCurrent() || !isRuntimeRunning()) {
+                return@backgroundRunner
+            }
+            runCatching { routeReadyProbe(candidate) }.getOrDefault(false)
+        }
+        if (!fallbackUrl.isNullOrBlank()) {
+            uiRunner {
+                if (!project.isDisposed && isRequestCurrent() && isRuntimeRunning()) {
+                    loadUrl(fallbackUrl, true)
+                }
+            }
+            return@backgroundRunner
         }
 
         val unavailableCallback = onRouteUnavailable ?: return@backgroundRunner
@@ -121,6 +137,37 @@ private fun routePathLabel(url: String): String {
         val path = uri.path?.trim().orEmpty()
         if (path.isEmpty()) "/" else path
     }.getOrDefault(url)
+}
+
+private fun fallbackRouteCandidates(url: String): List<String> {
+    val uri = runCatching { URI.create(url) }.getOrNull() ?: return emptyList()
+    val path = uri.path?.trim().orEmpty().ifBlank { "/" }
+    if (path == "/") {
+        return emptyList()
+    }
+
+    val candidates = linkedSetOf<String>()
+    if (path.endsWith("/")) {
+        val withoutTrailingSlash = path.trimEnd('/')
+        if (withoutTrailingSlash.isNotEmpty()) {
+            candidates += "$withoutTrailingSlash.html"
+            candidates += "$withoutTrailingSlash/index.html"
+        }
+    } else if (!path.endsWith(".html", ignoreCase = true)) {
+        candidates += "$path.html"
+    }
+
+    return candidates.mapNotNull { candidatePath ->
+        runCatching {
+            URI(
+                uri.scheme,
+                uri.authority,
+                candidatePath,
+                uri.query,
+                uri.fragment,
+            ).toString()
+        }.getOrNull()
+    }
 }
 
 private fun runPreviewRouteTaskInBackground(task: () -> Unit) {

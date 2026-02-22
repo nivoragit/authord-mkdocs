@@ -37,11 +37,11 @@ class StartupReconciliationPolicyTest {
         val coordinator = StartupReconciliationCoordinator()
 
         val first = coordinator.reconcile(
-            config = MkDocsConfigDocument(docsDir = "docs", nav = emptyList()),
+            config = MkDocsConfigDocument(docsDir = "docs", nav = emptyList(), navPresent = false),
             docsMarkdownPaths = listOf("docs/guide.md", "docs/index.md"),
         )
         val second = coordinator.reconcile(
-            config = MkDocsConfigDocument(docsDir = "docs", nav = emptyList()),
+            config = MkDocsConfigDocument(docsDir = "docs", nav = emptyList(), navPresent = false),
             docsMarkdownPaths = listOf("docs/index.md", "docs/guide.md"),
         )
 
