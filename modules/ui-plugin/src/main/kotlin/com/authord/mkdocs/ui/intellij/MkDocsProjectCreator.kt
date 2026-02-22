@@ -1,7 +1,10 @@
 package com.authord.mkdocs.ui.intellij
 
+import com.authord.mkdocs.ports.topic.TopicGatewayResult
+import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.runtime.CommandResult
 import com.authord.mkdocs.runtime.CommandRunner
+import com.authord.mkdocs.runtime.MkDocsYamlGateway
 import com.authord.mkdocs.runtime.ProjectManagedUvExecutableProvider
 import com.authord.mkdocs.runtime.UvExecutableProvider
 import java.nio.file.Files
@@ -18,12 +21,14 @@ data class MkDocsProjectCreationResult(
 class MkDocsProjectCreator(
     private val commandRunner: CommandRunner = ProcessBuilderCommandRunner(),
     private val uvExecutableProvider: UvExecutableProvider = ProjectManagedUvExecutableProvider(),
+    private val configGateway: MkDocsYamlGateway = MkDocsYamlGateway(),
 ) {
     private val runtimeVenvDirName: String = ".mkdocs-plugin-venv"
     private val uvInstallUrl: String = "https://docs.astral.sh/uv/getting-started/installation/"
     private val defaultDocsDirName: String = "docs"
     private val defaultIndexRelativePath: String = "index.md"
     private val defaultWelcomeTitle: String = "Welcome to Authord"
+    private val defaultOverviewTitle: String = "Overview"
 
     fun createProject(projectRootPath: String, requestedProjectName: String): MkDocsProjectCreationResult {
         val projectRoot = runCatching { Path.of(projectRootPath).toAbsolutePath().normalize() }
@@ -85,19 +90,19 @@ class MkDocsProjectCreator(
             )
         }
 
+        val welcomeWriteResult = writeWelcomeIndex(projectRoot)
+        if (!welcomeWriteResult) {
+            return MkDocsProjectCreationResult(
+                success = false,
+                message = "Project was created but docs index could not be updated.",
+            )
+        }
         val configPath = resolveConfigPath(projectRoot) ?: projectRoot.resolve("mkdocs.yml")
         val configWriteResult = writeBaseConfig(configPath, projectName)
         if (!configWriteResult) {
             return MkDocsProjectCreationResult(
                 success = false,
                 message = "Project was created but configuration file could not be updated.",
-            )
-        }
-        val welcomeWriteResult = writeWelcomeIndex(projectRoot)
-        if (!welcomeWriteResult) {
-            return MkDocsProjectCreationResult(
-                success = false,
-                message = "Project was created but docs index could not be updated.",
             )
         }
 
@@ -124,9 +129,33 @@ class MkDocsProjectCreator(
             append("site_name: '${escapeSingleQuotedYaml(siteName)}'\n")
             append("docs_dir: $defaultDocsDirName\n")
             append("nav:\n")
-            append("  - '$defaultWelcomeTitle': $defaultIndexRelativePath\n")
+            append("  - '$defaultWelcomeTitle':\n")
+            append("      - '$defaultOverviewTitle': $defaultIndexRelativePath\n")
         }
-        return runCatching { Files.writeString(configPath, configContent) }.isSuccess
+        return runCatching {
+            configPath.parent?.let(Files::createDirectories)
+            Files.writeString(configPath, configContent)
+            hasExpectedBootstrapNavHierarchy(configPath)
+        }.getOrDefault(false)
+    }
+
+    private fun hasExpectedBootstrapNavHierarchy(configPath: Path): Boolean {
+        val configResult = configGateway.loadConfig(
+            TopicInstanceRef(
+                instanceId = "default",
+                configPath = configPath.toAbsolutePath().normalize().toString(),
+                docsDirPath = "",
+            ),
+        )
+        val loadedConfig = when (configResult) {
+            is TopicGatewayResult.Success -> configResult.value
+            is TopicGatewayResult.Failure -> return false
+        }
+        val navRoot = loadedConfig.nav.singleOrNull() ?: return false
+        val navLeaf = navRoot.children.singleOrNull() ?: return false
+        return navRoot.title == defaultWelcomeTitle &&
+            navLeaf.title == defaultOverviewTitle &&
+            navLeaf.path == defaultIndexRelativePath
     }
 
     private fun writeWelcomeIndex(projectRoot: Path): Boolean {

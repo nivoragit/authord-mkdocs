@@ -444,6 +444,60 @@ class TopicTreeWorkspacePanelUiContractTest {
         assertEquals(listOf("page:install/a1.md"), childNodeIds)
     }
 
+    @Test
+    fun `nav converted representative page child is hidden from toc children`() {
+        val panel = panelWithDefaults()
+        panel.render(sampleNavConvertedSectionState())
+
+        val childNodeIds = panel.childNodeIdsForTest("child")
+
+        assertEquals(listOf("grand-child"), childNodeIds)
+    }
+
+    @Test
+    fun `nav converted representative page child is hidden for deeper levels`() {
+        val panel = panelWithDefaults()
+        panel.render(sampleNavConvertedSectionState())
+
+        val childNodeIds = panel.childNodeIdsForTest("grand-child")
+
+        assertEquals(listOf("great-grand-child"), childNodeIds)
+    }
+
+    @Test
+    fun `nav converted section resolves to preserved representative page path`() {
+        val panel = panelWithDefaults()
+        panel.render(sampleNavConvertedSectionState())
+
+        val sectionView = TopicTreeNodeView(
+            nodeId = "child",
+            title = "child",
+            parentNodeId = "root",
+            path = null,
+        )
+
+        val resolved = panel.resolveFilePath(sectionView)
+
+        assertEquals("child.md", resolved)
+    }
+
+    @Test
+    fun `nav converted deep section resolves to preserved representative page path`() {
+        val panel = panelWithDefaults()
+        panel.render(sampleNavConvertedSectionState())
+
+        val sectionView = TopicTreeNodeView(
+            nodeId = "grand-child",
+            title = "grand child",
+            parentNodeId = "child",
+            path = null,
+        )
+
+        val resolved = panel.resolveFilePath(sectionView)
+
+        assertEquals("child/grand-child.md", resolved)
+    }
+
     private fun sampleFallbackSectionState(): StartupTreeState {
         return StartupTreeState(
             source = StartupTreeSource.FALLBACK,
@@ -466,6 +520,50 @@ class TopicTreeWorkspacePanelUiContractTest {
                 ),
             ),
             navOrderedPaths = listOf("install/index.md", "install/a1.md"),
+            unlinkedPaths = emptyList(),
+            validationIssues = emptyList(),
+            destructiveChangesApplied = false,
+            instanceId = "default",
+        )
+    }
+
+    private fun sampleNavConvertedSectionState(): StartupTreeState {
+        return StartupTreeState(
+            source = StartupTreeSource.NAV,
+            nodes = listOf(
+                com.authord.mkdocs.ports.topic.TopicNavNode(
+                    nodeId = "child",
+                    title = "child",
+                    children = listOf(
+                        com.authord.mkdocs.ports.topic.TopicNavNode(
+                            nodeId = "n-0-0",
+                            title = "child",
+                            path = "child.md",
+                        ),
+                        com.authord.mkdocs.ports.topic.TopicNavNode(
+                            nodeId = "grand-child",
+                            title = "grand child",
+                            children = listOf(
+                                com.authord.mkdocs.ports.topic.TopicNavNode(
+                                    nodeId = "n-0-1-0",
+                                    title = "grand child",
+                                    path = "child/grand-child.md",
+                                ),
+                                com.authord.mkdocs.ports.topic.TopicNavNode(
+                                    nodeId = "great-grand-child",
+                                    title = "great grand child",
+                                    path = "child/grand-child/great-grand-child.md",
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            navOrderedPaths = listOf(
+                "child.md",
+                "child/grand-child.md",
+                "child/grand-child/great-grand-child.md",
+            ),
             unlinkedPaths = emptyList(),
             validationIssues = emptyList(),
             destructiveChangesApplied = false,
