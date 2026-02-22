@@ -46,15 +46,37 @@ class MkdocsConfigLocatorTest {
     }
 
     @Test
-    fun `findMkdocsConfig ignores nested configs outside project root`() {
-        val projectRoot = createTempDirectory(prefix = "mkdocs-config-locator-root-only-")
+    fun `findMkdocsConfig discovers nested config when root config is absent`() {
+        val projectRoot = createTempDirectory(prefix = "mkdocs-config-locator-nested-")
+        try {
+            val nested = projectRoot.resolve("nested").resolve("site")
+            Files.createDirectories(nested)
+            val nestedConfig = nested.resolve("mkdocs.yml")
+            Files.writeString(nestedConfig, "site_name: nested\n")
+
+            val resolved = findMkdocsConfig(projectRoot)
+            assertNotNull(resolved)
+            assertEquals(nestedConfig.toAbsolutePath().normalize(), resolved.toAbsolutePath().normalize())
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `findMkdocsConfig supports underscore variants and prefers shallower config`() {
+        val projectRoot = createTempDirectory(prefix = "mkdocs-config-locator-underscore-")
         try {
             val nested = projectRoot.resolve("nested")
             Files.createDirectories(nested)
-            Files.writeString(nested.resolve("mkdocs.yml"), "site_name: nested\n")
+            val nestedPrimary = nested.resolve("mkdocs.yml")
+            Files.writeString(nestedPrimary, "site_name: nested\n")
+
+            val rootUnderscore = projectRoot.resolve("_mkdocs.yaml")
+            Files.writeString(rootUnderscore, "site_name: root\n")
 
             val resolved = findMkdocsConfig(projectRoot)
-            assertNull(resolved)
+            assertNotNull(resolved)
+            assertEquals(rootUnderscore.toAbsolutePath().normalize(), resolved.toAbsolutePath().normalize())
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -98,6 +120,8 @@ class MkdocsConfigLocatorTest {
             assertTrue(isMarkdownPath(markdownLongPath))
             assertFalse(isMarkdownPath(nonMarkdownPath))
             assertTrue(hasMkdocsConfig(projectRoot.toString()))
+            assertTrue(isMkdocsConfigPath(projectRoot.resolve("mkdocs.yml").toString()))
+            assertTrue(isMkdocsConfigPath(projectRoot.resolve("_mkdocs.yaml").toString()))
             assertTrue(isUnderProject(projectRoot.toString(), markdownPath))
             assertFalse(isUnderProject(projectRoot.toString(), outsidePath))
         } finally {

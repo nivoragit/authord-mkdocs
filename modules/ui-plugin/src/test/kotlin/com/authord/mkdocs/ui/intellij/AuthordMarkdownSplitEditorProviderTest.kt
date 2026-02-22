@@ -7,9 +7,35 @@ import javax.swing.JPanel
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class AuthordMarkdownSplitEditorProviderTest {
+    private class RecordingPreviewContent : PreviewContent {
+        override val component = JPanel()
+        val loadedUrls = mutableListOf<String>()
+
+        override fun loadUrl(url: String) {
+            loadedUrls += url
+        }
+    }
+
+    private fun injectPreviewContent(service: MkDocsPreviewBrowserService, preview: PreviewContent) {
+        val field = MkDocsPreviewBrowserService::class.java.getDeclaredField("previewContent")
+        field.isAccessible = true
+        field.set(service, preview)
+    }
+
+    private fun invokeLoadUrlIfChanged(editor: AuthordMarkdownPreviewFileEditor, url: String, forceReload: Boolean = false) {
+        val method = AuthordMarkdownPreviewFileEditor::class.java.getDeclaredMethod(
+            "loadUrlIfChanged",
+            String::class.java,
+            Boolean::class.javaPrimitiveType,
+        )
+        method.isAccessible = true
+        method.invoke(editor, url, forceReload)
+    }
+
     @Test
     fun `split preview eligibility requires mkdocs config`() {
         val projectRoot = Files.createTempDirectory("authord-split-provider")
@@ -19,6 +45,22 @@ class AuthordMarkdownSplitEditorProviderTest {
             assertFalse(isAuthordPreviewEligible(projectRoot.toString(), filePath))
 
             Files.writeString(projectRoot.resolve("mkdocs.yml"), "site_name: docs\n")
+            invalidateMkdocsConfigCache(projectRoot)
+            assertTrue(isAuthordPreviewEligible(projectRoot.toString(), filePath))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `split preview eligibility accepts nested underscore mkdocs config`() {
+        val projectRoot = Files.createTempDirectory("authord-split-provider-nested-config")
+        try {
+            val filePath = projectRoot.resolve("docs").resolve("index.md").toString()
+            val nestedConfigDir = projectRoot.resolve("site")
+            Files.createDirectories(nestedConfigDir)
+            Files.writeString(nestedConfigDir.resolve("_mkdocs.yml"), "site_name: docs\n")
+
             invalidateMkdocsConfigCache(projectRoot)
             assertTrue(isAuthordPreviewEligible(projectRoot.toString(), filePath))
         } finally {
@@ -150,5 +192,112 @@ class AuthordMarkdownSplitEditorProviderTest {
         val preferred = parseAuthordSplitLayoutName("INVALID_LAYOUT")
 
         assertEquals(null, preferred)
+    }
+
+    @Test
+    fun `split editors reuse one shared browser service preview surface`() {
+        val projectRoot = Files.createTempDirectory("authord-split-editor-shared-browser")
+        try {
+            Files.createDirectories(projectRoot.resolve("docs"))
+            Files.writeString(projectRoot.resolve("mkdocs.yml"), "site_name: docs\ndocs_dir: docs\n")
+            val fileOnePath = projectRoot.resolve("docs").resolve("one.md").toString().replace('\\', '/')
+            val fileTwoPath = projectRoot.resolve("docs").resolve("two.md").toString().replace('\\', '/')
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "split-shared-browser")
+            val runtimeService = PluginRuntimeIntegrationService(project)
+            val browserService = MkDocsPreviewBrowserService(project)
+            var fallbackFactoryInvocations = 0
+            val editorOne = AuthordMarkdownPreviewFileEditor(
+                project = project,
+                file = object : LightVirtualFile("one.md") {
+                    override fun getPath(): String = fileOnePath
+                },
+                runtimeServiceResolver = { runtimeService },
+                browserServiceResolver = { browserService },
+                previewContentFactory = {
+                    fallbackFactoryInvocations += 1
+                    object : PreviewContent {
+                        override val component = JPanel()
+                        override fun loadUrl(url: String) = Unit
+                    }
+                },
+            )
+            val editorTwo = AuthordMarkdownPreviewFileEditor(
+                project = project,
+                file = object : LightVirtualFile("two.md") {
+                    override fun getPath(): String = fileTwoPath
+                },
+                runtimeServiceResolver = { runtimeService },
+                browserServiceResolver = { browserService },
+                previewContentFactory = {
+                    fallbackFactoryInvocations += 1
+                    object : PreviewContent {
+                        override val component = JPanel()
+                        override fun loadUrl(url: String) = Unit
+                    }
+                },
+            )
+
+            val shared = browserService.ensurePreviewContent()
+            assertEquals(0, fallbackFactoryInvocations)
+
+            editorOne.selectNotify()
+            assertSame(editorOne.component, shared.component.parent)
+
+            editorOne.deselectNotify()
+            editorTwo.selectNotify()
+            assertSame(editorTwo.component, shared.component.parent)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `switching editors reloads shared browser route when returning to previous file`() {
+        val projectRoot = Files.createTempDirectory("authord-split-editor-switch-routes")
+        try {
+            Files.createDirectories(projectRoot.resolve("docs"))
+            Files.writeString(projectRoot.resolve("mkdocs.yml"), "site_name: docs\ndocs_dir: docs\n")
+            val fileOnePath = projectRoot.resolve("docs").resolve("one.md").toString().replace('\\', '/')
+            val fileTwoPath = projectRoot.resolve("docs").resolve("two.md").toString().replace('\\', '/')
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "split-shared-browser-switch")
+            val runtimeService = PluginRuntimeIntegrationService(project)
+            val browserService = MkDocsPreviewBrowserService(project)
+            val preview = RecordingPreviewContent()
+            injectPreviewContent(browserService, preview)
+
+            val editorOne = AuthordMarkdownPreviewFileEditor(
+                project = project,
+                file = object : LightVirtualFile("one.md") {
+                    override fun getPath(): String = fileOnePath
+                },
+                runtimeServiceResolver = { runtimeService },
+                browserServiceResolver = { browserService },
+            )
+            val editorTwo = AuthordMarkdownPreviewFileEditor(
+                project = project,
+                file = object : LightVirtualFile("two.md") {
+                    override fun getPath(): String = fileTwoPath
+                },
+                runtimeServiceResolver = { runtimeService },
+                browserServiceResolver = { browserService },
+            )
+
+            invokeLoadUrlIfChanged(editorOne, "http://127.0.0.1:8000/one/")
+            invokeLoadUrlIfChanged(editorTwo, "http://127.0.0.1:8000/two/")
+            invokeLoadUrlIfChanged(editorOne, "http://127.0.0.1:8000/one/")
+
+            assertEquals(
+                listOf(
+                    "http://127.0.0.1:8000/one/",
+                    "http://127.0.0.1:8000/two/",
+                    "http://127.0.0.1:8000/one/",
+                ),
+                preview.loadedUrls,
+            )
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
     }
 }

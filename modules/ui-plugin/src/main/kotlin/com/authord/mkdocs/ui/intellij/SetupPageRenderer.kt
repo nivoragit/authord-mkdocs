@@ -4,306 +4,227 @@ package com.authord.mkdocs.ui.intellij
  * Renders setup HTML shown when no configuration file exists in the project root.
  */
 class SetupPageRenderer {
-    fun render(createProjectBridgeScript: String): String {
+    fun render(
+        createProjectBridgeScript: String,
+        suggestedProjectName: String = AuthordUiBundle.message("activation.default.siteName"),
+    ): String {
+        val resolvedProjectName = suggestedProjectName.trim().ifBlank {
+            AuthordUiBundle.message("activation.default.siteName")
+        }
+        val emptyStateTitle = escapeHtmlText(AuthordUiBundle.message("setup.emptyState.title"))
+        val addDocumentationLabel = escapeHtmlText(AuthordUiBundle.message("setup.button.add"))
+        val gettingStartedLabel = escapeHtmlText(AuthordUiBundle.message("setup.link.gettingStarted"))
+        val projectNamePrompt = escapeJavaScriptString(AuthordUiBundle.message("setup.prompt.projectName.message"))
+        val projectNameRequired = escapeJavaScriptString(AuthordUiBundle.message("setup.error.projectNameRequired"))
+        val escapedProjectName = escapeJavaScriptString(resolvedProjectName)
+        val gettingStartedUrl = escapeHtmlAttribute(AuthordUiBundle.message("setup.gettingStarted.url"))
         return """
             <!doctype html>
             <html lang="en">
               <head>
                 <meta charset="utf-8" />
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
-                <title>Create Project</title>
+                <title>$emptyStateTitle</title>
                 <style>
                   :root {
-                    --bg: #f6f8fc;
-                    --panel: #ffffff;
-                    --text: #1f2937;
-                    --muted: #6b7280;
-                    --border: #dbe3f3;
-                    --primary: #2065d1;
-                    --primary-strong: #174ca0;
-                    --input-bg: #ffffff;
-                    --code-bg: #eef2f9;
-                    --icon-color: #2065d1;
-                    --success: #059669;
+                    --bg: #11141b;
+                    --muted: #6e7683;
+                    --accent: #6ea1ff;
+                    --help: #76808d;
                   }
-                  @media (prefers-color-scheme: dark) {
+                  @media (prefers-color-scheme: light) {
                     :root {
-                      --bg: #1e1e2e;
-                      --panel: #2a2a3c;
-                      --text: #cdd6f4;
-                      --muted: #9399b2;
-                      --border: #45475a;
-                      --primary: #89b4fa;
-                      --primary-strong: #74c7ec;
-                      --input-bg: #313244;
-                      --code-bg: #313244;
-                      --icon-color: #89b4fa;
-                      --success: #a6e3a1;
+                      --bg: #f5f7fb;
+                      --muted: #5f6673;
+                      --accent: #3f79e8;
+                      --help: #6d7684;
                     }
                   }
                   * { box-sizing: border-box; }
                   html, body {
                     margin: 0;
                     padding: 0;
-                    width: 100%;
                     height: 100%;
+                    width: 100%;
+                    background: var(--bg);
                     font-family: -apple-system, "Segoe UI", "SF Pro Text", "Helvetica Neue", Arial, sans-serif;
-                    background:
-                      radial-gradient(ellipse at 10% 20%, rgba(32,101,209,0.08) 0, transparent 50%),
-                      radial-gradient(ellipse at 90% 80%, rgba(32,101,209,0.06) 0, transparent 50%),
-                      var(--bg);
-                    color: var(--text);
                   }
                   .page {
-                    min-height: 100%;
                     display: flex;
                     align-items: center;
                     justify-content: center;
-                    padding: 24px;
+                    min-height: 100%;
+                    padding: 24px 12px;
                   }
-                  .panel {
-                    width: min(480px, 100%);
-                    border: 1px solid var(--border);
-                    border-radius: 16px;
-                    background: var(--panel);
-                    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.08);
-                    padding: 32px;
-                    animation: fadeSlideUp 0.35s ease-out;
-                  }
-                  @keyframes fadeSlideUp {
-                    from { opacity: 0; transform: translateY(12px); }
-                    to   { opacity: 1; transform: translateY(0); }
-                  }
-                  .icon-row {
-                    margin-bottom: 20px;
-                  }
-                  .icon-row svg {
-                    width: 40px;
-                    height: 40px;
-                    color: var(--icon-color);
-                  }
-                  h1 {
-                    margin: 0 0 8px;
-                    font-size: 22px;
-                    font-weight: 700;
-                    line-height: 1.3;
-                    letter-spacing: -0.01em;
-                  }
-                  .subtitle {
-                    margin: 0 0 24px;
-                    color: var(--muted);
-                    font-size: 14px;
-                    line-height: 1.5;
-                  }
-                  .subtitle code {
-                    background: var(--code-bg);
-                    padding: 2px 6px;
-                    border-radius: 4px;
-                    font-size: 13px;
-                    font-family: "JetBrains Mono", "Fira Code", "Cascadia Code", monospace;
-                  }
-                  label {
-                    display: block;
-                    font-size: 12px;
-                    font-weight: 600;
-                    text-transform: uppercase;
-                    letter-spacing: 0.05em;
-                    color: var(--muted);
-                    margin-bottom: 6px;
-                  }
-                  .input-group {
+                  .content {
                     display: flex;
-                    gap: 8px;
-                    margin-bottom: 6px;
+                    flex-direction: column;
+                    align-items: center;
+                    transform: translateY(-6px);
                   }
-                  input {
-                    flex: 1;
-                    min-width: 0;
-                    border: 1px solid var(--border);
-                    border-radius: 10px;
-                    padding: 10px 14px;
-                    font-size: 14px;
-                    color: var(--text);
-                    background: var(--input-bg);
-                    outline: none;
-                    transition: border-color 0.15s, box-shadow 0.15s;
+                  .empty-state {
+                    margin: 0;
+                    color: var(--muted);
+                    font-size: 16px;
+                    line-height: 1.3;
+                    font-weight: 500;
                   }
-                  input:focus {
-                    border-color: var(--primary);
-                    box-shadow: 0 0 0 3px rgba(32, 101, 209, 0.15);
-                  }
-                  input:disabled {
-                    opacity: 0.6;
-                    cursor: not-allowed;
-                  }
-                  button {
+                  .add-documentation {
+                    margin: 16px 0 0;
                     display: inline-flex;
                     align-items: center;
-                    gap: 6px;
+                    gap: 8px;
                     border: 0;
-                    border-radius: 10px;
-                    background: var(--primary);
-                    color: #fff;
-                    font-weight: 600;
-                    font-size: 14px;
-                    padding: 10px 18px;
+                    background: none;
+                    color: var(--accent);
+                    font-size: 16px;
+                    line-height: 1.3;
+                    font-weight: 500;
+                    padding: 0;
                     cursor: pointer;
-                    white-space: nowrap;
-                    transition: background 0.15s, transform 0.08s, opacity 0.15s;
                   }
-                  button:hover:not(:disabled) { background: var(--primary-strong); }
-                  button:active:not(:disabled) { transform: translateY(1px); }
-                  button:disabled {
-                    opacity: 0.7;
-                    cursor: not-allowed;
+                  .add-documentation:disabled {
+                    cursor: default;
+                    opacity: 0.75;
                   }
-                  .spinner {
-                    display: none;
-                    width: 14px;
-                    height: 14px;
-                    border: 2px solid rgba(255,255,255,0.3);
-                    border-top-color: #fff;
-                    border-radius: 50%;
-                    animation: spin 0.6s linear infinite;
+                  .add-documentation .chevron {
+                    width: 7px;
+                    height: 7px;
+                    border-right: 2px solid currentColor;
+                    border-bottom: 2px solid currentColor;
+                    transform: rotate(45deg) translateY(-2px);
                   }
-                  @keyframes spin {
-                    to { transform: rotate(360deg); }
+                  .getting-started {
+                    margin-top: 42px;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 8px;
+                    color: var(--accent);
+                    font-size: 16px;
+                    line-height: 1.3;
+                    font-weight: 500;
+                    text-decoration: none;
                   }
-                  button.loading .spinner { display: inline-block; }
-                  button.loading .btn-label { display: none; }
-                  .hint {
-                    font-size: 12px;
-                    color: var(--muted);
-                    line-height: 1.4;
+                  .help-icon {
+                    width: 28px;
+                    height: 28px;
+                    border-radius: 999px;
+                    border: 2px solid var(--help);
+                    color: var(--help);
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-size: 18px;
+                    line-height: 1;
+                    font-weight: 400;
                   }
-                  .error {
-                    margin: 8px 0 0;
-                    font-size: 12px;
-                    color: #d64f4f;
-                    line-height: 1.4;
-                  }
-                  .hint kbd {
-                    display: inline-block;
-                    background: var(--code-bg);
-                    border: 1px solid var(--border);
+                  .add-documentation:focus-visible,
+                  .getting-started:focus-visible {
+                    outline: 2px solid var(--accent);
+                    outline-offset: 4px;
                     border-radius: 4px;
-                    padding: 1px 5px;
-                    font-size: 11px;
-                    font-family: inherit;
-                  }
-                  @media (prefers-color-scheme: dark) {
-                    input:focus {
-                      box-shadow: 0 0 0 3px rgba(137, 180, 250, 0.2);
-                    }
-                    button { color: #1e1e2e; }
-                    .spinner {
-                      border-color: rgba(30,30,46,0.3);
-                      border-top-color: #1e1e2e;
-                    }
                   }
                 </style>
               </head>
               <body>
                 <main class="page">
-                  <section class="panel">
-                    <div class="icon-row">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
-                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                        <polyline points="14 2 14 8 20 8"/>
-                        <line x1="12" y1="18" x2="12" y2="12"/>
-                        <line x1="9" y1="15" x2="15" y2="15"/>
-                      </svg>
-                    </div>
-                    <h1>Create Documentation</h1>
-                    <p class="subtitle">              
-                      Create a new project to get started.
-                    </p>
-                    <label for="project-name-input">Project name</label>
-                    <div class="input-group">
-                      <input id="project-name-input" type="text" value=""
-                             maxlength="64" placeholder="e.g. my-project" autocomplete="off" spellcheck="false" />
-                      <button id="create-project-button" type="button">
-                        <span class="btn-label">Create</span>
-                        <span class="spinner"></span>
-                      </button>
-                    </div>
-                    <p id="project-name-error" class="error" hidden></p>
-                    <p class="hint">
-                      Press <kbd>Enter</kbd> or click Create.
-                      Files will be added to the current project root.
-                    </p>
+                  <section class="content">
+                    <p class="empty-state">$emptyStateTitle</p>
+                    <button id="add-documentation-button" class="add-documentation" type="button" aria-label="$addDocumentationLabel">
+                      <span>$addDocumentationLabel</span>
+                      <span class="chevron" aria-hidden="true"></span>
+                    </button>
+                    <a
+                      id="getting-started-link"
+                      class="getting-started"
+                      href="$gettingStartedUrl"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                    >
+                      <span class="help-icon" aria-hidden="true">?</span>
+                      <span>$gettingStartedLabel</span>
+                    </a>
                   </section>
                 </main>
                 <script>
                   (function() {
-                    var input = document.getElementById("project-name-input");
-                    var button = document.getElementById("create-project-button");
-                    var error = document.getElementById("project-name-error");
+                    var button = document.getElementById("add-documentation-button");
                     var submitted = false;
-
-                    function setValidation(message) {
-                      if (!error) return;
-                      var normalized = String(message || "").trim();
-                      error.textContent = normalized;
-                      error.hidden = normalized.length === 0;
-                    }
-
-                    function hasValidName() {
-                      return String((input && input.value) || "").trim().length > 0;
-                    }
+                    var projectName = "$escapedProjectName";
+                    var projectNamePrompt = "$projectNamePrompt";
+                    var projectNameRequired = "$projectNameRequired";
 
                     function setLoading(loading) {
+                      if (!button) return;
                       if (loading) {
-                        button.classList.add("loading");
                         button.disabled = true;
-                        input.disabled = true;
                       } else {
-                        button.classList.remove("loading");
-                        button.disabled = !hasValidName();
-                        input.disabled = false;
+                        button.disabled = false;
                       }
                     }
 
                     function submit() {
                       if (submitted) return;
-                      if (!hasValidName()) {
-                        setValidation("Project name is required.");
-                        if (input) input.focus();
+                      var enteredName = window.prompt(projectNamePrompt, projectName);
+                      if (enteredName === null) {
+                        return;
+                      }
+                      var normalizedName = String(enteredName || "").trim();
+                      if (!normalizedName) {
+                        if (window.alert) {
+                          window.alert(projectNameRequired);
+                        }
                         return;
                       }
                       submitted = true;
                       setLoading(true);
-                      setValidation("");
-                      var value = ((input && input.value) || "").trim();
-                      var payload = encodeURIComponent(value);
+                      var payload = encodeURIComponent(normalizedName);
                       ${createProjectBridgeScript}
                     }
 
-                    function onInputChanged() {
-                      setValidation("");
-                      if (!submitted && button) {
-                        button.disabled = !hasValidName();
-                      }
-                    }
-
                     if (button) {
-                      button.addEventListener("click", submit);
-                    }
-                    if (input) {
-                      input.addEventListener("input", onInputChanged);
-                      input.addEventListener("keydown", function(event) {
+                      button.addEventListener("click", function(event) {
+                        event.preventDefault();
+                        submit();
+                      });
+                      button.addEventListener("keydown", function(event) {
                         if (event.key === "Enter") {
                           event.preventDefault();
                           submit();
                         }
                       });
-                      onInputChanged();
-                      input.focus();
                     }
                   })();
                 </script>
               </body>
             </html>
         """.trimIndent()
+    }
+
+    private fun escapeJavaScriptString(value: String): String {
+        return buildString(value.length) {
+            value.forEach { ch ->
+                when (ch) {
+                    '\\' -> append("\\\\")
+                    '"' -> append("\\\"")
+                    '\'' -> append("\\'")
+                    '\n' -> append("\\n")
+                    '\r' -> append("\\r")
+                    '\t' -> append("\\t")
+                    else -> append(ch)
+                }
+            }
+        }
+    }
+
+    private fun escapeHtmlAttribute(value: String): String {
+        return escapeHtmlText(value).replace("\"", "&quot;")
+    }
+
+    private fun escapeHtmlText(value: String): String {
+        return value
+            .replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
     }
 }

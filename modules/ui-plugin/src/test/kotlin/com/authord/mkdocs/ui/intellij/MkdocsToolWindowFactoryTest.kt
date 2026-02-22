@@ -143,10 +143,7 @@ private fun dispatchVfsEvents(
     }
 }
 
-private fun triggerSetupPanelCreate(panel: SetupPanel, name: String = "demo-site") {
-    val nameField = panel::class.java.getDeclaredField("nameField")
-    nameField.isAccessible = true
-    (nameField.get(panel) as? javax.swing.JTextField)?.text = name
+private fun triggerSetupPanelCreate(panel: SetupPanel) {
     val submitForm = panel::class.java.getDeclaredMethod("submitForm")
     submitForm.isAccessible = true
     submitForm.invoke(panel)
@@ -454,6 +451,7 @@ class MkdocsToolWindowFactoryTest {
 
             val scheduled = factory.scheduleTypingRefresh(
                 project = project,
+                runtimeService = service,
                 previewContent = previewContent,
                 selectedPath = "${projectRoot}/docs/guide.md",
             )
@@ -1118,6 +1116,7 @@ class MkdocsToolWindowFactoryTest {
         val applied = factory.applyPreviewRoute(
             project = project,
             runtimeService = service,
+            previewContent = previewContent,
             selectedPath = "/tmp/project/docs/guide.md",
         )
 
@@ -1142,6 +1141,7 @@ class MkdocsToolWindowFactoryTest {
         val applied = factory.applyPreviewRoute(
             project = project,
             runtimeService = service,
+            previewContent = previewContent,
             selectedPath = "/tmp/project/README.md",
         )
 
@@ -1152,6 +1152,7 @@ class MkdocsToolWindowFactoryTest {
     @Test
     fun `scheduleTypingRefresh saves document without reloading preview`() {
         val project = IntellijTestFixtures.project(basePath = "/tmp/project")
+        val runtimeService = PluginRuntimeIntegrationService(project)
         val delays = mutableListOf<Long>()
         val factory = MkdocsToolWindowFactory(
             activeEditorPathProvider = { "/tmp/project/docs/guide.md" },
@@ -1163,6 +1164,7 @@ class MkdocsToolWindowFactoryTest {
 
         val scheduled = factory.scheduleTypingRefresh(
             project = project,
+            runtimeService = runtimeService,
             previewContent = RecordingPreviewContent(),
             selectedPath = "/tmp/project/docs/guide.md",
         )
@@ -1174,6 +1176,7 @@ class MkdocsToolWindowFactoryTest {
     @Test
     fun `scheduleTypingRefresh ignores non-active editor file`() {
         val project = IntellijTestFixtures.project(basePath = "/tmp/project")
+        val runtimeService = PluginRuntimeIntegrationService(project)
         val delays = mutableListOf<Long>()
         val factory = MkdocsToolWindowFactory(
             activeEditorPathProvider = { "/tmp/project/docs/other.md" },
@@ -1185,6 +1188,7 @@ class MkdocsToolWindowFactoryTest {
 
         val scheduled = factory.scheduleTypingRefresh(
             project = project,
+            runtimeService = runtimeService,
             previewContent = RecordingPreviewContent(),
             selectedPath = "/tmp/project/docs/guide.md",
         )

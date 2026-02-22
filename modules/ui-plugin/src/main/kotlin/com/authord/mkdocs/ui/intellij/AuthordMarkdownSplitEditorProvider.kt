@@ -16,6 +16,7 @@ import com.intellij.openapi.editor.event.VisibleAreaEvent
 import com.intellij.openapi.editor.event.VisibleAreaListener
 import com.intellij.openapi.fileEditor.FileDocumentManager
 import com.intellij.openapi.fileEditor.FileEditor
+import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.FileEditorPolicy
 import com.intellij.openapi.fileEditor.FileEditorProvider
 import com.intellij.openapi.fileEditor.FileEditorState
@@ -25,6 +26,7 @@ import com.intellij.openapi.fileEditor.TextEditorWithPreviewProvider
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.openapi.util.UserDataHolderBase
 import com.intellij.openapi.vfs.VirtualFile
 import java.awt.event.ComponentAdapter
@@ -32,9 +34,10 @@ import java.awt.event.ComponentEvent
 import java.beans.PropertyChangeListener
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JComponent
+import javax.swing.JPanel
 import kotlin.math.abs
 
-private const val AUTHORD_PREVIEW_EDITOR_TYPE_ID = "authord-preview-editor"
+internal const val AUTHORD_PREVIEW_EDITOR_TYPE_ID = "authord-preview-editor"
 
 internal fun isAuthordPreviewEligible(projectBasePath: String?, filePath: String): Boolean {
     val basePath = projectBasePath ?: return false
@@ -165,6 +168,9 @@ internal class AuthordMarkdownPreviewFileEditor(
     runtimeServiceResolver: (Project) -> PluginRuntimeIntegrationService = {
         PluginCompositionRoot().runtimeIntegration(it)
     },
+    private val browserServiceResolver: (Project) -> MkDocsPreviewBrowserService? = { currentProject ->
+        runCatching { currentProject.getService(MkDocsPreviewBrowserService::class.java) }.getOrNull()
+    },
     private val resultPresenter: (Project, String, Boolean) -> Unit = ::presentPreviewResult,
     previewContentFactory: () -> PreviewContent = ::createDefaultPreviewContent,
     private val delayedInvoker: (delayMillis: Long, task: () -> Unit) -> Unit = delayedInvoker@{ delayMillis, task ->
@@ -192,9 +198,14 @@ internal class AuthordMarkdownPreviewFileEditor(
     },
 ) : UserDataHolderBase(), FileEditor {
     private val runtimeService = runtimeServiceResolver(project)
-    private val previewContent = previewContentFactory()
+    private val browserService = browserServiceResolver(project)
+    private val previewOwnerId = "${file.path}#${System.identityHashCode(this)}"
+    private val previewContent = browserService?.previewContentForOwner(
+        ownerKind = PreviewOwnerKind.SPLIT_EDITOR,
+        ownerId = previewOwnerId,
+    ) ?: previewContentFactory()
     private val scrollSyncEngine = MkdocsScrollSyncEngine(delayedInvoker = delayedInvoker)
-    private var lastLoadedUrl: String? = null
+    private var standaloneLastLoadedUrl: String? = null
     @Volatile
     private var sourceEditor: Editor? = null
     @Volatile
@@ -204,7 +215,6 @@ internal class AuthordMarkdownPreviewFileEditor(
     @Volatile
     private var lastTypingTimestampMs: Long = 0L
     private val typingGeneration = AtomicInteger(0)
-    private val routeLoadGeneration = AtomicInteger(0)
     private val typingRefreshDelaysMs = listOf(2000L)
     private val typingScrollGuardMs: Long = 800L
 
@@ -227,7 +237,18 @@ internal class AuthordMarkdownPreviewFileEditor(
     override fun isValid(): Boolean = !project.isDisposed && file.isValid
 
     override fun selectNotify() {
+        browserService?.activatePreviewOwner(
+            ownerKind = PreviewOwnerKind.SPLIT_EDITOR,
+            ownerId = previewOwnerId,
+        )
         refreshForSelectedFile(autoStart = false, trigger = PreviewStartTrigger.ACTION)
+    }
+
+    override fun deselectNotify() {
+        browserService?.deactivatePreviewOwner(
+            ownerKind = PreviewOwnerKind.SPLIT_EDITOR,
+            ownerId = previewOwnerId,
+        )
     }
 
     override fun addPropertyChangeListener(listener: PropertyChangeListener) = Unit
@@ -236,7 +257,12 @@ internal class AuthordMarkdownPreviewFileEditor(
 
     override fun getFile(): VirtualFile = file
 
-    override fun dispose() = Unit
+    override fun dispose() {
+        browserService?.releasePreviewOwner(
+            ownerKind = PreviewOwnerKind.SPLIT_EDITOR,
+            ownerId = previewOwnerId,
+        )
+    }
 
     internal fun bindSourceEditor(editor: Editor) {
         sourceEditor = editor
@@ -253,13 +279,15 @@ internal class AuthordMarkdownPreviewFileEditor(
             if (!restartResult.success) {
                 return@restartPreviewAsync
             }
-            val routedUrl = runtimeService.navigateToSelectedFile(file.path)
-            val resolvedUrl = routedUrl ?: restartResult.previewUrl.ifBlank {
-                runtimeService.currentPreviewUrl().orEmpty()
-            }
-            if (resolvedUrl.isNotBlank()) {
-                lastLoadedUrl = null
-                loadRouteWithReadinessGuard(resolvedUrl)
+            standaloneLastLoadedUrl = null
+            val dispatched = dispatchPreviewForCurrentFile(PreviewRouteIntentSource.SPLIT_EDITOR)
+            if (!dispatched) {
+                val resolvedUrl = restartResult.previewUrl.ifBlank {
+                    runtimeService.currentPreviewUrl().orEmpty()
+                }
+                if (resolvedUrl.isNotBlank()) {
+                    loadUrlIfChanged(resolvedUrl, forceReload = true)
+                }
             }
         }
     }
@@ -283,52 +311,80 @@ internal class AuthordMarkdownPreviewFileEditor(
                     resultPresenter(project, formatPreviewResultMessage(startResult), false)
                     return false
                 }
-                val routedAfterStart = runtimeService.navigateToSelectedFile(file.path)
-                val resolvedAfterStart = routedAfterStart ?: startResult.previewUrl.ifBlank {
-                    runtimeService.currentPreviewUrl().orEmpty()
+                val dispatched = dispatchPreviewForCurrentFile(PreviewRouteIntentSource.SPLIT_EDITOR)
+                if (!dispatched) {
+                    val resolvedAfterStart = startResult.previewUrl.ifBlank {
+                        runtimeService.currentPreviewUrl().orEmpty()
+                    }
+                    resolvedAfterStart.takeIf { it.isNotBlank() }?.let(::loadUrlIfChanged)
+                    return resolvedAfterStart.isNotBlank()
                 }
-                resolvedAfterStart.takeIf { it.isNotBlank() }?.let(::loadRouteWithReadinessGuard)
-                return resolvedAfterStart.isNotBlank()
+                return true
             } else {
                 runtimeService.startPreviewAsync(trigger) { startResult ->
                     if (!startResult.success) {
                         resultPresenter(project, formatPreviewResultMessage(startResult), false)
                         return@startPreviewAsync
                     }
-                    val routedAfterStart = runtimeService.navigateToSelectedFile(file.path)
-                    val resolvedAfterStart = routedAfterStart ?: startResult.previewUrl.ifBlank {
-                        runtimeService.currentPreviewUrl().orEmpty()
+                    val dispatched = dispatchPreviewForCurrentFile(PreviewRouteIntentSource.SPLIT_EDITOR)
+                    if (!dispatched) {
+                        val resolvedAfterStart = startResult.previewUrl.ifBlank {
+                            runtimeService.currentPreviewUrl().orEmpty()
+                        }
+                        resolvedAfterStart.takeIf { it.isNotBlank() }?.let(::loadUrlIfChanged)
                     }
-                    resolvedAfterStart.takeIf { it.isNotBlank() }?.let(::loadRouteWithReadinessGuard)
                 }
                 return true
             }
         }
 
-        val routedUrl = runtimeService.navigateToSelectedFile(file.path)
-        val resolvedUrl = routedUrl ?: runtimeService.currentPreviewUrl()
-        if (!resolvedUrl.isNullOrBlank() && resolvedUrl != lastLoadedUrl) {
-            loadRouteWithReadinessGuard(resolvedUrl)
+        val dispatched = dispatchPreviewForCurrentFile(PreviewRouteIntentSource.SPLIT_EDITOR)
+        if (dispatched) {
+            return true
         }
-        return resolvedUrl != null
+        val fallbackUrl = runtimeService.currentPreviewUrl()
+        if (!fallbackUrl.isNullOrBlank()) {
+            loadUrlIfChanged(fallbackUrl)
+        }
+        return fallbackUrl != null
     }
 
-    private fun loadRouteWithReadinessGuard(url: String) {
-        val generation = routeLoadGeneration.incrementAndGet()
-        loadPreviewRouteWithReadinessGuard(
-            project = project,
-            targetUrl = url,
-            isRequestCurrent = { routeLoadGeneration.get() == generation },
-            isRuntimeRunning = runtimeService::isRuntimeRunning,
+    private fun dispatchPreviewForCurrentFile(source: PreviewRouteIntentSource): Boolean {
+        return runtimeService.dispatchPreviewForSelectedFileWithRetry(
+            selectedPath = file.path,
+            source = source,
+            forceReload = true,
             loadUrl = { resolvedUrl, forceReload -> loadUrlIfChanged(resolvedUrl, forceReload) },
+            shouldRetry = ::isFileStillSelectedForPreview,
         )
     }
 
+    private fun isFileStillSelectedForPreview(): Boolean {
+        if (project.isDisposed || !file.isValid) {
+            return false
+        }
+        val selectedFiles = runCatching { FileEditorManager.getInstance(project).selectedFiles.toList() }.getOrNull()
+            ?: return true
+        val expected = comparablePath(file.path)
+        return selectedFiles.any { selectedFile ->
+            comparablePath(selectedFile.path) == expected
+        }
+    }
+
+    private fun comparablePath(path: String): String {
+        val normalized = path.replace('\\', '/')
+        return if (SystemInfoRt.isFileSystemCaseSensitive) normalized else normalized.lowercase()
+    }
+
     private fun loadUrlIfChanged(url: String, forceReload: Boolean = false) {
-        if (!forceReload && lastLoadedUrl == url) {
+        if (browserService != null) {
+            browserService.loadUrl(url, forceReload)
             return
         }
-        lastLoadedUrl = url
+        if (!forceReload && standaloneLastLoadedUrl == url) {
+            return
+        }
+        standaloneLastLoadedUrl = url
         previewContent.loadUrl(url)
     }
 
@@ -386,7 +442,7 @@ internal class AuthordMarkdownPreviewFileEditor(
         previewContent.setManualScrollListener {
             previewScrollLatchedByUser = true
         }
-        previewContent.component.addComponentListener(
+        (previewContent.component as? JPanel ?: previewContent.component).addComponentListener(
             object : ComponentAdapter() {
                 override fun componentResized(event: ComponentEvent?) {
                     scrollSyncEngine.invalidateAnchors()
@@ -496,8 +552,7 @@ internal class AuthordMarkdownPreviewFileEditor(
     }
 
     private fun isDocsMarkdownPath(path: String): Boolean {
-        val normalizedPath = path.replace('\\', '/')
-        return normalizedPath.endsWith(".md") && normalizedPath.contains("/docs/")
+        return runtimeService.isPreviewEligibleMarkdownPath(path)
     }
 }
 
@@ -507,10 +562,7 @@ internal fun refreshOpenAuthordMarkdownPreviews(
 ): Boolean {
     val manager = runCatching { com.intellij.openapi.fileEditor.FileEditorManager.getInstance(project) }.getOrNull()
         ?: return false
-    val editors = LinkedHashSet<FileEditor>().apply {
-        addAll(manager.selectedEditors)
-        addAll(manager.allEditors)
-    }
+    val editors = manager.selectedEditors.toList()
     var refreshed = false
     editors.forEach { editor ->
         refreshed = when (editor) {

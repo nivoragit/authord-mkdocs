@@ -3,6 +3,7 @@ package com.authord.mkdocs.ui.intellij
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
+import com.authord.mkdocs.ui.PluginCompositionRoot
 import com.intellij.icons.AllIcons
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.ActionManager
@@ -157,6 +158,12 @@ internal class TopicTreeWorkspacePanel(
                 Messages.getWarningIcon(),
             ) == Messages.OK
         },
+    private val runtimeServiceResolver: (com.intellij.openapi.project.Project) -> PluginRuntimeIntegrationService = {
+        PluginCompositionRoot().runtimeIntegration(it)
+    },
+    private val browserServiceResolver: (com.intellij.openapi.project.Project) -> MkDocsPreviewBrowserService? = { currentProject ->
+        runCatching { currentProject.getService(MkDocsPreviewBrowserService::class.java) }.getOrNull()
+    },
 ) {
     private data class TocHeaderAction(
         val tooltip: String,
@@ -473,17 +480,14 @@ internal class TopicTreeWorkspacePanel(
         }
     }
 
-    // todo 
     private fun buildTocContextMenu() {
         tocContextMenu.removeAll()
-        // tocContextMenu.add(JMenuItem(uiMessage("topicTree.menu.newTopic")).apply { addActionListener { addRootTopic() } })
         tocNewChildMenuItem = JMenuItem(uiMessage("topicTree.menu.newChildTopic")).apply { addActionListener { addChildTopic() } }
         tocContextMenu.add(tocNewChildMenuItem)
         tocEditTitleMenuItem = JMenuItem(uiMessage("topicTree.menu.editTitle")).apply { addActionListener { renameTopic() } }
         tocContextMenu.add(tocEditTitleMenuItem)
         tocRemoveMenuItem = JMenuItem(uiMessage("topicTree.menu.removeTocElement")).apply { addActionListener { removeTopic() } }
         tocContextMenu.add(tocRemoveMenuItem)
-        // tocContextMenu.add(JMenuItem(uiMessage("topicTree.menu.setAsHomePage")).apply { addActionListener { setAsHomePage() } })
     }
 
     private fun maybeShowTocContextMenu(event: MouseEvent) {
@@ -682,61 +686,15 @@ internal class TopicTreeWorkspacePanel(
             nodeId = selected.nodeId,
         )
         handleDispatchResult(result, uiMessage("topicTree.status.removedTopic", selected.title)) {
-            val parent = selectedNode.parent as? DefaultMutableTreeNode ?: return@handleDispatchResult
-            model.removeNodeFromParent(selectedNode)
-            tree.selectionPath = TreePath(parent.path)
-        }
-    }
-
-    private fun setAsHomePage() {
-        val selectedNode = selectedMutableNode() ?: run {
-            publishStatus(uiMessage("topicTree.status.selectMutableTopic"))
-            return
-        }
-        val selected = selectedNode.userObject as? TopicTreeNodeView ?: return
-        val parentNode = selectedNode.parent as? DefaultMutableTreeNode ?: return
-        val parent = parentNode.userObject as? TopicTreeNodeView ?: return
-        if (parent.nodeId != ROOT_NODE_ID) {
-            publishStatus(uiMessage("topicTree.status.homePageRootOnly"))
-            return
-        }
-
-        val siblings = (0 until parentNode.childCount)
-            .mapNotNull { index -> parentNode.getChildAt(index) as? DefaultMutableTreeNode }
-            .mapNotNull { node ->
-                val view = node.userObject as? TopicTreeNodeView ?: return@mapNotNull null
-                if (view.isMutable) view.nodeId to node else null
-            }
-        if (siblings.isEmpty()) {
-            publishStatus(uiMessage("topicTree.status.noReorderableRootTopics"))
-            return
-        }
-
-        val currentIndex = siblings.indexOfFirst { (nodeId, _) -> nodeId == selected.nodeId }
-        if (currentIndex <= 0) {
-            publishStatus(uiMessage("topicTree.status.alreadyHomePage"))
-            return
-        }
-
-        val orderedNodeIds = siblings.map { (nodeId, _) -> nodeId }.toMutableList().apply {
-            val moved = removeAt(currentIndex)
-            add(0, moved)
-        }
-        val controllers = controllersOrNull() ?: return
-        val result = controllers.dragDropController.reorderTopics(
-            treeId = activeTreeId(),
-            parentNodeId = ROOT_NODE_ID,
-            orderedNodeIds = orderedNodeIds,
-        )
-        handleDispatchResult(result, uiMessage("topicTree.status.setAsHomePage", selected.title)) {
-            val byId = siblings.associateBy({ it.first }, { it.second })
-            parentNode.removeAllChildren()
-            orderedNodeIds.forEach { nodeId ->
-                parentNode.add(byId.getValue(nodeId))
-            }
-            model.reload(parentNode)
-            tree.selectionPath = TreePath(selectedNode.path)
-            tree.scrollPathToVisible(TreePath(selectedNode.path))
+            val parentNode = selectedNode.parent as? DefaultMutableTreeNode
+            val parentView = parentNode?.userObject as? TopicTreeNodeView
+            val preferredNodeId = parentView?.nodeId ?: ROOT_NODE_ID
+            reconcileAfterMutation(
+                preferredNodeId = preferredNodeId,
+                preferredPath = parentView?.path.orEmpty(),
+                preferredParentNodeId = parentView?.parentNodeId,
+                openPreferredPathFallback = false,
+            )
         }
     }
 
@@ -763,6 +721,13 @@ internal class TopicTreeWorkspacePanel(
                     return false
                 }
                 moveNodeInTree(draggedNode, targetParent, newOrderIndex)
+                val movedView = draggedNode.userObject as? TopicTreeNodeView
+                reconcileAfterMutation(
+                    preferredNodeId = draggedNodeId,
+                    preferredPath = movedView?.path.orEmpty(),
+                    preferredParentNodeId = newParentNodeId,
+                    openPreferredPathFallback = false,
+                )
                 true
             }
 
@@ -1005,6 +970,7 @@ internal class TopicTreeWorkspacePanel(
         openPreferredPathFallback: Boolean = true,
     ) {
         reconcileFromDisk()
+        runtimeServiceOrNull()?.onTopicMutationCommitted()
         val preferredNode = findNode(preferredNodeId)
             ?: findNodeByRelativePath(preferredPath)
             ?: preferredTitle?.let { findNodeByTitleAndParent(title = it, parentNodeId = preferredParentNodeId) }
@@ -1136,7 +1102,70 @@ internal class TopicTreeWorkspacePanel(
         val virtualFile = fileSystem.findFileByPath(filePath)
             ?: fileSystem.refreshAndFindFileByPath(filePath)
             ?: return
-        FileEditorManager.getInstance(currentProject).openFile(virtualFile, true)
+        val fileEditorManager = FileEditorManager.getInstance(currentProject)
+        storeAuthordSplitLayout(
+            currentProject,
+            com.intellij.openapi.fileEditor.TextEditorWithPreview.Layout.SHOW_EDITOR_AND_PREVIEW,
+        )
+        fileEditorManager.openFile(virtualFile, true)
+        runCatching {
+            fileEditorManager.setSelectedEditor(virtualFile, AUTHORD_PREVIEW_EDITOR_TYPE_ID)
+        }
+        requestPreviewForOpenedFile(currentProject, filePath)
+    }
+
+    private fun requestPreviewForOpenedFile(
+        currentProject: com.intellij.openapi.project.Project,
+        filePath: String,
+    ) {
+        val runtimeService = runtimeServiceOrNull() ?: return
+        val browserService = browserServiceResolver(currentProject) ?: return
+        dispatchPreviewForOpenedFile(
+            currentProject = currentProject,
+            filePath = filePath,
+            runtimeService = runtimeService,
+            browserService = browserService,
+        )
+    }
+
+    private fun dispatchPreviewForOpenedFile(
+        currentProject: com.intellij.openapi.project.Project,
+        filePath: String,
+        runtimeService: PluginRuntimeIntegrationService,
+        browserService: MkDocsPreviewBrowserService,
+    ) {
+        runtimeService.dispatchPreviewForSelectedFileWithRetry(
+            selectedPath = filePath,
+            source = PreviewRouteIntentSource.TOPIC_MUTATION,
+            forceReload = true,
+            loadUrl = { url, forceReload -> browserService.loadUrl(url, forceReload) },
+            shouldRetry = {
+                isFileSelectedForPreview(currentProject, filePath)
+            },
+            onRouteUnavailable = { message ->
+                presentAuthordNotification(currentProject, message, NotificationType.WARNING)
+            },
+        )
+    }
+
+    private fun isFileSelectedForPreview(
+        currentProject: com.intellij.openapi.project.Project,
+        filePath: String,
+    ): Boolean {
+        if (currentProject.isDisposed) {
+            return false
+        }
+        val selectedFiles = runCatching { FileEditorManager.getInstance(currentProject).selectedFiles.toList() }.getOrNull()
+            ?: return false
+        val expected = comparablePath(filePath.replace('\\', '/'))
+        return selectedFiles.any { virtualFile ->
+            comparablePath(virtualFile.path.replace('\\', '/')) == expected
+        }
+    }
+
+    private fun runtimeServiceOrNull(): PluginRuntimeIntegrationService? {
+        val currentProject = project ?: return null
+        return runCatching { runtimeServiceResolver(currentProject) }.getOrNull()
     }
 
     private fun activeTreeId(): String = currentState?.instanceId ?: "default"

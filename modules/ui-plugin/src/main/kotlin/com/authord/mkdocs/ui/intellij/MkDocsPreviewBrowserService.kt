@@ -7,6 +7,11 @@ import java.awt.BorderLayout
 import javax.swing.JComponent
 import javax.swing.JPanel
 
+enum class PreviewOwnerKind {
+    TOOL_WINDOW,
+    SPLIT_EDITOR,
+}
+
 /**
  * Project-scoped owner for the tool-window preview surface.
  *
@@ -18,10 +23,23 @@ class MkDocsPreviewBrowserService(
     @Suppress("unused")
     private val project: Project,
 ) : Disposable {
+    private data class OwnerRegistryEntry(
+        val ownerKey: String,
+        val ownerKind: PreviewOwnerKind,
+        val content: OwnedPreviewContent,
+        var requestedActive: Boolean = false,
+        var activationOrder: Long = 0L,
+    )
+
     @Volatile
     private var previewContent: PreviewContent? = null
     @Volatile
     private var markdownActivated: Boolean = false
+    @Volatile
+    private var sharedLastLoadedUrl: String? = null
+    private val ownersByKey = linkedMapOf<String, OwnerRegistryEntry>()
+    private var activeOwnerKey: String? = null
+    private var activationCounter: Long = 0L
 
     /**
      * Returns existing preview content or creates it once for this project.
@@ -65,15 +83,231 @@ class MkDocsPreviewBrowserService(
     /**
      * Loads URL in the persistent preview surface.
      */
-    fun loadUrl(url: String) {
+    fun loadUrl(url: String, forceReload: Boolean = false) {
+        if (!forceReload && sharedLastLoadedUrl == url) {
+            return
+        }
+        sharedLastLoadedUrl = url
         markMarkdownActivated().loadUrl(url)
+    }
+
+    /**
+     * Clears shared URL dedupe cache so the next load request is always applied.
+     */
+    fun resetLastLoadedUrl() {
+        sharedLastLoadedUrl = null
+    }
+
+    /**
+     * Returns owner-scoped preview content host that reuses one shared browser instance.
+     */
+    fun previewContentForOwner(ownerKind: PreviewOwnerKind, ownerId: String): PreviewContent {
+        val key = ownerKey(ownerKind, ownerId)
+        synchronized(this) {
+            val existing = ownersByKey[key]
+            if (existing != null) {
+                return existing.content
+            }
+            val created = OwnedPreviewContent(ownerKey = key, ownerKind = ownerKind)
+            ownersByKey[key] = OwnerRegistryEntry(
+                ownerKey = key,
+                ownerKind = ownerKind,
+                content = created,
+            )
+            return created
+        }
+    }
+
+    /**
+     * Marks an owner as active and reparents the shared preview browser to its host panel.
+     */
+    fun activatePreviewOwner(ownerKind: PreviewOwnerKind, ownerId: String): Boolean {
+        val key = ownerKey(ownerKind, ownerId)
+        synchronized(this) {
+            val entry = ownersByKey[key] ?: return false
+            entry.requestedActive = true
+            entry.activationOrder = ++activationCounter
+            recomputeActiveOwnerLocked()
+            return activeOwnerKey == key
+        }
+    }
+
+    /**
+     * Marks an owner as inactive; ownership may fall back to another active owner.
+     */
+    fun deactivatePreviewOwner(ownerKind: PreviewOwnerKind, ownerId: String) {
+        val key = ownerKey(ownerKind, ownerId)
+        synchronized(this) {
+            val entry = ownersByKey[key] ?: return
+            entry.requestedActive = false
+            recomputeActiveOwnerLocked()
+        }
+    }
+
+    /**
+     * Releases owner registration and detaches host bindings.
+     */
+    fun releasePreviewOwner(ownerKind: PreviewOwnerKind, ownerId: String) {
+        val key = ownerKey(ownerKind, ownerId)
+        synchronized(this) {
+            val removed = ownersByKey.remove(key) ?: return
+            removed.content.disposeHostOnly()
+            if (activeOwnerKey == key) {
+                activeOwnerKey = null
+            }
+            recomputeActiveOwnerLocked()
+        }
     }
 
     override fun dispose() {
         synchronized(this) {
+            ownersByKey.values.forEach { entry ->
+                entry.content.disposeHostOnly()
+            }
+            ownersByKey.clear()
+            activeOwnerKey = null
+            activationCounter = 0L
             previewContent?.dispose()
             previewContent = null
+            sharedLastLoadedUrl = null
             markdownActivated = false
+        }
+    }
+
+    private fun ownerKey(ownerKind: PreviewOwnerKind, ownerId: String): String {
+        return "${ownerKind.name}:$ownerId"
+    }
+
+    private fun ownerPriority(ownerKind: PreviewOwnerKind): Int {
+        return when (ownerKind) {
+            PreviewOwnerKind.SPLIT_EDITOR -> 2
+            PreviewOwnerKind.TOOL_WINDOW -> 1
+        }
+    }
+
+    private fun recomputeActiveOwnerLocked() {
+        val next = ownersByKey.values
+            .asSequence()
+            .filter { it.requestedActive }
+            .maxWithOrNull(
+                compareBy<OwnerRegistryEntry>(
+                    { ownerPriority(it.ownerKind) },
+                    { it.activationOrder },
+                ),
+            )
+        val nextKey = next?.ownerKey
+        val currentKey = activeOwnerKey
+        if (currentKey == nextKey && next != null) {
+            bindListenersToOwnerLocked(next)
+            attachSharedComponentToOwnerLocked(next)
+            return
+        }
+
+        activeOwnerKey = nextKey
+        if (next == null) {
+            previewContent?.setContentReloadListener(null)
+            previewContent?.setManualScrollListener(null)
+            return
+        }
+
+        attachSharedComponentToOwnerLocked(next)
+        bindListenersToOwnerLocked(next)
+    }
+
+    private fun attachSharedComponentToOwnerLocked(owner: OwnerRegistryEntry) {
+        val sharedPreview = ensurePreviewContent()
+        val ownerHost = owner.content.hostPanel
+        val sharedComponent = sharedPreview.component
+        val previousParent = sharedComponent.parent as? JComponent
+        if (sharedComponent.parent !== ownerHost) {
+            ownerHost.removeAll()
+            ownerHost.add(sharedComponent, BorderLayout.CENTER)
+            ownerHost.revalidate()
+            ownerHost.repaint()
+            if (previousParent != null && previousParent !== ownerHost) {
+                previousParent.revalidate()
+                previousParent.repaint()
+            }
+        }
+    }
+
+    private fun bindListenersToOwnerLocked(owner: OwnerRegistryEntry) {
+        val sharedPreview = ensurePreviewContent()
+        sharedPreview.setContentReloadListener(owner.content.contentReloadCallback)
+        sharedPreview.setManualScrollListener(owner.content.manualScrollCallback)
+    }
+
+    private fun updateActiveOwnerListenersLocked(ownerKey: String) {
+        if (activeOwnerKey != ownerKey) {
+            return
+        }
+        val active = ownersByKey[ownerKey] ?: return
+        bindListenersToOwnerLocked(active)
+    }
+
+    private inner class OwnedPreviewContent(
+        private val ownerKey: String,
+        private val ownerKind: PreviewOwnerKind,
+    ) : PreviewContent {
+        val hostPanel: JPanel = JPanel(BorderLayout())
+        @Volatile var contentReloadCallback: (() -> Unit)? = null
+        @Volatile var manualScrollCallback: ((Double) -> Unit)? = null
+
+        override val component: JComponent = hostPanel
+
+        override fun loadUrl(url: String) {
+            this@MkDocsPreviewBrowserService.loadUrl(url)
+        }
+
+        override fun loadSetupPage(onProjectCreate: (String) -> Unit) {
+            ensurePreviewContent().loadSetupPage(onProjectCreate)
+        }
+
+        override fun scrollToProgress(progress: Double) {
+            ensurePreviewContent().scrollToProgress(progress)
+        }
+
+        override fun scrollToY(y: Double, syncToken: Long?) {
+            ensurePreviewContent().scrollToY(y, syncToken)
+        }
+
+        override fun requestScrollMetrics(callback: (PreviewScrollMetrics?) -> Unit) {
+            ensurePreviewContent().requestScrollMetrics(callback)
+        }
+
+        override fun requestDomSnapshot(callback: (PreviewDomSnapshot?) -> Unit) {
+            ensurePreviewContent().requestDomSnapshot(callback)
+        }
+
+        override fun setContentReloadListener(listener: (() -> Unit)?) {
+            contentReloadCallback = listener
+            synchronized(this@MkDocsPreviewBrowserService) {
+                updateActiveOwnerListenersLocked(ownerKey)
+            }
+        }
+
+        override fun setManualScrollListener(listener: ((Double) -> Unit)?) {
+            manualScrollCallback = listener
+            synchronized(this@MkDocsPreviewBrowserService) {
+                updateActiveOwnerListenersLocked(ownerKey)
+            }
+        }
+
+        override fun supportsPreviewEditorSync(): Boolean = ensurePreviewContent().supportsPreviewEditorSync()
+
+        override fun prefersSetupPanel(): Boolean = ensurePreviewContent().prefersSetupPanel()
+
+        override fun dispose() {
+            val ownerId = ownerKey.substringAfter(':', "")
+            this@MkDocsPreviewBrowserService.releasePreviewOwner(ownerKind, ownerId)
+        }
+
+        fun disposeHostOnly() {
+            hostPanel.removeAll()
+            hostPanel.revalidate()
+            hostPanel.repaint()
+            contentReloadCallback = null
+            manualScrollCallback = null
         }
     }
 

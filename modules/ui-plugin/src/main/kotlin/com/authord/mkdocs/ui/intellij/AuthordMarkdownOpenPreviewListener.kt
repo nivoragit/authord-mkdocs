@@ -5,12 +5,8 @@ import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.util.Key
+import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.openapi.vfs.VirtualFile
-import java.util.concurrent.atomic.AtomicInteger
-
-private val PREVIEW_ROUTE_REQUEST_GENERATION_KEY: Key<AtomicInteger> =
-    Key.create("authord.markdown.open.previewRouteGeneration")
 
 /**
  * Initializes persistent preview resources only after an eligible docs markdown file is opened.
@@ -39,10 +35,8 @@ class AuthordMarkdownOpenPreviewListener(
         if (project.isDisposed) {
             return
         }
-        if (!isDocsMarkdownPath(selectedPath)) {
-            return
-        }
-        if (!isAuthordPreviewEligible(project.basePath, selectedPath)) {
+        val runtimeService = runtimeServiceResolver(project)
+        if (!runtimeService.isPreviewEligibleMarkdownPath(selectedPath)) {
             return
         }
 
@@ -54,18 +48,14 @@ class AuthordMarkdownOpenPreviewListener(
         val browserService = browserServiceResolver(project) ?: return
         browserService.markMarkdownActivated()
 
-        val runtimeService = runtimeServiceResolver(project)
         if (runtimeService.isRuntimeRunning()) {
-            val routedUrl = runtimeService.navigateToSelectedFile(selectedPath)
-            val resolvedUrl = routedUrl ?: runtimeService.currentPreviewUrl()
-            if (!resolvedUrl.isNullOrBlank()) {
-                loadResolvedRoute(
-                    project = project,
-                    runtimeService = runtimeService,
-                    browserService = browserService,
-                    resolvedUrl = resolvedUrl,
-                )
-            }
+            runtimeService.dispatchPreviewForSelectedFileWithRetry(
+                selectedPath = selectedPath,
+                source = PreviewRouteIntentSource.MARKDOWN_OPEN,
+                forceReload = true,
+                loadUrl = { url, forceReload -> browserService.loadUrl(url, forceReload) },
+                shouldRetry = { isFileSelectedForPreview(project, selectedPath) },
+            )
             return
         }
 
@@ -73,47 +63,36 @@ class AuthordMarkdownOpenPreviewListener(
             if (project.isDisposed || !result.success) {
                 return@startPreviewAsync
             }
-            val routedUrl = runtimeService.navigateToSelectedFile(selectedPath)
-            val resolvedUrl = routedUrl ?: result.previewUrl.ifBlank { runtimeService.currentPreviewUrl().orEmpty() }
-            if (resolvedUrl.isNotBlank()) {
-                loadResolvedRoute(
-                    project = project,
-                    runtimeService = runtimeService,
-                    browserService = browserService,
-                    resolvedUrl = resolvedUrl,
-                )
+            val applied = runtimeService.dispatchPreviewForSelectedFileWithRetry(
+                selectedPath = selectedPath,
+                source = PreviewRouteIntentSource.MARKDOWN_OPEN,
+                forceReload = true,
+                loadUrl = { url, forceReload -> browserService.loadUrl(url, forceReload) },
+                shouldRetry = { isFileSelectedForPreview(project, selectedPath) },
+            )
+            if (!applied) {
+                val fallbackUrl = result.previewUrl.ifBlank { runtimeService.currentPreviewUrl().orEmpty() }
+                if (fallbackUrl.isNotBlank()) {
+                    browserService.loadUrl(fallbackUrl, forceReload = true)
+                }
             }
         }
     }
 
-    private fun loadResolvedRoute(
-        project: Project,
-        runtimeService: PluginRuntimeIntegrationService,
-        browserService: MkDocsPreviewBrowserService,
-        resolvedUrl: String,
-    ) {
-        val requestGeneration = nextRouteLoadGeneration(project)
-        loadPreviewRouteWithReadinessGuard(
-            project = project,
-            targetUrl = resolvedUrl,
-            isRequestCurrent = { currentRouteLoadGeneration(project) == requestGeneration },
-            isRuntimeRunning = runtimeService::isRuntimeRunning,
-            loadUrl = { url, _ -> browserService.loadUrl(url) },
-        )
+    private fun isFileSelectedForPreview(project: Project, selectedPath: String): Boolean {
+        if (project.isDisposed) {
+            return false
+        }
+        val selectedFiles = runCatching { FileEditorManager.getInstance(project).selectedFiles.toList() }.getOrNull()
+            ?: return true
+        val expected = comparablePath(selectedPath)
+        return selectedFiles.any { file ->
+            comparablePath(file.path) == expected
+        }
     }
 
-    private fun nextRouteLoadGeneration(project: Project): Int {
-        val counter = project.getUserData(PREVIEW_ROUTE_REQUEST_GENERATION_KEY)
-            ?: AtomicInteger(0).also { project.putUserData(PREVIEW_ROUTE_REQUEST_GENERATION_KEY, it) }
-        return counter.incrementAndGet()
-    }
-
-    private fun currentRouteLoadGeneration(project: Project): Int {
-        return project.getUserData(PREVIEW_ROUTE_REQUEST_GENERATION_KEY)?.get() ?: 0
-    }
-
-    private fun isDocsMarkdownPath(path: String): Boolean {
+    private fun comparablePath(path: String): String {
         val normalized = path.replace('\\', '/')
-        return normalized.endsWith(".md") && normalized.contains("/docs/")
+        return if (SystemInfoRt.isFileSystemCaseSensitive) normalized else normalized.lowercase()
     }
 }

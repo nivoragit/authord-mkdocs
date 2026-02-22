@@ -1,13 +1,50 @@
 package com.authord.mkdocs.ui.intellij
 
+import java.nio.file.FileVisitResult
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
+import java.util.Locale
 import java.util.Optional
 import java.util.concurrent.ConcurrentHashMap
+
+private val mkdocsConfigDiscoveryPriority = listOf(
+    "mkdocs.yml",
+    "mkdocs.yaml",
+    "_mkdocs.yml",
+    "_mkdocs.yaml",
+)
+private val mkdocsConfigDiscoveryPriorityByName = mkdocsConfigDiscoveryPriority
+    .withIndex()
+    .associate { (index, name) -> name to index }
+private val mkdocsConfigDiscoveryNames = mkdocsConfigDiscoveryPriority.toSet()
+private val ignoredMkdocsConfigSearchDirectories = setOf(
+    ".git",
+    ".idea",
+    ".gradle",
+    "build",
+    "out",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+)
+private const val MKDOCS_CONFIG_SEARCH_MAX_DIRECTORY_DEPTH: Int = 4
 
 internal fun findMkdocsConfig(projectRoot: Path): Path? {
     return MkdocsConfigLocator.findMkdocsConfig(projectRoot)
 }
+
+internal fun isMkdocsConfigPath(path: String): Boolean {
+    val fileName = runCatching { Path.of(path).fileName?.toString() }
+        .getOrNull()
+        ?.lowercase(Locale.ROOT)
+        ?: return false
+    return mkdocsConfigDiscoveryNames.contains(fileName)
+}
+
+internal fun mkdocsConfigCandidateFileNames(): List<String> = mkdocsConfigDiscoveryPriority
 
 internal fun isMarkdownPath(path: String): Boolean {
     val normalized = path.lowercase()
@@ -69,16 +106,81 @@ private object MkdocsConfigLocator {
     }
 
     private fun resolveConfigInRoot(projectRoot: Path): Path? {
-        val yml = projectRoot.resolve("mkdocs.yml")
-        if (Files.exists(yml) && Files.isRegularFile(yml)) {
-            return yml
-        }
+        resolveConfigInDirectory(projectRoot)?.let { return it }
+        return resolveConfigInSubdirectories(projectRoot)
+    }
 
-        val yaml = projectRoot.resolve("mkdocs.yaml")
-        if (Files.exists(yaml) && Files.isRegularFile(yaml)) {
-            return yaml
+    private fun resolveConfigInDirectory(directory: Path): Path? {
+        mkdocsConfigDiscoveryPriority.forEach { fileName ->
+            val candidate = directory.resolve(fileName)
+            if (Files.exists(candidate) && Files.isRegularFile(candidate)) {
+                return candidate
+            }
         }
-
         return null
+    }
+
+    private fun resolveConfigInSubdirectories(projectRoot: Path): Path? {
+        var bestPath: Path? = null
+        var bestDepth = Int.MAX_VALUE
+        var bestPriority = Int.MAX_VALUE
+        var bestLexicographicKey = ""
+
+        Files.walkFileTree(
+            projectRoot,
+            object : SimpleFileVisitor<Path>() {
+                override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    if (dir == projectRoot) {
+                        return FileVisitResult.CONTINUE
+                    }
+                    val depth = relativeDepth(projectRoot, dir)
+                    if (depth > MKDOCS_CONFIG_SEARCH_MAX_DIRECTORY_DEPTH) {
+                        return FileVisitResult.SKIP_SUBTREE
+                    }
+                    val directoryName = dir.fileName?.toString()?.lowercase(Locale.ROOT).orEmpty()
+                    if (ignoredMkdocsConfigSearchDirectories.contains(directoryName)) {
+                        return FileVisitResult.SKIP_SUBTREE
+                    }
+                    return FileVisitResult.CONTINUE
+                }
+
+                override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                    if (!attrs.isRegularFile) {
+                        return FileVisitResult.CONTINUE
+                    }
+                    val fileName = file.fileName?.toString()?.lowercase(Locale.ROOT) ?: return FileVisitResult.CONTINUE
+                    val priority = mkdocsConfigDiscoveryPriorityByName[fileName] ?: return FileVisitResult.CONTINUE
+                    val depth = relativeDepth(projectRoot, file)
+                    if (depth > MKDOCS_CONFIG_SEARCH_MAX_DIRECTORY_DEPTH + 1) {
+                        return FileVisitResult.CONTINUE
+                    }
+
+                    val normalizedFile = runCatching { file.toAbsolutePath().normalize() }.getOrNull()
+                        ?: return FileVisitResult.CONTINUE
+                    val lexicographicKey = normalizedFile.toString().replace('\\', '/').lowercase(Locale.ROOT)
+                    val shouldReplace = when {
+                        depth < bestDepth -> true
+                        depth > bestDepth -> false
+                        priority < bestPriority -> true
+                        priority > bestPriority -> false
+                        else -> bestPath == null || lexicographicKey < bestLexicographicKey
+                    }
+                    if (shouldReplace) {
+                        bestPath = normalizedFile
+                        bestDepth = depth
+                        bestPriority = priority
+                        bestLexicographicKey = lexicographicKey
+                    }
+
+                    return FileVisitResult.CONTINUE
+                }
+            },
+        )
+
+        return bestPath
+    }
+
+    private fun relativeDepth(root: Path, candidate: Path): Int {
+        return runCatching { root.relativize(candidate).nameCount }.getOrDefault(Int.MAX_VALUE)
     }
 }

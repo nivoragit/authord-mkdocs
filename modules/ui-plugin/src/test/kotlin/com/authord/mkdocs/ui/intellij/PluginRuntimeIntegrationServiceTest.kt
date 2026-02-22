@@ -15,6 +15,7 @@ import com.authord.mkdocs.ui.PreviewNavigationFailureHandler
 import com.authord.mkdocs.ui.PreviewPaneCoordinator
 import com.authord.mkdocs.core.navigation.RouteMappingService
 import java.nio.file.Files
+import java.nio.file.attribute.FileTime
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.io.path.createTempDirectory
 import kotlin.test.Test
@@ -39,15 +40,27 @@ private class CountingProcessLauncher : ProcessLauncher {
     private val counter = AtomicInteger(0)
     var launchCount: Int = 0
         private set
+    var lastCommand: List<String> = emptyList()
+        private set
 
     override fun launch(command: List<String>, workingDir: String): ManagedProcessHandle {
         launchCount += 1
+        lastCommand = command
         return LifecycleHandle("process-${counter.incrementAndGet()}")
     }
 }
 
 private class SuccessCommandRunner : CommandRunner {
     override fun run(command: List<String>, workingDir: String): CommandResult = CommandResult(exitCode = 0)
+}
+
+private class MutationReloadRecordingPreviewContent : PreviewContent {
+    override val component = javax.swing.JPanel()
+    val loadedUrls: MutableList<String> = mutableListOf()
+
+    override fun loadUrl(url: String) {
+        loadedUrls += url
+    }
 }
 
 class PluginRuntimeIntegrationServiceTest {
@@ -401,5 +414,694 @@ class PluginRuntimeIntegrationServiceTest {
         assertNull(updatedUrl)
         val currentUrl = service.currentPreviewUrl()
         assertTrue(currentUrl != null && currentUrl.startsWith("http://127.0.0.1:"))
+    }
+
+    @Test
+    fun `usesDirtyLivereloadServeMode reflects running command flags`() {
+        val project = IntellijTestFixtures.project(basePath = "/tmp/project")
+        val launcher = CountingProcessLauncher()
+        val processManager = MkdocsProcessManager(launcher)
+        val previewPane = PreviewPaneCoordinator()
+
+        val dependencies = RuntimeIntegrationDependencies(
+            activationService = PluginActivationService(
+                bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                processManager = processManager,
+                baseUrlDetector = BaseUrlDetector(),
+                previewPaneCoordinator = previewPane,
+                errorPresenter = ActivationErrorPresenter(),
+                readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+            ),
+            processManager = processManager,
+            previewPaneCoordinator = previewPane,
+            navigationCoordinator = NavigationCoordinator(
+                routeMappingService = RouteMappingService(),
+                previewPaneCoordinator = previewPane,
+                failureHandler = PreviewNavigationFailureHandler(),
+            ),
+            featureFlagPolicyService = FeatureFlagPolicyService(),
+            startupOutputProvider = StartupOutputProvider { _, _ -> "ready at https://preview.example/" },
+        )
+
+        val service = PluginRuntimeIntegrationService(project)
+        service.overrideDependenciesForTesting(dependencies)
+
+        assertFalse(service.usesDirtyLivereloadServeMode())
+        assertTrue(service.startPreview().success)
+        assertTrue(launcher.lastCommand.contains("--livereload"))
+        assertTrue(launcher.lastCommand.contains("--dirty"))
+        assertTrue(service.usesDirtyLivereloadServeMode())
+    }
+
+    @Test
+    fun `buildPreviewRouteIntent resolves route using served docs_dir scope`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-preview-intent-scope-")
+        try {
+            val docsAltDir = Files.createDirectories(projectRoot.resolve("docs-alt"))
+            val guidePath = docsAltDir.resolve("guide").also(Files::createDirectories).resolve("index.md")
+            Files.writeString(guidePath, "# Guide\n")
+            val configPath = projectRoot.resolve("mkdocs.yml")
+            Files.writeString(
+                configPath,
+                """
+                    site_name: Demo
+                    docs_dir: docs-alt
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "preview-intent-scope")
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            processManager.start(
+                projectId = project.locationHash,
+                workingDir = projectRoot.toString(),
+                config = com.authord.mkdocs.runtime.RuntimeServerConfig(
+                    command = listOf(
+                        "mkdocs",
+                        "serve",
+                        "--livereload",
+                        "--dirty",
+                        "-f",
+                        configPath.toString(),
+                    ),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            previewPane.open(project.locationHash, "http://127.0.0.1:8000/")
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+
+            val intent = service.buildPreviewRouteIntent(
+                selectedPath = guidePath.toString(),
+                source = PreviewRouteIntentSource.DIRECT_NAVIGATION,
+            )
+
+            assertTrue(intent != null)
+            assertEquals("/guide/", intent.route)
+            assertEquals(docsAltDir.toAbsolutePath().normalize().toString().replace('\\', '/'), intent.docsDirPath)
+            assertTrue(service.currentPreviewUrl()?.endsWith("/guide/") == true)
+            assertTrue(service.isPreviewEligibleMarkdownPath(guidePath.toString()))
+            assertFalse(service.isPreviewEligibleMarkdownPath(projectRoot.resolve("README.md").toString()))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `dispatchPreviewForSelectedFile forwards forceReload flag to dispatched load`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-dispatch-force-reload-")
+        try {
+            val docsDir = Files.createDirectories(projectRoot.resolve("docs").resolve("guides"))
+            val guidePath = docsDir.resolve("index.md")
+            Files.writeString(guidePath, "# Guide\n")
+            val configPath = projectRoot.resolve("mkdocs.yml")
+            Files.writeString(
+                configPath,
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "dispatch-force-reload")
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            processManager.start(
+                projectId = project.locationHash,
+                workingDir = projectRoot.toString(),
+                config = com.authord.mkdocs.runtime.RuntimeServerConfig(
+                    command = listOf(
+                        "mkdocs",
+                        "serve",
+                        "-f",
+                        configPath.toString(),
+                    ),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            previewPane.open(project.locationHash, "https://preview.example/")
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+            val loaded = mutableListOf<Pair<String, Boolean>>()
+
+            val dispatched = service.dispatchPreviewForSelectedFile(
+                selectedPath = guidePath.toString(),
+                source = PreviewRouteIntentSource.TOPIC_MUTATION,
+                forceReload = true,
+                loadUrl = { url, forceReload -> loaded += url to forceReload },
+            )
+
+            assertTrue(dispatched)
+            assertEquals(listOf("https://preview.example/guides/" to true), loaded)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `topic mutation preview dispatch waits for source file to exist before loading browser`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-dispatch-file-ready-")
+        try {
+            val docsDir = Files.createDirectories(projectRoot.resolve("docs").resolve("guides"))
+            val missingPath = docsDir.resolve("new-page.md")
+            val configPath = projectRoot.resolve("mkdocs.yml")
+            Files.writeString(
+                configPath,
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "dispatch-file-ready")
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            processManager.start(
+                projectId = project.locationHash,
+                workingDir = projectRoot.toString(),
+                config = com.authord.mkdocs.runtime.RuntimeServerConfig(
+                    command = listOf(
+                        "mkdocs",
+                        "serve",
+                        "-f",
+                        configPath.toString(),
+                    ),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            previewPane.open(project.locationHash, "https://preview.example/")
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+            val loaded = mutableListOf<Pair<String, Boolean>>()
+            var unavailableMessage: String? = null
+
+            val beforeCreate = service.dispatchPreviewForSelectedFileWithRetry(
+                selectedPath = missingPath.toString(),
+                source = PreviewRouteIntentSource.TOPIC_MUTATION,
+                forceReload = true,
+                retryAttempts = 0,
+                loadUrl = { url, forceReload -> loaded += url to forceReload },
+                onRouteUnavailable = { message -> unavailableMessage = message },
+            )
+
+            assertFalse(beforeCreate)
+            assertTrue(loaded.isEmpty())
+            assertNull(unavailableMessage)
+
+            Files.writeString(missingPath, "# New Page\n")
+            unavailableMessage = null
+            val afterCreate = service.dispatchPreviewForSelectedFileWithRetry(
+                selectedPath = missingPath.toString(),
+                source = PreviewRouteIntentSource.TOPIC_MUTATION,
+                forceReload = true,
+                retryAttempts = 0,
+                loadUrl = { url, forceReload -> loaded += url to forceReload },
+                onRouteUnavailable = { message -> unavailableMessage = message },
+            )
+
+            assertTrue(afterCreate)
+            assertEquals(listOf("https://preview.example/guides/new-page/" to true), loaded)
+            assertNull(unavailableMessage)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `on topic mutation commit rebuilds verified preview url cache list from disk`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-dispatch-cache-rebuild-")
+        try {
+            val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
+            Files.writeString(docsDir.resolve("guide").also(Files::createDirectories).resolve("index.md"), "# Guide\n")
+            Files.writeString(docsDir.resolve("tutorials").also(Files::createDirectories).resolve("setup.md"), "# Setup\n")
+            Files.writeString(
+                docsDir
+                    .resolve("nested")
+                    .resolve("deep")
+                    .also(Files::createDirectories)
+                    .resolve("page.md"),
+                "# Deep Page\n",
+            )
+            val configPath = projectRoot.resolve("mkdocs.yml")
+            Files.writeString(
+                configPath,
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "dispatch-cache-rebuild")
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            processManager.start(
+                projectId = project.locationHash,
+                workingDir = projectRoot.toString(),
+                config = com.authord.mkdocs.runtime.RuntimeServerConfig(
+                    command = listOf(
+                        "mkdocs",
+                        "serve",
+                        "-f",
+                        configPath.toString(),
+                    ),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            previewPane.open(project.locationHash, "https://preview.example/")
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+
+            assertTrue(cachedPreviewTargetUrls(service).isEmpty())
+            service.onTopicMutationCommitted()
+
+            val cachedUrls = cachedPreviewTargetUrls(service)
+            assertEquals(
+                setOf(
+                    "https://preview.example/guide/",
+                    "https://preview.example/tutorials/setup/",
+                    "https://preview.example/nested/deep/page/",
+                ),
+                cachedUrls,
+            )
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `topic mutation preview dispatch loads verified local route immediately`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-dispatch-local-immediate-")
+        try {
+            val docsDir = Files.createDirectories(projectRoot.resolve("docs").resolve("guides"))
+            val pagePath = docsDir.resolve("new-page.md")
+            Files.writeString(pagePath, "# New Page\n")
+            val configPath = projectRoot.resolve("mkdocs.yml")
+            Files.writeString(
+                configPath,
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "dispatch-local-immediate")
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            processManager.start(
+                projectId = project.locationHash,
+                workingDir = projectRoot.toString(),
+                config = com.authord.mkdocs.runtime.RuntimeServerConfig(
+                    command = listOf(
+                        "mkdocs",
+                        "serve",
+                        "-f",
+                        configPath.toString(),
+                    ),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            previewPane.open(project.locationHash, "http://127.0.0.1:8000/")
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+            val loaded = mutableListOf<Pair<String, Boolean>>()
+            val expectedUrl = "http://127.0.0.1:8000/guides/new-page/"
+
+            service.onTopicMutationCommitted()
+            assertTrue(cachedPreviewTargetUrls(service).contains(expectedUrl))
+
+            val dispatched = service.dispatchPreviewForSelectedFileWithRetry(
+                selectedPath = pagePath.toString(),
+                source = PreviewRouteIntentSource.TOPIC_MUTATION,
+                forceReload = true,
+                retryAttempts = 0,
+                loadUrl = { url, forceReload -> loaded += url to forceReload },
+            )
+
+            assertTrue(dispatched)
+            assertEquals(listOf(expectedUrl to true), loaded)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `topic mutation preview dispatch waits for mkdocs config to exist before loading browser`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-dispatch-config-ready-")
+        try {
+            val docsDir = Files.createDirectories(projectRoot.resolve("docs").resolve("guides"))
+            val pagePath = docsDir.resolve("new-page.md")
+            Files.writeString(pagePath, "# New Page\n")
+            val configPath = projectRoot.resolve("mkdocs.yml")
+            val configContent = """
+                site_name: Demo
+                docs_dir: docs
+            """.trimIndent() + "\n"
+            Files.writeString(configPath, configContent)
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "dispatch-config-ready")
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            processManager.start(
+                projectId = project.locationHash,
+                workingDir = projectRoot.toString(),
+                config = com.authord.mkdocs.runtime.RuntimeServerConfig(
+                    command = listOf(
+                        "mkdocs",
+                        "serve",
+                        "-f",
+                        configPath.toString(),
+                    ),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            previewPane.open(project.locationHash, "https://preview.example/")
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+            val loaded = mutableListOf<Pair<String, Boolean>>()
+            var unavailableMessage: String? = null
+
+            service.onTopicMutationCommitted()
+            Files.delete(configPath)
+
+            val beforeRestore = service.dispatchPreviewForSelectedFileWithRetry(
+                selectedPath = pagePath.toString(),
+                source = PreviewRouteIntentSource.TOPIC_MUTATION,
+                forceReload = true,
+                retryAttempts = 0,
+                loadUrl = { url, forceReload -> loaded += url to forceReload },
+                onRouteUnavailable = { message -> unavailableMessage = message },
+            )
+
+            assertFalse(beforeRestore)
+            assertTrue(loaded.isEmpty())
+            assertNull(unavailableMessage)
+
+            Files.writeString(configPath, configContent)
+            unavailableMessage = null
+            val afterRestore = service.dispatchPreviewForSelectedFileWithRetry(
+                selectedPath = pagePath.toString(),
+                source = PreviewRouteIntentSource.TOPIC_MUTATION,
+                forceReload = true,
+                retryAttempts = 0,
+                loadUrl = { url, forceReload -> loaded += url to forceReload },
+                onRouteUnavailable = { message -> unavailableMessage = message },
+            )
+
+            assertTrue(afterRestore)
+            assertEquals(listOf("https://preview.example/guides/new-page/" to true), loaded)
+            assertNull(unavailableMessage)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `onTopicMutationCommitted clears browser last loaded url cache when browser service exists`() {
+        val browserHostProject = IntellijTestFixtures.project(locationHash = "mutation-browser-host")
+        val browserService = MkDocsPreviewBrowserService(browserHostProject)
+        browserService.loadUrl("http://127.0.0.1:8000/guide/")
+        assertEquals("http://127.0.0.1:8000/guide/", sharedLastLoadedUrl(browserService))
+
+        val project = IntellijTestFixtures.project(
+            locationHash = "mutation-browser-reset",
+            services = mapOf(MkDocsPreviewBrowserService::class.java to browserService),
+        )
+        val service = PluginRuntimeIntegrationService(project)
+
+        val nudged = service.onTopicMutationCommitted()
+
+        assertFalse(nudged)
+        assertNull(sharedLastLoadedUrl(browserService))
+    }
+
+    @Test
+    fun `onTopicMutationCommitted does not force browser navigation when runtime is live`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-topic-mutation-force-reload-")
+        try {
+            val configPath = projectRoot.resolve("mkdocs.yml")
+            Files.writeString(
+                configPath,
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                """.trimIndent() + "\n",
+            )
+            val projectId = "mutation-force-reload"
+            val browserHostProject = IntellijTestFixtures.project(locationHash = "mutation-force-reload-browser-host")
+            val browserService = MkDocsPreviewBrowserService(browserHostProject)
+            val recordingPreview = MutationReloadRecordingPreviewContent()
+            injectPreviewContent(browserService, recordingPreview)
+            val currentUrl = "http://127.0.0.1:8000/guides/"
+            browserService.loadUrl(currentUrl)
+            assertEquals(listOf(currentUrl), recordingPreview.loadedUrls)
+
+            val project = IntellijTestFixtures.project(
+                basePath = projectRoot.toString(),
+                locationHash = projectId,
+                services = mapOf(MkDocsPreviewBrowserService::class.java to browserService),
+            )
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            processManager.start(
+                projectId = projectId,
+                workingDir = projectRoot.toString(),
+                config = com.authord.mkdocs.runtime.RuntimeServerConfig(
+                    command = listOf(
+                        "mkdocs",
+                        "serve",
+                        "-f",
+                        configPath.toString(),
+                    ),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            previewPane.open(projectId, currentUrl)
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+
+            val nudged = service.onTopicMutationCommitted()
+
+            assertFalse(nudged)
+            assertEquals(listOf(currentUrl), recordingPreview.loadedUrls)
+            assertNull(sharedLastLoadedUrl(browserService))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `nudgeDirtyLivereloadReload touches watched fallback config without restart`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-dirty-livereload-nudge-")
+        try {
+            val fallbackConfig = projectRoot.resolve(".authord.theme.yml")
+            Files.writeString(fallbackConfig, "INHERIT: 'mkdocs.yml'\n")
+            Files.setLastModifiedTime(fallbackConfig, FileTime.fromMillis(1_000L))
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString())
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            processManager.start(
+                projectId = project.locationHash,
+                workingDir = projectRoot.toString(),
+                config = com.authord.mkdocs.runtime.RuntimeServerConfig(
+                    command = listOf(
+                        "mkdocs",
+                        "serve",
+                        "--livereload",
+                        "--dirty",
+                        "-f",
+                        fallbackConfig.toString(),
+                    ),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+
+            val nudged = service.nudgeDirtyLivereloadReload()
+            val nudgedOnMutation = service.onTopicMutationCommitted()
+
+            assertTrue(nudged)
+            assertTrue(nudgedOnMutation)
+            val modifiedTime = Files.getLastModifiedTime(fallbackConfig).toMillis()
+            assertTrue(modifiedTime > 1_000L)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    private fun sharedLastLoadedUrl(browserService: MkDocsPreviewBrowserService): String? {
+        val field = MkDocsPreviewBrowserService::class.java.getDeclaredField("sharedLastLoadedUrl")
+        field.isAccessible = true
+        return field.get(browserService) as? String
+    }
+
+    private fun injectPreviewContent(service: MkDocsPreviewBrowserService, preview: PreviewContent) {
+        val field = MkDocsPreviewBrowserService::class.java.getDeclaredField("previewContent")
+        field.isAccessible = true
+        field.set(service, preview)
+    }
+
+    private fun cachedPreviewTargetUrls(service: PluginRuntimeIntegrationService): Set<String> {
+        val cacheField = PluginRuntimeIntegrationService::class.java.getDeclaredField("verifiedPreviewRouteCache")
+        cacheField.isAccessible = true
+        val raw = cacheField.get(service) as? Map<*, *> ?: return emptySet()
+        return raw.values.mapNotNull { entry ->
+            val targetUrlField = runCatching { entry?.javaClass?.getDeclaredField("targetUrl") }.getOrNull() ?: return@mapNotNull null
+            targetUrlField.isAccessible = true
+            targetUrlField.get(entry) as? String
+        }.toSet()
     }
 }
