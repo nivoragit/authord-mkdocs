@@ -76,6 +76,7 @@ class MkDocsProjectCreatorTest {
                 is TopicGatewayResult.Success -> loaded.value
                 is TopicGatewayResult.Failure -> error("Expected config to parse, but failed: ${loaded.error.detail}")
             }
+            assertEquals("demo-site", document.siteName)
             assertEquals(1, document.nav.size)
             assertEquals("Welcome to Authord", document.nav[0].title)
             assertEquals(1, document.nav[0].children.size)

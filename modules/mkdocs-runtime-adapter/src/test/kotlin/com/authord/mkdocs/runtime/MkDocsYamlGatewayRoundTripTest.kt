@@ -12,12 +12,13 @@ import kotlin.test.fail
 
 class MkDocsYamlGatewayRoundTripTest {
     @Test
-    fun `roundtrip parse and deterministic serialization keeps docs_dir nav and not_in_nav`() {
+    fun `roundtrip parse and deterministic serialization keeps site_name docs_dir nav and not_in_nav`() {
         val projectRoot = Files.createTempDirectory("mkdocs-roundtrip")
         val configPath = projectRoot.resolve("mkdocs.yml")
         Files.writeString(
             configPath,
             """
+            site_name: Demo Site
             docs_dir: docs
             nav:
               - Home: index.md
@@ -38,6 +39,7 @@ class MkDocsYamlGatewayRoundTripTest {
         val gateway = MkDocsYamlGateway()
 
         val loaded = requireSuccess(gateway.loadConfig(instance))
+        assertEquals("Demo Site", loaded.siteName)
         assertEquals("docs", loaded.docsDir)
         assertEquals(2, loaded.nav.size)
         assertEquals("index.md", loaded.nav.first().path)
@@ -47,6 +49,7 @@ class MkDocsYamlGatewayRoundTripTest {
         val first = requireSuccess(gateway.serializeDeterministically(loaded))
         val second = requireSuccess(gateway.serializeDeterministically(loaded))
         assertEquals(first, second)
+        assertTrue(first.contains("site_name: Demo Site"))
         assertTrue(first.contains("docs_dir: docs"))
         assertTrue(first.contains("nav:"))
         assertTrue(first.contains("not_in_nav:"))
@@ -101,6 +104,7 @@ class MkDocsYamlGatewayRoundTripTest {
                 ),
             ),
             notInNav = listOf("scratch.md", "drafts/new.md"),
+            siteName = "DemoSite",
         )
 
         requireSuccess(gateway.writeConfig(instance, document))
@@ -110,6 +114,7 @@ class MkDocsYamlGatewayRoundTripTest {
         val secondWrite = Files.readString(configPath)
 
         assertEquals(firstWrite, secondWrite)
+        assertTrue(firstWrite.contains("site_name: DemoSite"))
         assertTrue(firstWrite.contains("docs_dir: docs"))
         assertTrue(firstWrite.contains("- Home: index.md"))
         assertTrue(firstWrite.contains("not_in_nav:"))

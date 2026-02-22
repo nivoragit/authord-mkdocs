@@ -19,10 +19,12 @@ class MkDocsConfigGatewayContractTest {
             docsDir = "docs",
             nav = listOf(TopicNavNode(nodeId = "n1", title = "Intro", path = "index.md")),
             notInNav = listOf("index2.md"),
+            siteName = "Demo",
         )
 
         assertEquals("docs", document.docsDir)
         assertEquals(1, document.nav.size)
         assertEquals(1, document.notInNav.size)
+        assertEquals("Demo", document.siteName)
     }
 }
