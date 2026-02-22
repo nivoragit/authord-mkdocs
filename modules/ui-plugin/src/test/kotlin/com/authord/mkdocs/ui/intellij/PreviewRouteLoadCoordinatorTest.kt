@@ -96,46 +96,9 @@ class PreviewRouteLoadCoordinatorTest {
         )
 
         assertEquals(listOf(targetUrl to false), loaded)
-        assertTrue(probes >= 4)
+        assertEquals(4, probes)
         val warningMessage = warning
         assertNotNull(warningMessage)
         assertTrue(warningMessage.contains("/renamed/"))
-    }
-
-    @Test
-    fun `loads html fallback route when directory style route stays unavailable`() {
-        val project = IntellijTestFixtures.project(locationHash = "preview-route-html-fallback")
-        val targetUrl = "http://127.0.0.1:8000/new/"
-        val loaded = mutableListOf<Pair<String, Boolean>>()
-        var warning: String? = null
-        val probes = mutableListOf<String>()
-
-        loadPreviewRouteWithReadinessGuard(
-            project = project,
-            targetUrl = targetUrl,
-            isRequestCurrent = { true },
-            isRuntimeRunning = { true },
-            loadUrl = { url, forceReload -> loaded += url to forceReload },
-            routeReadyProbe = { url ->
-                probes += url
-                url == "http://127.0.0.1:8000/new.html"
-            },
-            maxAttempts = 2,
-            retryDelayMillis = 0L,
-            backgroundRunner = { task -> task() },
-            uiRunner = { task -> task() },
-            sleeper = { true },
-            onRouteUnavailable = { message -> warning = message },
-        )
-
-        assertEquals(
-            listOf(
-                targetUrl to false,
-                "http://127.0.0.1:8000/new.html" to true,
-            ),
-            loaded,
-        )
-        assertTrue(probes.contains("http://127.0.0.1:8000/new.html"))
-        assertNull(warning)
     }
 }

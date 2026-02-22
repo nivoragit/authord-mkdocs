@@ -1,10 +1,7 @@
 package com.authord.mkdocs.ui.intellij
 
-import com.authord.mkdocs.ports.topic.TopicGatewayResult
-import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.runtime.CommandResult
 import com.authord.mkdocs.runtime.CommandRunner
-import com.authord.mkdocs.runtime.MkDocsYamlGateway
 import com.authord.mkdocs.runtime.UvExecutableProvider
 import com.authord.mkdocs.runtime.UvExecutableResult
 import java.nio.file.Files
@@ -61,26 +58,6 @@ class MkDocsProjectCreatorTest {
             assertTrue(config.contains("docs_dir: docs"))
             assertTrue(config.contains("nav:"))
             assertTrue(config.contains("Welcome to Authord"))
-            assertTrue(config.contains("  - 'Welcome to Authord':"))
-            assertTrue(config.contains("      - 'Overview': index.md"))
-
-            val configGateway = MkDocsYamlGateway()
-            val loaded = configGateway.loadConfig(
-                TopicInstanceRef(
-                    instanceId = "default",
-                    configPath = projectRoot.resolve("mkdocs.yml").toString(),
-                    docsDirPath = projectRoot.resolve("docs").toString(),
-                ),
-            )
-            val document = when (loaded) {
-                is TopicGatewayResult.Success -> loaded.value
-                is TopicGatewayResult.Failure -> error("Expected config to parse, but failed: ${loaded.error.detail}")
-            }
-            assertEquals(1, document.nav.size)
-            assertEquals("Welcome to Authord", document.nav[0].title)
-            assertEquals(1, document.nav[0].children.size)
-            assertEquals("Overview", document.nav[0].children[0].title)
-            assertEquals("index.md", document.nav[0].children[0].path)
 
             val index = Files.readString(projectRoot.resolve("docs").resolve("index.md"))
             assertTrue(index.contains("Welcome to Authord"))

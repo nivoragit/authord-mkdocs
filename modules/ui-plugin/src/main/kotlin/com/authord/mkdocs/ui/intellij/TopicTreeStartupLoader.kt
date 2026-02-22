@@ -43,7 +43,7 @@ class TopicTreeStartupLoader(
      * Loads startup tree state from config and docs markdown paths.
      */
     fun load(config: MkDocsConfigDocument, docsMarkdownPaths: List<String>): StartupTreeState {
-        val source = if (config.navPresent) {
+        val source = if (config.nav.isNotEmpty()) {
             StartupTreeSource.NAV
         } else {
             StartupTreeSource.FALLBACK

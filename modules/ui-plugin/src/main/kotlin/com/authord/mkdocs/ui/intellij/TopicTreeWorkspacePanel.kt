@@ -1291,12 +1291,8 @@ internal class TopicTreeWorkspacePanel(
         parentNodeId: String,
     ): DefaultMutableTreeNode {
         val directPath = normalizeOptionalPath(node.path)
-        val hiddenSectionRepresentativeChildren = hiddenSectionRepresentativeChildren(node)
-        val hiddenSectionRepresentativeChildIds = hiddenSectionRepresentativeChildren.map { it.nodeId }.toSet()
-        val representativeSectionPath = hiddenSectionRepresentativeChildren
-            .asSequence()
-            .mapNotNull { child -> normalizeOptionalPath(child.path) }
-            .firstOrNull()
+        val hiddenSectionIndexPaths = hiddenSectionIndexPaths(node)
+        val representativeSectionPath = hiddenSectionIndexPaths.firstOrNull()
         val treeNode = DefaultMutableTreeNode(
             TopicTreeNodeView(
                 nodeId = node.nodeId,
@@ -1307,7 +1303,8 @@ internal class TopicTreeWorkspacePanel(
             ),
         )
         node.children.forEach { child ->
-            if (directPath == null && hiddenSectionRepresentativeChildIds.contains(child.nodeId)) {
+            val childPath = normalizeOptionalPath(child.path)
+            if (directPath == null && childPath != null && hiddenSectionIndexPaths.contains(childPath)) {
                 return@forEach
             }
             treeNode.add(toTreeNode(child, node.nodeId))
@@ -1315,50 +1312,14 @@ internal class TopicTreeWorkspacePanel(
         return treeNode
     }
 
-    private fun hiddenSectionRepresentativeChildren(node: TopicNavNode): List<TopicNavNode> {
+    private fun hiddenSectionIndexPaths(node: TopicNavNode): Set<String> {
         if (node.path != null) {
-            return emptyList()
+            return emptySet()
         }
-        val indexChildren = node.children.filter { child ->
-            val childPath = normalizeOptionalPath(child.path) ?: return@filter false
-            isIndexMarkdownPath(childPath)
-        }
-        if (indexChildren.isNotEmpty()) {
-            return indexChildren
-        }
-
-        val sameTitleRepresentative = node.children.firstOrNull { child ->
-            shouldHideSameTitleRepresentativeChild(node, child)
-        }
-        if (sameTitleRepresentative != null) {
-            return listOf(sameTitleRepresentative)
-        }
-
-        val idBasedRepresentative = node.children.firstOrNull { child ->
-            shouldHideLegacyRepresentativeChild(node, child)
-        }
-        return idBasedRepresentative?.let(::listOf) ?: emptyList()
-    }
-
-    private fun shouldHideSameTitleRepresentativeChild(parent: TopicNavNode, child: TopicNavNode): Boolean {
-        val childPath = normalizeOptionalPath(child.path) ?: return false
-        if (child.externalUrl != null || child.children.isNotEmpty()) {
-            return false
-        }
-        if (isIndexMarkdownPath(childPath)) {
-            return true
-        }
-        return child.title.trim().equals(parent.title.trim(), ignoreCase = true)
-    }
-
-    private fun shouldHideLegacyRepresentativeChild(parent: TopicNavNode, child: TopicNavNode): Boolean {
-        if (!child.nodeId.startsWith("${parent.nodeId}__page")) {
-            return false
-        }
-        if (child.externalUrl != null || child.children.isNotEmpty()) {
-            return false
-        }
-        return normalizeOptionalPath(child.path) != null
+        return node.children
+            .mapNotNull { child -> normalizeOptionalPath(child.path) }
+            .filter(::isIndexMarkdownPath)
+            .toSet()
     }
 
     private fun toActualChildOrderIndex(parentNodeId: String, uiChildIndex: Int): Int {
@@ -1366,13 +1327,11 @@ internal class TopicTreeWorkspacePanel(
         if (parentStateNode.path != null) {
             return uiChildIndex
         }
-        val hiddenRepresentativeChildIds = hiddenSectionRepresentativeChildren(parentStateNode)
-            .map { it.nodeId }
-            .toSet()
-        val hiddenRepresentativeChildrenCount = parentStateNode.children.count { child ->
-            hiddenRepresentativeChildIds.contains(child.nodeId)
+        val hiddenIndexChildrenCount = parentStateNode.children.count { child ->
+            val childPath = normalizeOptionalPath(child.path) ?: return@count false
+            isIndexMarkdownPath(childPath)
         }
-        return uiChildIndex + hiddenRepresentativeChildrenCount
+        return uiChildIndex + hiddenIndexChildrenCount
     }
 
     private fun findStateNodeById(nodeId: String): TopicNavNode? {
