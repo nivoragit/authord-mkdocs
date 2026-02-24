@@ -20,9 +20,15 @@ internal class PreviewStartupFailureHandler(
         result: ActivationResult,
         selectedPath: String?,
         onRetry: (() -> Unit)? = null,
+        onRetryDependencySetup: (() -> Unit)? = null,
+        onStartAnyway: (() -> Unit)? = null,
     ) {
         val failure = PreviewStartupFailureClassifier.classify(
             result.message.ifBlank { "Preview start failed." },
+            context = PreviewStartupFailureContext(
+                pythonExecutable = result.diagnostics.pythonExecutable.ifBlank { null },
+                dependencyDeclarationHint = result.diagnostics.dependencyDeclarationHint.ifBlank { null },
+            ),
         )
 
         var configPath: String? = null
@@ -36,22 +42,29 @@ internal class PreviewStartupFailureHandler(
             }
         }
 
-        val wrappedRetry = if (onRetry != null) {
-            {
+        fun wrapAction(action: (() -> Unit)?): (() -> Unit)? {
+            if (action == null) {
+                return null
+            }
+            return {
                 if (!selectedPath.isNullOrBlank()) {
                     bypassStore?.clearBypass(selectedPath, configPath)
                 }
-                onRetry()
+                action()
             }
-        } else {
-            null
         }
+
+        val wrappedRetry = wrapAction(onRetry)
+        val wrappedRetryDependencySetup = wrapAction(onRetryDependencySetup ?: onRetry)
+        val wrappedStartAnyway = wrapAction(onStartAnyway)
 
         notifier.notifyStartupFailure(
             project = project,
             failure = failure,
             configPath = configPath,
             onRetry = wrappedRetry,
+            onRetryDependencySetup = wrappedRetryDependencySetup,
+            onStartAnyway = wrappedStartAnyway,
         )
     }
 }

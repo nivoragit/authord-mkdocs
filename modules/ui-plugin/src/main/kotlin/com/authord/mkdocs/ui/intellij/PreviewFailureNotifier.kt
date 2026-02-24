@@ -5,8 +5,10 @@ import com.intellij.notification.NotificationGroupManager
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.fileEditor.FileEditorManager
+import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
+import java.awt.datatransfer.StringSelection
 import java.nio.file.Path
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
@@ -21,6 +23,8 @@ internal class PreviewFailureNotifier(
         failure: PreviewStartupFailure,
         configPath: String?,
         onRetry: (() -> Unit)? = null,
+        onRetryDependencySetup: (() -> Unit)? = null,
+        onStartAnyway: (() -> Unit)? = null,
     ) {
         val fingerprint = fingerprint(failure, configPath)
         if (!shouldNotify(project.locationHash, fingerprint)) {
@@ -33,6 +37,8 @@ internal class PreviewFailureNotifier(
                 failure = failure,
                 configPath = configPath,
                 onRetry = onRetry,
+                onRetryDependencySetup = onRetryDependencySetup,
+                onStartAnyway = onStartAnyway,
             ),
         )
     }
@@ -67,6 +73,8 @@ internal data class PreviewFailureNotificationPayload(
     val failure: PreviewStartupFailure,
     val configPath: String?,
     val onRetry: (() -> Unit)?,
+    val onRetryDependencySetup: (() -> Unit)?,
+    val onStartAnyway: (() -> Unit)?,
 )
 
 private fun emitFailureNotification(project: Project, payload: PreviewFailureNotificationPayload) {
@@ -78,6 +86,16 @@ private fun emitFailureNotification(project: Project, payload: PreviewFailureNot
         append("\n")
         append("Next step: ")
         append(failure.nextStep)
+        if (failure.persistenceGuidance.isNotBlank()) {
+            append("\n")
+            append("Permanent fix: ")
+            append(failure.persistenceGuidance)
+        }
+        if (!failure.dependencyDeclarationHint.isNullOrBlank()) {
+            append("\n")
+            append("Dependency hint: ")
+            append(failure.dependencyDeclarationHint)
+        }
     }
 
     println("[Authord][ERROR][${project.name}] $message")
@@ -86,6 +104,22 @@ private fun emitFailureNotification(project: Project, payload: PreviewFailureNot
             .getNotificationGroup("Authord Notifications")
             .createNotification("Authord", message, NotificationType.ERROR)
     }.getOrNull() ?: return
+
+    payload.onRetryDependencySetup?.let { retryDeps ->
+        notification.addAction(
+            NotificationAction.createSimple("Retry dependency setup") {
+                retryDeps()
+            },
+        )
+    }
+
+    payload.onStartAnyway?.let { startAnyway ->
+        notification.addAction(
+            NotificationAction.createSimple("Start Anyway") {
+                startAnyway()
+            },
+        )
+    }
 
     payload.onRetry?.let { retry ->
         notification.addAction(
@@ -103,18 +137,11 @@ private fun emitFailureNotification(project: Project, payload: PreviewFailureNot
         )
     }
 
-    if (failure.installPackage != null) {
-        notification.addAction(
-            NotificationAction.createSimple("Install Missing Dependency…") {
-                val command = "uv pip install ${failure.installPackage}"
-                presentAuthordNotification(
-                    project,
-                    "Install suggestion: $command",
-                    NotificationType.INFORMATION,
-                )
-            },
-        )
-    }
+    notification.addAction(
+        NotificationAction.createSimple("Open Terminal") {
+            openTerminalGuidance(project, failure.installCommand)
+        },
+    )
 
     notification.addAction(
         NotificationAction.createSimple("Open Runtime Logs") {
@@ -137,3 +164,15 @@ private fun openRuntimeLog(project: Project) {
     openPathInEditor(project, logPath.toString())
 }
 
+private fun openTerminalGuidance(project: Project, installCommand: String?) {
+    if (!installCommand.isNullOrBlank()) {
+        CopyPasteManager.getInstance().setContents(StringSelection(installCommand))
+    }
+    val projectPath = project.basePath ?: "<project-root>"
+    val guidance = if (installCommand.isNullOrBlank()) {
+        "Open a terminal in $projectPath and rerun dependency setup."
+    } else {
+        "Open a terminal in $projectPath. Install command copied to clipboard:\n$installCommand"
+    }
+    presentAuthordNotification(project, guidance, NotificationType.INFORMATION)
+}

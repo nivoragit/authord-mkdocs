@@ -286,6 +286,14 @@ internal class AuthordMarkdownPreviewFileEditor(
                     result = restartResult,
                     selectedPath = file.path,
                     onRetry = ::restartPreviewAndRefresh,
+                    onRetryDependencySetup = {
+                        retryDependencySetupAndRefresh(PreviewStartTrigger.ACTION)
+                    },
+                    onStartAnyway = if (restartResult.startAnywayAvailable) {
+                        { startPreviewAnywayAndRefresh(PreviewStartTrigger.ACTION) }
+                    } else {
+                        null
+                    },
                 )
                 return@restartPreviewAsync
             }
@@ -301,6 +309,42 @@ internal class AuthordMarkdownPreviewFileEditor(
                     loadUrlIfChanged(resolvedUrl, forceReload = true)
                 }
             }
+        }
+    }
+
+    private fun retryDependencySetupAndRefresh(trigger: PreviewStartTrigger) {
+        runtimeService.retryDependencySetupAsync(trigger) { retryResult ->
+            if (!retryResult.success) {
+                startupFailureHandler.handleFailure(
+                    project = project,
+                    result = retryResult,
+                    selectedPath = file.path,
+                    onRetry = {
+                        refreshForSelectedFile(autoStart = true, trigger = trigger)
+                    },
+                )
+                return@retryDependencySetupAsync
+            }
+            clearFailureBypassForCurrentFile()
+            refreshForSelectedFile(autoStart = true, trigger = trigger)
+        }
+    }
+
+    private fun startPreviewAnywayAndRefresh(trigger: PreviewStartTrigger) {
+        runtimeService.startPreviewAnywayAsync(trigger) { startAnywayResult ->
+            if (!startAnywayResult.success) {
+                startupFailureHandler.handleFailure(
+                    project = project,
+                    result = startAnywayResult,
+                    selectedPath = file.path,
+                    onRetry = {
+                        refreshForSelectedFile(autoStart = true, trigger = trigger)
+                    },
+                )
+                return@startPreviewAnywayAsync
+            }
+            clearFailureBypassForCurrentFile()
+            refreshForSelectedFile(autoStart = true, trigger = trigger)
         }
     }
 
@@ -327,6 +371,14 @@ internal class AuthordMarkdownPreviewFileEditor(
                         onRetry = {
                             refreshForSelectedFile(autoStart = true, trigger = trigger)
                         },
+                        onRetryDependencySetup = {
+                            retryDependencySetupAndRefresh(trigger)
+                        },
+                        onStartAnyway = if (startResult.startAnywayAvailable) {
+                            { startPreviewAnywayAndRefresh(trigger) }
+                        } else {
+                            null
+                        },
                     )
                     return false
                 }
@@ -349,6 +401,14 @@ internal class AuthordMarkdownPreviewFileEditor(
                             selectedPath = file.path,
                             onRetry = {
                                 refreshForSelectedFile(autoStart = true, trigger = trigger)
+                            },
+                            onRetryDependencySetup = {
+                                retryDependencySetupAndRefresh(trigger)
+                            },
+                            onStartAnyway = if (startResult.startAnywayAvailable) {
+                                { startPreviewAnywayAndRefresh(trigger) }
+                            } else {
+                                null
                             },
                         )
                         return@startPreviewAsync

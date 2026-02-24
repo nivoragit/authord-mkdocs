@@ -20,6 +20,9 @@ private class ActivationHandle(
     override val id: String,
     private var alive: Boolean,
     private val startupOutputText: String = "",
+    private val stdoutText: String = startupOutputText,
+    private val stderrText: String = "",
+    private val exitCode: Int? = null,
 ) : ManagedProcessHandle {
     var stopCalls: Int = 0
         private set
@@ -32,6 +35,12 @@ private class ActivationHandle(
     override fun isAlive(): Boolean = alive
 
     override fun startupOutput(): String = startupOutputText
+
+    override fun stdoutOutput(): String = stdoutText
+
+    override fun stderrOutput(): String = stderrText
+
+    override fun exitCodeOrNull(): Int? = if (alive) null else exitCode
 }
 
 class PluginActivationServiceTest {
@@ -266,6 +275,69 @@ class PluginActivationServiceTest {
     }
 
     @Test
+    fun `process exit before readiness reports actionable dependency guidance`() {
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-dep-guidance-")
+        try {
+            val handle = object : ManagedProcessHandle {
+                override val id: String = "dep-failure-handle"
+                private var aliveChecks = 0
+                private var stopped = false
+
+                override fun stop() {
+                    stopped = true
+                }
+
+                override fun isAlive(): Boolean {
+                    if (stopped) {
+                        return false
+                    }
+                    aliveChecks += 1
+                    return aliveChecks == 1
+                }
+
+                override fun startupOutput(): String {
+                    return "Authord process exited before readiness probe succeeded."
+                }
+
+                override fun stdoutOutput(): String = ""
+
+                override fun stderrOutput(): String {
+                    return "ModuleNotFoundError: No module named 'material'\\nmaterial.extensions.emoji"
+                }
+
+                override fun exitCodeOrNull(): Int? = 1
+            }
+
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> handle }),
+                readinessProbe = HttpReadinessProbe { false },
+                maxStartupAttempts = 1,
+                startupProbeTimeoutMillis = 1_000L,
+                startupPollIntervalMillis = 1L,
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertFalse(result.success)
+            assertEquals(ActivationFailureReason.START_FAILED, result.reason)
+            assertTrue(result.message.contains("mkdocs-material"))
+            assertTrue(result.message.contains("-m pip install mkdocs-material"))
+            assertTrue(result.message.contains("requirements.txt / requirements-docs.txt / pyproject.toml"))
+            assertTrue(result.message.contains("Retry dependency setup"))
+            assertEquals("mkdocs-material", result.diagnostics.suggestedPackage)
+            assertTrue(result.diagnostics.pythonExecutable.contains(".mkdocs-plugin-venv"))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `succeeds when bootstrap start and readiness probe succeeds`() {
         val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-success-")
         try {
@@ -358,6 +430,12 @@ class PluginActivationServiceTest {
                     "python",
                 ),
             )
+            val runtimePython = projectRoot.resolve(".mkdocs-plugin-venv").resolve("bin").resolve("python").toString()
+            val runtimePythonIndex = launcher.command.indexOf(runtimePython)
+            assertTrue(runtimePythonIndex > 0)
+            assertEquals("-m", launcher.command.getOrNull(runtimePythonIndex + 1))
+            assertEquals("mkdocs", launcher.command.getOrNull(runtimePythonIndex + 2))
+            assertEquals("serve", launcher.command.getOrNull(runtimePythonIndex + 3))
             assertTrue("--parent-pid" in launcher.command)
             assertTrue("--working-dir" in launcher.command)
             assertTrue("serve" in launcher.command)

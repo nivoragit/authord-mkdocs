@@ -206,6 +206,42 @@ class PluginRuntimeIntegrationService(
      */
     @Synchronized
     fun startPreview(trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION): ActivationResult {
+        return startPreviewInternal(
+            trigger = trigger,
+            allowDependencyBypass = false,
+            retryDependencySetup = false,
+        )
+    }
+
+    /**
+     * Forces dependency setup retry (re-bootstrap + strict verification) before startup.
+     */
+    @Synchronized
+    fun retryDependencySetup(trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION): ActivationResult {
+        return startPreviewInternal(
+            trigger = trigger,
+            allowDependencyBypass = false,
+            retryDependencySetup = true,
+        )
+    }
+
+    /**
+     * Starts preview while bypassing a blocking dependency-setup failure once.
+     */
+    @Synchronized
+    fun startPreviewAnyway(trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION): ActivationResult {
+        return startPreviewInternal(
+            trigger = trigger,
+            allowDependencyBypass = true,
+            retryDependencySetup = false,
+        )
+    }
+
+    private fun startPreviewInternal(
+        trigger: PreviewStartTrigger,
+        allowDependencyBypass: Boolean,
+        retryDependencySetup: Boolean,
+    ): ActivationResult {
         val projectPath = project.basePath
             ?: return ActivationResult(
                 success = false,
@@ -231,11 +267,15 @@ class PluginRuntimeIntegrationService(
             )
         }
 
+        val strictPreflightOnChange = strictPreflightOnDependencyChangeEnabled() && configChanged
         val activationResult = dependencies.activationService.activate(
             projectId = projectId,
             projectPath = projectPath,
             startupOutput = dependencies.startupOutputProvider.startupOutput(project, trigger),
             featureFlags = dependencies.featureFlagPolicyService.current(),
+            strictPreflightOnChange = strictPreflightOnChange,
+            allowDependencyBypass = allowDependencyBypass,
+            retryDependencySetup = retryDependencySetup,
         )
         if (activationResult.success) {
             syncConfigFingerprint(projectPath)
@@ -254,6 +294,32 @@ class PluginRuntimeIntegrationService(
     ) {
         runPreviewOperationAsync(
             operation = { startPreview(trigger) },
+            onComplete = onComplete,
+        )
+    }
+
+    /**
+     * Async variant of [retryDependencySetup].
+     */
+    fun retryDependencySetupAsync(
+        trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION,
+        onComplete: (ActivationResult) -> Unit,
+    ) {
+        runPreviewOperationAsync(
+            operation = { retryDependencySetup(trigger) },
+            onComplete = onComplete,
+        )
+    }
+
+    /**
+     * Async variant of [startPreviewAnyway].
+     */
+    fun startPreviewAnywayAsync(
+        trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION,
+        onComplete: (ActivationResult) -> Unit,
+    ) {
+        runPreviewOperationAsync(
+            operation = { startPreviewAnyway(trigger) },
             onComplete = onComplete,
         )
     }
@@ -555,6 +621,13 @@ class PluginRuntimeIntegrationService(
      */
     fun setStartupOutputForNextRun(startupOutput: String) {
         project.putUserData(ProjectUserDataStartupOutputProvider.KEY, startupOutput)
+    }
+
+    private fun strictPreflightOnDependencyChangeEnabled(): Boolean {
+        val settingsService = runCatching {
+            project.getService(AuthordPreviewSettingsService::class.java)
+        }.getOrNull()
+        return settingsService?.strictPreflightOnDependencyChange == true
     }
 
     /**

@@ -59,6 +59,10 @@ internal fun formatPreviewResultMessage(result: ActivationResult): String {
     if (!result.success) {
         val failure = PreviewStartupFailureClassifier.classify(
             result.message.ifBlank { "Preview start failed." },
+            context = PreviewStartupFailureContext(
+                pythonExecutable = result.diagnostics.pythonExecutable.ifBlank { null },
+                dependencyDeclarationHint = result.diagnostics.dependencyDeclarationHint.ifBlank { null },
+            ),
         )
         return buildString {
             append("Authord preview failed to start. ")

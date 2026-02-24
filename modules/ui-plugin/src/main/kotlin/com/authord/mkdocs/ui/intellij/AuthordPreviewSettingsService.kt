@@ -8,6 +8,7 @@ import com.intellij.openapi.components.StoragePathMacros
 
 data class AuthordPreviewSettingsState(
     var autoOpenPreviewOnMarkdownOpen: Boolean = true,
+    var strictPreflightOnDependencyChange: Boolean = false,
 )
 
 @Service(Service.Level.PROJECT)
@@ -22,6 +23,12 @@ class AuthordPreviewSettingsService : PersistentStateComponent<AuthordPreviewSet
         get() = state.autoOpenPreviewOnMarkdownOpen
         set(value) {
             state.autoOpenPreviewOnMarkdownOpen = value
+        }
+
+    var strictPreflightOnDependencyChange: Boolean
+        get() = state.strictPreflightOnDependencyChange
+        set(value) {
+            state.strictPreflightOnDependencyChange = value
         }
 
     override fun getState(): AuthordPreviewSettingsState = state

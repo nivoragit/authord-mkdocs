@@ -72,6 +72,44 @@ internal class AuthordMarkdownOpenPreviewListener(
                     result = result,
                     selectedPath = selectedPath,
                     onRetry = { onMarkdownOpened(project, selectedPath) },
+                    onRetryDependencySetup = {
+                        runtimeService.retryDependencySetupAsync(PreviewStartTrigger.ACTION) { retryResult ->
+                            if (project.isDisposed) {
+                                return@retryDependencySetupAsync
+                            }
+                            if (!retryResult.success) {
+                                startupFailureHandler.handleFailure(
+                                    project = project,
+                                    result = retryResult,
+                                    selectedPath = selectedPath,
+                                    onRetry = { onMarkdownOpened(project, selectedPath) },
+                                )
+                                return@retryDependencySetupAsync
+                            }
+                            onMarkdownOpened(project, selectedPath)
+                        }
+                    },
+                    onStartAnyway = if (result.startAnywayAvailable) {
+                        {
+                            runtimeService.startPreviewAnywayAsync(PreviewStartTrigger.ACTION) { startAnywayResult ->
+                                if (project.isDisposed) {
+                                    return@startPreviewAnywayAsync
+                                }
+                                if (!startAnywayResult.success) {
+                                    startupFailureHandler.handleFailure(
+                                        project = project,
+                                        result = startAnywayResult,
+                                        selectedPath = selectedPath,
+                                        onRetry = { onMarkdownOpened(project, selectedPath) },
+                                    )
+                                    return@startPreviewAnywayAsync
+                                }
+                                onMarkdownOpened(project, selectedPath)
+                            }
+                        }
+                    } else {
+                        null
+                    },
                 )
                 return@startPreviewAsync
             }

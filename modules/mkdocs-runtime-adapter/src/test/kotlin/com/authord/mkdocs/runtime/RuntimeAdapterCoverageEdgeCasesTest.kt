@@ -188,21 +188,22 @@ class RuntimeAdapterCoverageEdgeCasesTest {
             }
             val result = service.bootstrap(root.toString())
             val runtimePath = root.resolve(".mkdocs-plugin-venv").toString()
+            val runtimePython = root.resolve(".mkdocs-plugin-venv").resolve("bin").resolve("python").toString()
             assertTrue(result.success)
             // Verify base install
             assertEquals(
-                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs"),
+                listOf("uv", "pip", "install", "--python", runtimePython, "mkdocs"),
                 commands[1],
             )
             // Verify get-deps was called
             assertTrue(commands[2].contains("get-deps"))
             // Verify discovered deps were installed
             assertEquals(
-                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs-material", "mkdocs-glightbox"),
+                listOf("uv", "pip", "install", "--python", runtimePython, "mkdocs-material", "mkdocs-glightbox"),
                 commands[3],
             )
 
-            // When get-deps fails, bootstrap still succeeds with base mkdocs
+            // When get-deps fails, bootstrap is blocked by default.
             Files.writeString(
                 configPath,
                 """
@@ -220,7 +221,9 @@ class RuntimeAdapterCoverageEdgeCasesTest {
                 }
             }
             val second = secondService.bootstrap(root.toString())
-            assertTrue(second.success)
+            assertFalse(second.success)
+            assertTrue(second.canStartAnyway)
+            assertEquals(BootstrapFailureCategory.GET_DEPS, second.failureCategory)
             // Only 3 commands: venv + base install + get-deps (failed)
             assertEquals(3, secondCommands.size)
         } finally {
@@ -301,11 +304,14 @@ class RuntimeAdapterCoverageEdgeCasesTest {
             val result = service.bootstrap(root.toString())
             assertTrue(result.success)
             // Verify deps are deduplicated
-            val depsCmd = commands.last()
-            val runtimePath = root.resolve(".mkdocs-plugin-venv").toString()
+            val depsCmd = commands.find { command ->
+                command.size > 5 && command[0] == "uv" && command[1] == "pip" && command.contains("mkdocs-material")
+            }
+            assertTrue(depsCmd != null)
+            val runtimePython = root.resolve(".mkdocs-plugin-venv").resolve("bin").resolve("python").toString()
             assertEquals(
-                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs-material", "pymdown-extensions"),
-                depsCmd,
+                listOf("uv", "pip", "install", "--python", runtimePython, "mkdocs-material", "pymdown-extensions"),
+                depsCmd!!,
             )
         } finally {
             root.toFile().deleteRecursively()

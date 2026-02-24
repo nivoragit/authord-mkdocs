@@ -2,11 +2,15 @@ package com.authord.mkdocs.ui
 
 import com.authord.mkdocs.core.flags.FeatureFlagPolicy
 import com.authord.mkdocs.runtime.BaseUrlDetector
+import com.authord.mkdocs.runtime.BootstrapDiagnostics
 import com.authord.mkdocs.runtime.MkdocsProcessManager
 import com.authord.mkdocs.runtime.RuntimeProcessDiagnostics
 import com.authord.mkdocs.runtime.RuntimeServerConfig
 import com.authord.mkdocs.runtime.UvBootstrapService
 import com.authord.mkdocs.ui.intellij.AuthordUiBundle
+import com.authord.mkdocs.ui.intellij.PreviewStartupFailure
+import com.authord.mkdocs.ui.intellij.PreviewStartupFailureClassifier
+import com.authord.mkdocs.ui.intellij.PreviewStartupFailureContext
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
 import java.net.HttpURLConnection
@@ -69,11 +73,27 @@ private fun defaultPluginEnvironmentRoot(): Path {
 /**
  * Result returned by plugin activation flow.
  */
+data class ActivationDiagnostics(
+    val pythonExecutable: String = "",
+    val pythonVersion: String = "",
+    val mkdocsVersion: String = "",
+    val bootstrapResultSummary: String = "",
+    val verificationSummary: String = "",
+    val classifiedErrorCategory: String = "",
+    val suggestedPackage: String = "",
+    val dependencyDeclarationHint: String = "",
+)
+
+/**
+ * Result returned by plugin activation flow.
+ */
 data class ActivationResult(
     val success: Boolean,
     val reason: ActivationFailureReason? = null,
     val message: String = "",
     val previewUrl: String = "",
+    val diagnostics: ActivationDiagnostics = ActivationDiagnostics(),
+    val startAnywayAvailable: Boolean = false,
 )
 
 /**
@@ -102,6 +122,12 @@ class PluginActivationService(
         val startupOutput: String,
     )
 
+    private data class ClassifiedStartupFailureDetails(
+        val details: String,
+        val rawOutput: String,
+        val classifiedFailure: PreviewStartupFailure,
+    )
+
     private sealed interface StartupReadiness {
         data class Ready(val diagnostics: RuntimeProcessDiagnostics?) : StartupReadiness
 
@@ -128,6 +154,9 @@ class PluginActivationService(
         projectPath: String,
         @Suppress("UNUSED_PARAMETER") startupOutput: String,
         featureFlags: FeatureFlagPolicy,
+        strictPreflightOnChange: Boolean = false,
+        allowDependencyBypass: Boolean = false,
+        retryDependencySetup: Boolean = false,
     ): ActivationResult {
         if (!featureFlags.allowsMvpFlow() || !featureFlags.disallowsFutureCycleFeatures()) {
             val reason = ActivationFailureReason.MVP_DISABLED
@@ -148,13 +177,45 @@ class PluginActivationService(
             )
         }
 
+        if (retryDependencySetup) {
+            bootstrapService.requestDependencyRetry(projectPath)
+        }
+        if (strictPreflightOnChange) {
+            bootstrapService.requestStrictVerification(projectPath)
+        }
+        if (allowDependencyBypass) {
+            bootstrapService.requestStartAnyway(projectPath)
+        }
+
         val bootstrapResult = bootstrapService.bootstrap(projectPath)
+        logBootstrapDiagnostics(projectPath, bootstrapResult.diagnostics)
         if (!bootstrapResult.success) {
             val reason = ActivationFailureReason.BOOTSTRAP_FAILED
+            val initialClassification = classifyStartupFailure(
+                rawMessage = bootstrapResult.errorMessage,
+                pythonExecutable = bootstrapResult.diagnostics.pythonExecutable,
+                dependencyDeclarationHint = "",
+            )
+            val dependencyHint = dependencyDeclarationHint(
+                projectPath = projectPath,
+                suggestedPackage = initialClassification.installPackage,
+            )
+            val classified = classifyStartupFailure(
+                rawMessage = bootstrapResult.errorMessage,
+                pythonExecutable = bootstrapResult.diagnostics.pythonExecutable,
+                dependencyDeclarationHint = dependencyHint,
+            )
+            val actionableDetails = buildActionableFailureMessage(classified)
             return ActivationResult(
                 success = false,
                 reason = reason,
-                message = errorPresenter.present(reason, bootstrapResult.errorMessage),
+                message = errorPresenter.present(reason, actionableDetails),
+                diagnostics = buildActivationDiagnostics(
+                    bootstrapDiagnostics = bootstrapResult.diagnostics,
+                    classifiedFailure = classified,
+                    dependencyHint = dependencyHint,
+                ),
+                startAnywayAvailable = bootstrapResult.canStartAnyway,
             )
         }
 
@@ -229,6 +290,11 @@ class PluginActivationService(
                         success = true,
                         previewUrl = baseUrl,
                         message = AuthordUiBundle.message("activation.status.completed"),
+                        diagnostics = buildActivationDiagnostics(
+                            bootstrapDiagnostics = bootstrapResult.diagnostics,
+                            classifiedFailure = null,
+                            dependencyHint = "",
+                        ),
                     )
                 }
 
@@ -258,11 +324,22 @@ class PluginActivationService(
         }
 
         val reason = ActivationFailureReason.START_FAILED
-        val failureDetails = startupFailureDetails(projectPath, lastFailure)
+        val failureDetails = startupFailureDetails(
+            projectPath = projectPath,
+            failure = lastFailure,
+            bootstrapDiagnostics = bootstrapResult.diagnostics,
+        )
+        bootstrapService.requestStrictVerification(projectPath)
         return ActivationResult(
             success = false,
             reason = reason,
-            message = errorPresenter.present(reason, failureDetails),
+            message = errorPresenter.present(reason, failureDetails.details),
+            diagnostics = buildActivationDiagnostics(
+                bootstrapDiagnostics = bootstrapResult.diagnostics,
+                classifiedFailure = failureDetails.classifiedFailure,
+                dependencyHint = failureDetails.classifiedFailure.dependencyDeclarationHint.orEmpty(),
+            ),
+            startAnywayAvailable = false,
         )
     }
 
@@ -290,9 +367,28 @@ class PluginActivationService(
         return StartupReadiness.TimedOut(processManager.diagnostics(projectId) ?: latestDiagnostics)
     }
 
-    private fun startupFailureDetails(projectPath: String, failure: StartupAttemptFailure?): String {
+    private fun startupFailureDetails(
+        projectPath: String,
+        failure: StartupAttemptFailure?,
+        bootstrapDiagnostics: BootstrapDiagnostics,
+    ): ClassifiedStartupFailureDetails {
         if (failure == null) {
-            return startFailureDetails(projectPath, "")
+            val rawOutput = startFailureDetails(projectPath, "")
+            val classified = classifyStartupFailureWithProjectHint(
+                projectPath = projectPath,
+                rawMessage = rawOutput,
+                pythonExecutable = bootstrapDiagnostics.pythonExecutable,
+            )
+            val details = buildString {
+                append(buildActionableFailureMessage(classified))
+                append("\n")
+                append(compactDiagnosticsSection(bootstrapDiagnostics, classified))
+            }
+            return ClassifiedStartupFailureDetails(
+                details = details,
+                rawOutput = rawOutput,
+                classifiedFailure = classified,
+            )
         }
 
         val diagnostics = failure.diagnostics
@@ -304,21 +400,23 @@ class PluginActivationService(
         )
             .filter { it.isNotBlank() }
             .joinToString("\n")
-        val parsedError = startFailureDetails(projectPath, mergedOutput)
+        val parsedOutput = startFailureDetails(projectPath, mergedOutput)
+        val classified = classifyStartupFailureWithProjectHint(
+            projectPath = projectPath,
+            rawMessage = parsedOutput.ifBlank { failure.failureSummary },
+            pythonExecutable = bootstrapDiagnostics.pythonExecutable,
+        )
         val stdoutTail = tailText(diagnostics?.stdoutOutput.orEmpty())
         val stderrTail = tailText(diagnostics?.stderrOutput.orEmpty())
 
-        return buildString {
+        val details = buildString {
             append(failure.failureSummary)
             append(" Last attempted URL: ")
             append(failure.baseUrl.ifBlank { "<unavailable>" })
             append(". Process exit code: ")
             append(diagnostics?.exitCode?.toString() ?: "unavailable")
-
-            if (parsedError.isNotBlank()) {
-                append(". ")
-                append(parsedError)
-            }
+            append(". ")
+            append(buildActionableFailureMessage(classified))
 
             if (stdoutTail.isNotBlank()) {
                 append(". stdout tail:\n")
@@ -329,7 +427,16 @@ class PluginActivationService(
                 append("\nstderr tail:\n")
                 append(stderrTail)
             }
+
+            append("\n")
+            append(compactDiagnosticsSection(bootstrapDiagnostics, classified))
         }
+
+        return ClassifiedStartupFailureDetails(
+            details = details,
+            rawOutput = parsedOutput,
+            classifiedFailure = classified,
+        )
     }
 
     private fun tailText(text: String, maxLines: Int = 40, maxChars: Int = 4_000): String {
@@ -405,6 +512,194 @@ class PluginActivationService(
         }
 
         return ""
+    }
+
+    private fun classifyStartupFailureWithProjectHint(
+        projectPath: String,
+        rawMessage: String,
+        pythonExecutable: String,
+    ): PreviewStartupFailure {
+        val initial = classifyStartupFailure(
+            rawMessage = rawMessage,
+            pythonExecutable = pythonExecutable,
+            dependencyDeclarationHint = "",
+        )
+        val dependencyHint = dependencyDeclarationHint(
+            projectPath = projectPath,
+            suggestedPackage = initial.installPackage,
+        )
+        return classifyStartupFailure(
+            rawMessage = rawMessage,
+            pythonExecutable = pythonExecutable,
+            dependencyDeclarationHint = dependencyHint,
+        )
+    }
+
+    private fun classifyStartupFailure(
+        rawMessage: String,
+        pythonExecutable: String,
+        dependencyDeclarationHint: String,
+    ): PreviewStartupFailure {
+        return PreviewStartupFailureClassifier.classify(
+            rawMessage = rawMessage.ifBlank { "Preview start failed." },
+            context = PreviewStartupFailureContext(
+                pythonExecutable = pythonExecutable.ifBlank { null },
+                dependencyDeclarationHint = dependencyDeclarationHint.ifBlank { null },
+            ),
+        )
+    }
+
+    private fun buildActionableFailureMessage(classifiedFailure: PreviewStartupFailure): String {
+        return buildString {
+            append("Reason: ")
+            append(classifiedFailure.reason)
+            if (!classifiedFailure.configContext.isNullOrBlank()) {
+                append(" ")
+                append(classifiedFailure.configContext)
+            }
+            if (classifiedFailure.nextStep.isNotBlank()) {
+                append(" Next step: ")
+                append(classifiedFailure.nextStep)
+            }
+            if (classifiedFailure.persistenceGuidance.isNotBlank()) {
+                append(" ")
+                append(classifiedFailure.persistenceGuidance)
+            }
+            if (!classifiedFailure.dependencyDeclarationHint.isNullOrBlank()) {
+                append(" ")
+                append(classifiedFailure.dependencyDeclarationHint)
+            }
+        }
+    }
+
+    private fun compactDiagnosticsSection(
+        bootstrapDiagnostics: BootstrapDiagnostics,
+        classifiedFailure: PreviewStartupFailure,
+    ): String {
+        val bootstrapSummary = "get-deps=${bootstrapDiagnostics.getDepsOutcome.name.lowercase()}, fallback=${bootstrapDiagnostics.fallbackDependencySource.ifBlank { "none" }}"
+        val verificationSummary = if (bootstrapDiagnostics.verificationMode == com.authord.mkdocs.runtime.BootstrapVerificationMode.NONE) {
+            "none"
+        } else {
+            val status = if (bootstrapDiagnostics.verificationSucceeded == true) "ok" else "failed"
+            "${bootstrapDiagnostics.verificationMode.name.lowercase()}:$status"
+        }
+        return buildString {
+            append("Diagnostics:\n")
+            append("- interpreter: ")
+            append(bootstrapDiagnostics.pythonExecutable.ifBlank { "<unavailable>" })
+            append('\n')
+            append("- python: ")
+            append(bootstrapDiagnostics.pythonVersion.ifBlank { "<unknown>" })
+            append('\n')
+            append("- mkdocs: ")
+            append(bootstrapDiagnostics.mkdocsVersion.ifBlank { "<unknown>" })
+            append('\n')
+            append("- bootstrap: ")
+            append(bootstrapSummary)
+            append('\n')
+            append("- verification: ")
+            append(verificationSummary)
+            append('\n')
+            append("- classified: ")
+            append(classifiedFailure.category.name.lowercase())
+            if (classifiedFailure.installPackage != null) {
+                append(" (")
+                append(classifiedFailure.installPackage)
+                append(")")
+            }
+            if (!classifiedFailure.dependencyDeclarationHint.isNullOrBlank()) {
+                append('\n')
+                append("- declared dependency hint: ")
+                append(classifiedFailure.dependencyDeclarationHint)
+            }
+        }
+    }
+
+    private fun buildActivationDiagnostics(
+        bootstrapDiagnostics: BootstrapDiagnostics,
+        classifiedFailure: PreviewStartupFailure?,
+        dependencyHint: String,
+    ): ActivationDiagnostics {
+        val bootstrapSummary = "get-deps=${bootstrapDiagnostics.getDepsOutcome.name.lowercase()}, fallback=${bootstrapDiagnostics.fallbackDependencySource.ifBlank { "none" }}"
+        val verificationSummary = if (bootstrapDiagnostics.verificationMode == com.authord.mkdocs.runtime.BootstrapVerificationMode.NONE) {
+            "none"
+        } else {
+            val status = if (bootstrapDiagnostics.verificationSucceeded == true) "ok" else "failed"
+            "${bootstrapDiagnostics.verificationMode.name.lowercase()}:$status"
+        }
+        return ActivationDiagnostics(
+            pythonExecutable = bootstrapDiagnostics.pythonExecutable,
+            pythonVersion = bootstrapDiagnostics.pythonVersion,
+            mkdocsVersion = bootstrapDiagnostics.mkdocsVersion,
+            bootstrapResultSummary = bootstrapSummary,
+            verificationSummary = verificationSummary,
+            classifiedErrorCategory = classifiedFailure?.category?.name.orEmpty(),
+            suggestedPackage = classifiedFailure?.installPackage.orEmpty(),
+            dependencyDeclarationHint = dependencyHint,
+        )
+    }
+
+    private fun dependencyDeclarationHint(projectPath: String, suggestedPackage: String?): String {
+        if (suggestedPackage.isNullOrBlank()) {
+            return ""
+        }
+        val declared = isDependencyDeclared(projectPath, suggestedPackage)
+        return if (declared) {
+            "Dependency appears declared in project dependency files; this may indicate interpreter/environment mismatch."
+        } else {
+            "Dependency does not appear in requirements.txt / requirements-docs.txt / pyproject.toml docs dependencies."
+        }
+    }
+
+    private fun isDependencyDeclared(projectPath: String, suggestedPackage: String): Boolean {
+        val normalized = normalizeDependencyToken(suggestedPackage)
+        val alternate = normalized.replace('-', '_')
+        return dependencyDeclarationFiles(projectPath).any { candidate ->
+            val content = runCatching { Files.readString(candidate).lowercase() }.getOrDefault("")
+            content.contains(normalized) || content.contains(alternate)
+        }
+    }
+
+    private fun normalizeDependencyToken(token: String): String {
+        return token.trim().lowercase().replace('_', '-')
+    }
+
+    private fun dependencyDeclarationFiles(projectPath: String): List<Path> {
+        val root = runCatching { Path.of(projectPath) }.getOrNull() ?: return emptyList()
+        if (!root.exists()) {
+            return emptyList()
+        }
+
+        val files = mutableListOf<Path>()
+        runCatching {
+            Files.newDirectoryStream(root).use { entries ->
+                for (entry in entries) {
+                    val fileName = entry.fileName.toString()
+                    if (
+                        Files.isRegularFile(entry) &&
+                        fileName.startsWith("requirements", ignoreCase = true) &&
+                        fileName.endsWith(".txt", ignoreCase = true)
+                    ) {
+                        files.add(entry)
+                    }
+                }
+            }
+        }
+
+        val pyproject = root.resolve("pyproject.toml")
+        if (pyproject.exists() && Files.isRegularFile(pyproject)) {
+            files.add(pyproject)
+        }
+        return files.distinct().sortedBy { it.toString() }
+    }
+
+    private fun logBootstrapDiagnostics(projectPath: String, diagnostics: BootstrapDiagnostics) {
+        LOG.info(
+            "Authord bootstrap diagnostics for $projectPath: python=${diagnostics.pythonExecutable}," +
+                " py=${diagnostics.pythonVersion}, mkdocs=${diagnostics.mkdocsVersion}," +
+                " getDeps=${diagnostics.getDepsOutcome}, verification=${diagnostics.verificationMode}" +
+                "(${diagnostics.verificationSucceeded}), fallback=${diagnostics.fallbackDependencySource}",
+        )
     }
 
     private fun isMaterializedProjectRoot(projectPath: String): Boolean {
