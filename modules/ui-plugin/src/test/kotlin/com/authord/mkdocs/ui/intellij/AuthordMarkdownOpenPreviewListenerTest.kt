@@ -1,8 +1,10 @@
 package com.authord.mkdocs.ui.intellij
 
+import com.authord.mkdocs.core.flags.FeatureFlagPolicy
 import com.intellij.openapi.project.Project
 import java.nio.file.Files
 import kotlin.test.Test
+import kotlin.test.assertEquals
 import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
@@ -103,6 +105,61 @@ class AuthordMarkdownOpenPreviewListenerTest {
 
             assertFalse(browserService.markdownPreviewActivated())
             assertFalse(runtimeService.isRuntimeRunning())
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `docs startup failure applies bypass and notifies`() {
+        val projectRoot = Files.createTempDirectory("markdown-open-listener-failure-bypass")
+        try {
+            Files.createDirectories(projectRoot.resolve("docs"))
+            Files.writeString(projectRoot.resolve("mkdocs.yml"), "site_name: Demo\ndocs_dir: docs\n")
+            Files.writeString(projectRoot.resolve("docs/index.md"), "# Home\n")
+
+            val bypassStore = FailureBypassStore()
+            val project = IntellijTestFixtures.project(
+                basePath = projectRoot.toString(),
+                locationHash = "markdown-open-failure-bypass",
+                services = mapOf(FailureBypassStore::class.java to bypassStore),
+            )
+            val runtimeService = PluginRuntimeIntegrationService(project)
+            runtimeService.updateFeatureFlags(
+                FeatureFlagPolicy(
+                    previewSyncEnabled = true,
+                ),
+            )
+            val browserService = MkDocsPreviewBrowserService(project)
+            val settingsService = AuthordPreviewSettingsService()
+            val notifications = mutableListOf<String>()
+            val notifier = PreviewFailureNotifier(
+                emit = { _, payload -> notifications += payload.failure.reason },
+            )
+            val startupFailureHandler = PreviewStartupFailureHandler(
+                routerResolver = { PreviewRouterService() },
+                bypassStoreResolver = { bypassStore },
+                notifier = notifier,
+                fallbackInvoker = { _, _ -> Unit },
+            )
+            val listener = AuthordMarkdownOpenPreviewListener(
+                runtimeServiceResolver = { runtimeService },
+                routerResolver = { PreviewRouterService() },
+                browserServiceResolver = { browserService },
+                settingsServiceResolver = { settingsService },
+                startupFailureHandler = startupFailureHandler,
+            )
+            val selectedPath = projectRoot.resolve("docs/index.md").toString().replace('\\', '/')
+
+            invokeOnMarkdownOpened(
+                listener = listener,
+                project = project,
+                selectedPath = selectedPath,
+            )
+
+            val decision = PreviewRouterService().decide(project, selectedPath)
+            assertTrue(bypassStore.isBypassed(selectedPath, decision.configPath))
+            assertEquals(1, notifications.size)
         } finally {
             projectRoot.toFile().deleteRecursively()
         }

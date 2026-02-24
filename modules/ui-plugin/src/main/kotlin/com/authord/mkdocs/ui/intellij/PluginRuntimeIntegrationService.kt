@@ -465,6 +465,20 @@ class PluginRuntimeIntegrationService(
     }
 
     /**
+     * Returns the config path currently associated with the active runtime command, when available.
+     */
+    fun activeRuntimeConfigPath(): String? {
+        val projectRoot = project.basePath
+            ?.let { basePath -> runCatching { Path.of(basePath).toAbsolutePath().normalize() }.getOrNull() }
+        val command = dependencies.processManager
+            .diagnostics(project.locationHash)
+            ?.command
+            .orEmpty()
+        val configPath = resolveWatchedConfigPath(command, projectRoot) ?: return null
+        return configPath.toAbsolutePath().normalize().toString().replace('\\', '/')
+    }
+
+    /**
      * Signals that a filesystem mutation affecting docs/nav has been committed.
      *
      * The latest parsed config nav-state is supplied by topic-tree UI flows and persisted so each

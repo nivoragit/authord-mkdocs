@@ -39,11 +39,12 @@ import kotlin.math.abs
 
 internal const val AUTHORD_PREVIEW_EDITOR_TYPE_ID = "authord-preview-editor"
 
-internal fun isAuthordPreviewEligible(projectBasePath: String?, filePath: String): Boolean {
-    val basePath = projectBasePath ?: return false
-    return isMarkdownPath(filePath) &&
-        hasConfigFile(basePath) &&
-        isUnderProject(basePath, filePath)
+internal fun isAuthordPreviewEligible(
+    project: Project,
+    filePath: String,
+    router: PreviewRouterService = PreviewRouterService(),
+): Boolean {
+    return router.decide(project, filePath).target == PreviewRouteTarget.AUTHORD
 }
 
 /**
@@ -65,8 +66,10 @@ class AuthordMarkdownSplitEditorProvider : TextEditorWithPreviewProvider, DumbAw
 }
 
 private class AuthordMarkdownPreviewFileEditorProvider : FileEditorProvider, DumbAware {
+    private val router = PreviewRouterService()
+
     override fun accept(project: Project, file: VirtualFile): Boolean {
-        return isAuthordPreviewEligible(project.basePath, file.path)
+        return isAuthordPreviewEligible(project, file.path, router)
     }
 
     override fun createEditor(project: Project, file: VirtualFile): FileEditor {
@@ -172,6 +175,8 @@ internal class AuthordMarkdownPreviewFileEditor(
         runCatching { currentProject.getService(MkDocsPreviewBrowserService::class.java) }.getOrNull()
     },
     private val resultPresenter: (Project, String, Boolean) -> Unit = ::presentPreviewResult,
+    private val previewRouter: PreviewRouterService = PreviewRouterService(),
+    private val startupFailureHandler: PreviewStartupFailureHandler = PreviewStartupFailureHandler(),
     previewContentFactory: () -> PreviewContent = ::createDefaultPreviewContent,
     private val delayedInvoker: (delayMillis: Long, task: () -> Unit) -> Unit = delayedInvoker@{ delayMillis, task ->
         val app = ApplicationManager.getApplication()
@@ -275,10 +280,17 @@ internal class AuthordMarkdownPreviewFileEditor(
             return
         }
         runtimeService.restartPreviewAsync(PreviewStartTrigger.ACTION) { restartResult ->
-            resultPresenter(project, formatPreviewResultMessage(restartResult), restartResult.success)
             if (!restartResult.success) {
+                startupFailureHandler.handleFailure(
+                    project = project,
+                    result = restartResult,
+                    selectedPath = file.path,
+                    onRetry = ::restartPreviewAndRefresh,
+                )
                 return@restartPreviewAsync
             }
+            clearFailureBypassForCurrentFile()
+            resultPresenter(project, formatPreviewResultMessage(restartResult), true)
             standaloneLastLoadedUrl = null
             val dispatched = dispatchPreviewForCurrentFile(PreviewRouteIntentSource.SPLIT_EDITOR)
             if (!dispatched) {
@@ -308,9 +320,17 @@ internal class AuthordMarkdownPreviewFileEditor(
             if (application == null) {
                 val startResult = runtimeService.startPreview(trigger)
                 if (!startResult.success) {
-                    resultPresenter(project, formatPreviewResultMessage(startResult), false)
+                    startupFailureHandler.handleFailure(
+                        project = project,
+                        result = startResult,
+                        selectedPath = file.path,
+                        onRetry = {
+                            refreshForSelectedFile(autoStart = true, trigger = trigger)
+                        },
+                    )
                     return false
                 }
+                clearFailureBypassForCurrentFile()
                 val dispatched = dispatchPreviewForCurrentFile(PreviewRouteIntentSource.SPLIT_EDITOR)
                 if (!dispatched) {
                     val resolvedAfterStart = startResult.previewUrl.ifBlank {
@@ -323,9 +343,17 @@ internal class AuthordMarkdownPreviewFileEditor(
             } else {
                 runtimeService.startPreviewAsync(trigger) { startResult ->
                     if (!startResult.success) {
-                        resultPresenter(project, formatPreviewResultMessage(startResult), false)
+                        startupFailureHandler.handleFailure(
+                            project = project,
+                            result = startResult,
+                            selectedPath = file.path,
+                            onRetry = {
+                                refreshForSelectedFile(autoStart = true, trigger = trigger)
+                            },
+                        )
                         return@startPreviewAsync
                     }
+                    clearFailureBypassForCurrentFile()
                     val dispatched = dispatchPreviewForCurrentFile(PreviewRouteIntentSource.SPLIT_EDITOR)
                     if (!dispatched) {
                         val resolvedAfterStart = startResult.previewUrl.ifBlank {
@@ -551,8 +579,14 @@ internal class AuthordMarkdownPreviewFileEditor(
         return AuthordUiBundle.message("activation.error.configNotFound", projectPath)
     }
 
+    private fun clearFailureBypassForCurrentFile() {
+        val bypassStore = runCatching { project.getService(FailureBypassStore::class.java) }.getOrNull() ?: return
+        val decision = previewRouter.decide(project, file.path)
+        bypassStore.clearBypass(file.path, decision.configPath)
+    }
+
     private fun isDocsMarkdownPath(path: String): Boolean {
-        return runtimeService.isPreviewEligibleMarkdownPath(path)
+        return previewRouter.decide(project, path).target == PreviewRouteTarget.AUTHORD
     }
 }
 

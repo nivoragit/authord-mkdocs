@@ -41,28 +41,31 @@ class AuthordMarkdownSplitEditorProviderTest {
         val projectRoot = Files.createTempDirectory("authord-split-provider")
         try {
             val filePath = projectRoot.resolve("docs").resolve("index.md").toString()
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "split-eligibility-config")
 
-            assertFalse(isAuthordPreviewEligible(projectRoot.toString(), filePath))
+            assertFalse(isAuthordPreviewEligible(project, filePath))
 
             Files.writeString(projectRoot.resolve("mkdocs.yml"), "site_name: docs\n")
+            Files.createDirectories(projectRoot.resolve("docs"))
             invalidateMkdocsConfigCache(projectRoot)
-            assertTrue(isAuthordPreviewEligible(projectRoot.toString(), filePath))
+            assertTrue(isAuthordPreviewEligible(project, filePath))
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
     }
 
     @Test
-    fun `split preview eligibility accepts nested underscore mkdocs config`() {
+    fun `split preview eligibility rejects nested config that does not scope selected markdown`() {
         val projectRoot = Files.createTempDirectory("authord-split-provider-nested-config")
         try {
             val filePath = projectRoot.resolve("docs").resolve("index.md").toString()
             val nestedConfigDir = projectRoot.resolve("site")
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "split-eligibility-nested")
             Files.createDirectories(nestedConfigDir)
             Files.writeString(nestedConfigDir.resolve("_mkdocs.yml"), "site_name: docs\n")
 
             invalidateMkdocsConfigCache(projectRoot)
-            assertTrue(isAuthordPreviewEligible(projectRoot.toString(), filePath))
+            assertFalse(isAuthordPreviewEligible(project, filePath))
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -73,13 +76,32 @@ class AuthordMarkdownSplitEditorProviderTest {
         val projectRoot = Files.createTempDirectory("authord-split-provider-in")
         val outsideRoot = Files.createTempDirectory("authord-split-provider-out")
         try {
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "split-eligibility-outside")
             Files.writeString(projectRoot.resolve("mkdocs.yml"), "site_name: docs\n")
+            Files.createDirectories(projectRoot.resolve("docs"))
             val outsideFilePath = outsideRoot.resolve("docs").resolve("index.md").toString()
 
-            assertFalse(isAuthordPreviewEligible(projectRoot.toString(), outsideFilePath))
+            assertFalse(isAuthordPreviewEligible(project, outsideFilePath))
         } finally {
             projectRoot.toFile().deleteRecursively()
             outsideRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `split preview eligibility accepts docs scoped markdown only`() {
+        val projectRoot = Files.createTempDirectory("authord-split-provider-docs-scope")
+        try {
+            Files.createDirectories(projectRoot.resolve("docs"))
+            Files.writeString(projectRoot.resolve("mkdocs.yml"), "site_name: Demo\ndocs_dir: docs\n")
+            val docsFile = projectRoot.resolve("docs/guide.md").toString()
+            val nonDocsFile = projectRoot.resolve("README.md").toString()
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "split-eligibility-docs-only")
+
+            assertTrue(isAuthordPreviewEligible(project, docsFile))
+            assertFalse(isAuthordPreviewEligible(project, nonDocsFile))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
         }
     }
 

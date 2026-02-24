@@ -11,16 +11,18 @@ import com.intellij.openapi.vfs.VirtualFile
 /**
  * Initializes persistent preview resources only after an eligible docs markdown file is opened.
  */
-class AuthordMarkdownOpenPreviewListener(
+internal class AuthordMarkdownOpenPreviewListener(
     private val runtimeServiceResolver: (Project) -> PluginRuntimeIntegrationService = {
         PluginCompositionRoot().runtimeIntegration(it)
     },
+    private val routerResolver: () -> PreviewRouterService = { PreviewRouterService() },
     private val browserServiceResolver: (Project) -> MkDocsPreviewBrowserService? = { project ->
         runCatching { project.getService(MkDocsPreviewBrowserService::class.java) }.getOrNull()
     },
     private val settingsServiceResolver: (Project) -> AuthordPreviewSettingsService? = { project ->
         runCatching { project.getService(AuthordPreviewSettingsService::class.java) }.getOrNull()
     },
+    private val startupFailureHandler: PreviewStartupFailureHandler = PreviewStartupFailureHandler(),
 ) : FileEditorManagerListener, DumbAware {
     override fun fileOpened(source: FileEditorManager, file: VirtualFile) {
         onMarkdownOpened(source.project, file.path)
@@ -35,10 +37,11 @@ class AuthordMarkdownOpenPreviewListener(
         if (project.isDisposed) {
             return
         }
-        val runtimeService = runtimeServiceResolver(project)
-        if (!runtimeService.isPreviewEligibleMarkdownPath(selectedPath)) {
+        val decision = routerResolver().decide(project, selectedPath)
+        if (decision.target != PreviewRouteTarget.AUTHORD) {
             return
         }
+        val runtimeService = runtimeServiceResolver(project)
 
         val settings = settingsServiceResolver(project)
         if (settings?.autoOpenPreviewOnMarkdownOpen == false) {
@@ -60,7 +63,16 @@ class AuthordMarkdownOpenPreviewListener(
         }
 
         runtimeService.startPreviewAsync(PreviewStartTrigger.ACTION) { result ->
-            if (project.isDisposed || !result.success) {
+            if (project.isDisposed) {
+                return@startPreviewAsync
+            }
+            if (!result.success) {
+                startupFailureHandler.handleFailure(
+                    project = project,
+                    result = result,
+                    selectedPath = selectedPath,
+                    onRetry = { onMarkdownOpened(project, selectedPath) },
+                )
                 return@startPreviewAsync
             }
             val applied = runtimeService.dispatchPreviewForSelectedFileWithRetry(

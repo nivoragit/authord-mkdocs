@@ -39,12 +39,13 @@ class PreviewResultReporterTest {
         val result = ActivationResult(
             success = false,
             reason = ActivationFailureReason.START_FAILED,
-            message = "Preview server failed to start.",
+            message = "ModuleNotFoundError: No module named 'material'",
         )
 
         val formatted = formatPreviewResultMessage(result)
 
-        assertEquals("Preview server failed to start.", formatted)
+        assertTrue(formatted.contains("Authord preview failed to start"))
+        assertTrue(formatted.contains("mkdocs-material"))
     }
 
     @Test
@@ -57,7 +58,7 @@ class PreviewResultReporterTest {
 
         val formatted = formatPreviewResultMessage(result)
 
-        assertEquals("Preview start failed.", formatted)
+        assertTrue(formatted.contains("Authord preview failed to start"))
     }
 
     @Test

@@ -57,7 +57,17 @@ internal fun presentAuthordNotification(
  */
 internal fun formatPreviewResultMessage(result: ActivationResult): String {
     if (!result.success) {
-        return result.message.ifBlank { "Preview start failed." }
+        val failure = PreviewStartupFailureClassifier.classify(
+            result.message.ifBlank { "Preview start failed." },
+        )
+        return buildString {
+            append("Authord preview failed to start. ")
+            append("Reason: ")
+            append(failure.reason)
+            append(" ")
+            append("Next step: ")
+            append(failure.nextStep)
+        }
     }
 
     val resolvedUrl = result.previewUrl.ifBlank { "<unknown-url>" }
