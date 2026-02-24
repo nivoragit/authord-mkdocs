@@ -1,6 +1,7 @@
 package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ui.ActivationFailureReason
+import com.authord.mkdocs.ui.ActivationDiagnostics
 import com.authord.mkdocs.ui.ActivationResult
 import kotlin.test.assertFalse
 import kotlin.test.Test
@@ -46,6 +47,26 @@ class PreviewResultReporterTest {
 
         assertTrue(formatted.contains("Authord preview failed to start"))
         assertTrue(formatted.contains("mkdocs-material"))
+    }
+
+    @Test
+    fun `formats wrapped bootstrap failure using suggested package diagnostics`() {
+        val result = ActivationResult(
+            success = false,
+            reason = ActivationFailureReason.BOOTSTRAP_FAILED,
+            message = "Runtime bootstrap failed. Details: MkDocs config references Material extensions, but mkdocs-material is not installed in the preview Python environment.",
+            diagnostics = ActivationDiagnostics(
+                pythonExecutable = "/tmp/.venv/bin/python",
+                uvExecutablePath = "/tmp/tools/uv",
+                suggestedPackage = "mkdocs-material",
+            ),
+        )
+
+        val formatted = formatPreviewResultMessage(result)
+
+        assertTrue(formatted.contains("mkdocs-material"))
+        assertTrue(formatted.contains("requirements.txt"))
+        assertTrue(formatted.contains("/tmp/tools/uv pip install --python /tmp/.venv/bin/python mkdocs-material"))
     }
 
     @Test

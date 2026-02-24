@@ -11,6 +11,7 @@ import com.authord.mkdocs.ui.intellij.AuthordUiBundle
 import com.authord.mkdocs.ui.intellij.PreviewStartupFailure
 import com.authord.mkdocs.ui.intellij.PreviewStartupFailureClassifier
 import com.authord.mkdocs.ui.intellij.PreviewStartupFailureContext
+import com.authord.mkdocs.ui.intellij.findMkdocsConfig
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
 import java.net.HttpURLConnection
@@ -20,6 +21,7 @@ import java.net.ServerSocket
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardOpenOption
+import java.util.Locale
 import kotlin.io.path.exists
 import kotlin.io.path.name
 
@@ -75,6 +77,7 @@ private fun defaultPluginEnvironmentRoot(): Path {
  */
 data class ActivationDiagnostics(
     val pythonExecutable: String = "",
+    val uvExecutablePath: String = "",
     val pythonVersion: String = "",
     val mkdocsVersion: String = "",
     val bootstrapResultSummary: String = "",
@@ -194,6 +197,7 @@ class PluginActivationService(
             val initialClassification = classifyStartupFailure(
                 rawMessage = bootstrapResult.errorMessage,
                 pythonExecutable = bootstrapResult.diagnostics.pythonExecutable,
+                uvExecutablePath = bootstrapResult.uvExecutablePath,
                 dependencyDeclarationHint = "",
             )
             val dependencyHint = dependencyDeclarationHint(
@@ -203,6 +207,7 @@ class PluginActivationService(
             val classified = classifyStartupFailure(
                 rawMessage = bootstrapResult.errorMessage,
                 pythonExecutable = bootstrapResult.diagnostics.pythonExecutable,
+                uvExecutablePath = bootstrapResult.uvExecutablePath,
                 dependencyDeclarationHint = dependencyHint,
             )
             val actionableDetails = buildActionableFailureMessage(classified)
@@ -212,6 +217,7 @@ class PluginActivationService(
                 message = errorPresenter.present(reason, actionableDetails),
                 diagnostics = buildActivationDiagnostics(
                     bootstrapDiagnostics = bootstrapResult.diagnostics,
+                    uvExecutablePath = bootstrapResult.uvExecutablePath,
                     classifiedFailure = classified,
                     dependencyHint = dependencyHint,
                 ),
@@ -292,6 +298,7 @@ class PluginActivationService(
                         message = AuthordUiBundle.message("activation.status.completed"),
                         diagnostics = buildActivationDiagnostics(
                             bootstrapDiagnostics = bootstrapResult.diagnostics,
+                            uvExecutablePath = bootstrapResult.uvExecutablePath,
                             classifiedFailure = null,
                             dependencyHint = "",
                         ),
@@ -328,6 +335,7 @@ class PluginActivationService(
             projectPath = projectPath,
             failure = lastFailure,
             bootstrapDiagnostics = bootstrapResult.diagnostics,
+            uvExecutablePath = bootstrapResult.uvExecutablePath,
         )
         bootstrapService.requestStrictVerification(projectPath)
         return ActivationResult(
@@ -336,6 +344,7 @@ class PluginActivationService(
             message = errorPresenter.present(reason, failureDetails.details),
             diagnostics = buildActivationDiagnostics(
                 bootstrapDiagnostics = bootstrapResult.diagnostics,
+                uvExecutablePath = bootstrapResult.uvExecutablePath,
                 classifiedFailure = failureDetails.classifiedFailure,
                 dependencyHint = failureDetails.classifiedFailure.dependencyDeclarationHint.orEmpty(),
             ),
@@ -371,6 +380,7 @@ class PluginActivationService(
         projectPath: String,
         failure: StartupAttemptFailure?,
         bootstrapDiagnostics: BootstrapDiagnostics,
+        uvExecutablePath: String,
     ): ClassifiedStartupFailureDetails {
         if (failure == null) {
             val rawOutput = startFailureDetails(projectPath, "")
@@ -378,6 +388,7 @@ class PluginActivationService(
                 projectPath = projectPath,
                 rawMessage = rawOutput,
                 pythonExecutable = bootstrapDiagnostics.pythonExecutable,
+                uvExecutablePath = uvExecutablePath,
             )
             val details = buildString {
                 append(buildActionableFailureMessage(classified))
@@ -405,6 +416,7 @@ class PluginActivationService(
             projectPath = projectPath,
             rawMessage = parsedOutput.ifBlank { failure.failureSummary },
             pythonExecutable = bootstrapDiagnostics.pythonExecutable,
+            uvExecutablePath = uvExecutablePath,
         )
         val stdoutTail = tailText(diagnostics?.stdoutOutput.orEmpty())
         val stderrTail = tailText(diagnostics?.stderrOutput.orEmpty())
@@ -505,9 +517,7 @@ class PluginActivationService(
             return normalizedOutput
         }
 
-        val rootPath = Path.of(projectPath)
-        val hasConfigFile = rootPath.resolve("mkdocs.yml").exists() || rootPath.resolve("mkdocs.yaml").exists()
-        if (!hasConfigFile) {
+        if (resolveConfigPath(projectPath) == null) {
             return AuthordUiBundle.message("activation.error.configNotFound", projectPath)
         }
 
@@ -518,10 +528,12 @@ class PluginActivationService(
         projectPath: String,
         rawMessage: String,
         pythonExecutable: String,
+        uvExecutablePath: String,
     ): PreviewStartupFailure {
         val initial = classifyStartupFailure(
             rawMessage = rawMessage,
             pythonExecutable = pythonExecutable,
+            uvExecutablePath = uvExecutablePath,
             dependencyDeclarationHint = "",
         )
         val dependencyHint = dependencyDeclarationHint(
@@ -531,6 +543,7 @@ class PluginActivationService(
         return classifyStartupFailure(
             rawMessage = rawMessage,
             pythonExecutable = pythonExecutable,
+            uvExecutablePath = uvExecutablePath,
             dependencyDeclarationHint = dependencyHint,
         )
     }
@@ -538,12 +551,14 @@ class PluginActivationService(
     private fun classifyStartupFailure(
         rawMessage: String,
         pythonExecutable: String,
+        uvExecutablePath: String,
         dependencyDeclarationHint: String,
     ): PreviewStartupFailure {
         return PreviewStartupFailureClassifier.classify(
             rawMessage = rawMessage.ifBlank { "Preview start failed." },
             context = PreviewStartupFailureContext(
                 pythonExecutable = pythonExecutable.ifBlank { null },
+                uvExecutablePath = uvExecutablePath.ifBlank { null },
                 dependencyDeclarationHint = dependencyDeclarationHint.ifBlank { null },
             ),
         )
@@ -617,6 +632,7 @@ class PluginActivationService(
 
     private fun buildActivationDiagnostics(
         bootstrapDiagnostics: BootstrapDiagnostics,
+        uvExecutablePath: String,
         classifiedFailure: PreviewStartupFailure?,
         dependencyHint: String,
     ): ActivationDiagnostics {
@@ -629,6 +645,7 @@ class PluginActivationService(
         }
         return ActivationDiagnostics(
             pythonExecutable = bootstrapDiagnostics.pythonExecutable,
+            uvExecutablePath = uvExecutablePath,
             pythonVersion = bootstrapDiagnostics.pythonVersion,
             mkdocsVersion = bootstrapDiagnostics.mkdocsVersion,
             bootstrapResultSummary = bootstrapSummary,
@@ -665,14 +682,15 @@ class PluginActivationService(
     }
 
     private fun dependencyDeclarationFiles(projectPath: String): List<Path> {
-        val root = runCatching { Path.of(projectPath) }.getOrNull() ?: return emptyList()
+        val root = runCatching { Path.of(projectPath).toAbsolutePath().normalize() }.getOrNull() ?: return emptyList()
         if (!root.exists()) {
             return emptyList()
         }
+        val configDirectory = resolveConfigPath(projectPath)?.parent ?: root
 
         val files = mutableListOf<Path>()
         runCatching {
-            Files.newDirectoryStream(root).use { entries ->
+            Files.newDirectoryStream(configDirectory).use { entries ->
                 for (entry in entries) {
                     val fileName = entry.fileName.toString()
                     if (
@@ -686,7 +704,7 @@ class PluginActivationService(
             }
         }
 
-        val pyproject = root.resolve("pyproject.toml")
+        val pyproject = configDirectory.resolve("pyproject.toml")
         if (pyproject.exists() && Files.isRegularFile(pyproject)) {
             files.add(pyproject)
         }
@@ -718,11 +736,13 @@ class PluginActivationService(
         ensureSiteNameRequiredByConfig(projectPath)
         val scriptPath = ensureParentGuardScript(projectPath)
         val parentPid = ProcessHandle.current().pid().toString()
+        val resolvedConfigPath = resolveConfigPath(projectPath)
         val fallbackThemeConfigPath = ensureFallbackThemeConfig(projectId, projectPath)
-        val fallbackThemeConfigArgs = if (fallbackThemeConfigPath != null) {
-            listOf("-f", fallbackThemeConfigPath.toString())
-        } else {
-            emptyList()
+        val serveConfigArgs = when {
+            fallbackThemeConfigPath != null -> listOf("-f", fallbackThemeConfigPath.toString())
+            resolvedConfigPath != null && requiresExplicitConfig(projectPath, resolvedConfigPath) ->
+                listOf("-f", resolvedConfigPath.toString())
+            else -> emptyList()
         }
         val hostBindingArgs = listOf("--dev-addr", "$host:$port")
         val runtimePythonExecutable = resolveRuntimePythonExecutable(runtimePath)
@@ -743,10 +763,21 @@ class PluginActivationService(
             "-m",
             "mkdocs",
             "serve",
-        ) + hostBindingArgs + fallbackThemeConfigArgs + listOf(
+        ) + hostBindingArgs + serveConfigArgs + listOf(
             "--livereload",
             "--dirty",
         )
+    }
+
+    private fun requiresExplicitConfig(projectPath: String, configPath: Path): Boolean {
+        val normalizedProjectRoot = runCatching { Path.of(projectPath).toAbsolutePath().normalize() }.getOrNull()
+            ?: return false
+        val normalizedConfig = runCatching { configPath.toAbsolutePath().normalize() }.getOrNull()
+            ?: return false
+        val normalizedFileName = normalizedConfig.fileName?.toString()?.lowercase(Locale.ROOT).orEmpty()
+        val isDefaultRootConfig = normalizedConfig.parent == normalizedProjectRoot &&
+            (normalizedFileName == "mkdocs.yml" || normalizedFileName == "mkdocs.yaml")
+        return !isDefaultRootConfig
     }
 
     private fun resolveRuntimePythonExecutable(runtimePath: String): String {
@@ -775,7 +806,7 @@ class PluginActivationService(
 
         val baseConfigPath = resolveConfigPath(projectPath) ?: return null
         val resolvedBaseConfigPath = baseConfigPath.toAbsolutePath().normalize().toString()
-        val resolvedDocsDirPath = resolveDocsDirPath(projectPath, baseConfigPath).toAbsolutePath().normalize().toString()
+        val resolvedDocsDirPath = resolveDocsDirPath(baseConfigPath).toAbsolutePath().normalize().toString()
         val fallbackThemeConfigPath = pluginScopedThemeConfigPath(projectId, projectPath)
         val fallbackColorMode = if (runCatching { isDarkIdeTheme() }.getOrDefault(false)) "dark" else "light"
         val fallbackConfig = buildString {
@@ -829,7 +860,7 @@ class PluginActivationService(
         }
     }
 
-    private fun resolveDocsDirPath(projectPath: String, configPath: Path): Path {
+    private fun resolveDocsDirPath(configPath: Path): Path {
         val configuredDocsDir = runCatching { Files.readString(configPath) }
             .getOrNull()
             ?.lineSequence()
@@ -847,7 +878,7 @@ class PluginActivationService(
         return if (configuredPath != null && configuredPath.isAbsolute) {
             configuredPath
         } else {
-            Path.of(projectPath).resolve(configuredDocsDir)
+            configPath.parent.resolve(configuredDocsDir)
         }
     }
 
@@ -888,16 +919,8 @@ class PluginActivationService(
     }
 
     private fun resolveConfigPath(projectPath: String): Path? {
-        val rootPath = Path.of(projectPath)
-        val yml = rootPath.resolve("mkdocs.yml")
-        if (yml.exists()) {
-            return yml
-        }
-        val yaml = rootPath.resolve("mkdocs.yaml")
-        if (yaml.exists()) {
-            return yaml
-        }
-        return null
+        val rootPath = runCatching { Path.of(projectPath).toAbsolutePath().normalize() }.getOrNull() ?: return null
+        return findMkdocsConfig(rootPath)
     }
 
     private fun defaultSiteName(projectPath: Path): String {

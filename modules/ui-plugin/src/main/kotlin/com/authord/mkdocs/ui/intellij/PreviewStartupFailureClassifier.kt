@@ -32,7 +32,9 @@ internal data class PreviewStartupFailure(
 
 internal data class PreviewStartupFailureContext(
     val pythonExecutable: String? = null,
+    val uvExecutablePath: String? = null,
     val dependencyDeclarationHint: String? = null,
+    val suggestedPackage: String? = null,
 )
 
 internal object MkdocsErrorClassifier {
@@ -97,6 +99,26 @@ internal object MkdocsErrorClassifier {
                 reason = "Missing Python module `$moduleMatch` in the preview runtime.",
                 context = context,
                 confidence = PreviewFailureConfidence.LOW,
+            )
+        }
+
+        val hintedPackage = context.suggestedPackage
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+        if (
+            hintedPackage != null &&
+            (
+                normalized.contains(hintedPackage, ignoreCase = true) ||
+                    normalized.contains("not installed in the preview python environment", ignoreCase = true)
+                )
+        ) {
+            return dependencyFailure(
+                primaryLine = primaryLine,
+                missingModule = hintedPackage,
+                packageName = hintedPackage,
+                reason = "Missing dependency `$hintedPackage` in the preview Python environment.",
+                context = context,
+                confidence = PreviewFailureConfidence.MEDIUM,
             )
         }
 
@@ -213,8 +235,17 @@ internal object MkdocsErrorClassifier {
             ?.trim()
             ?.takeIf { it.isNotEmpty() }
             ?: "python"
-        val executable = shellQuote(pythonExecutable)
-        return "$executable -m pip install $packageName"
+        val uvExecutablePath = context.uvExecutablePath
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+        return if (uvExecutablePath != null) {
+            val uvExecutable = shellQuote(uvExecutablePath)
+            val python = shellQuote(pythonExecutable)
+            "$uvExecutable pip install --python $python $packageName"
+        } else {
+            val executable = shellQuote(pythonExecutable)
+            "$executable -m pip install $packageName"
+        }
     }
 
     private fun buildPersistenceGuidance(packageName: String): String {

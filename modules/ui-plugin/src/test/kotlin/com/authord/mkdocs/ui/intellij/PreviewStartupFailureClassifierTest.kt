@@ -9,14 +9,27 @@ class PreviewStartupFailureClassifierTest {
     fun `classifies missing material dependency with actionable guidance`() {
         val failure = PreviewStartupFailureClassifier.classify(
             rawMessage = "ModuleNotFoundError: No module named 'material'",
-            context = PreviewStartupFailureContext(pythonExecutable = "/tmp/.venv/bin/python"),
+            context = PreviewStartupFailureContext(
+                pythonExecutable = "/tmp/.venv/bin/python",
+                uvExecutablePath = "/tmp/tools/uv",
+            ),
         )
 
         assertEquals(PreviewStartupFailureCategory.MISSING_DEPENDENCY, failure.category)
         assertEquals("mkdocs-material", failure.installPackage)
         assertEquals(PreviewFailureConfidence.HIGH, failure.confidence)
-        assertTrue(failure.nextStep.contains("/tmp/.venv/bin/python -m pip install mkdocs-material"))
+        assertTrue(failure.nextStep.contains("/tmp/tools/uv pip install --python /tmp/.venv/bin/python mkdocs-material"))
         assertTrue(failure.persistenceGuidance.contains("requirements.txt"))
+    }
+
+    @Test
+    fun `falls back to pip command when uv executable path is unavailable`() {
+        val failure = PreviewStartupFailureClassifier.classify(
+            rawMessage = "ModuleNotFoundError: No module named 'material'",
+            context = PreviewStartupFailureContext(pythonExecutable = "/tmp/.venv/bin/python"),
+        )
+
+        assertTrue(failure.nextStep.contains("/tmp/.venv/bin/python -m pip install mkdocs-material"))
     }
 
     @Test
@@ -85,5 +98,21 @@ class PreviewStartupFailureClassifierTest {
         val failure = PreviewStartupFailureClassifier.classify("unexpected preview failure")
 
         assertEquals(PreviewStartupFailureCategory.UNKNOWN, failure.category)
+    }
+
+    @Test
+    fun `uses suggested package context to preserve dependency guidance in wrapped messages`() {
+        val failure = PreviewStartupFailureClassifier.classify(
+            rawMessage = "Runtime bootstrap failed. Details: MkDocs config references Material extensions; mkdocs-material is not installed in the preview Python environment.",
+            context = PreviewStartupFailureContext(
+                pythonExecutable = "/tmp/.venv/bin/python",
+                suggestedPackage = "mkdocs-material",
+            ),
+        )
+
+        assertEquals(PreviewStartupFailureCategory.MISSING_DEPENDENCY, failure.category)
+        assertEquals("mkdocs-material", failure.installPackage)
+        assertTrue(failure.nextStep.contains("requirements.txt"))
+        assertTrue(failure.nextStep.contains("Retry dependency setup"))
     }
 }

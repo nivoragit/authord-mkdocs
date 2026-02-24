@@ -1,10 +1,14 @@
 package com.authord.mkdocs.runtime
 
 import java.nio.file.Files
+import java.nio.file.FileVisitResult
 import java.nio.file.Path
+import java.nio.file.SimpleFileVisitor
+import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
 import kotlin.io.path.exists
 import kotlin.io.path.isRegularFile
+import java.util.Locale
 
 /**
  * Runs a process command in a given working directory.
@@ -93,6 +97,36 @@ private data class FastVerificationResult(
     val errorMessage: String = "",
 )
 
+private data class MkdocsScope(
+    val projectRoot: Path,
+    val configPath: Path?,
+) {
+    val configDirectory: Path
+        get() = configPath?.parent ?: projectRoot
+}
+
+private val mkdocsConfigDiscoveryPriority = listOf(
+    "mkdocs.yml",
+    "mkdocs.yaml",
+    "_mkdocs.yml",
+    "_mkdocs.yaml",
+)
+private val mkdocsConfigDiscoveryPriorityByName = mkdocsConfigDiscoveryPriority
+    .withIndex()
+    .associate { (index, name) -> name to index }
+private val ignoredMkdocsConfigSearchDirectories = setOf(
+    ".git",
+    ".idea",
+    ".gradle",
+    "build",
+    "out",
+    "node_modules",
+    ".venv",
+    "venv",
+    "__pycache__",
+)
+private const val MKDOCS_CONFIG_SEARCH_MAX_DIRECTORY_DEPTH: Int = 4
+
 /**
  * Bootstraps a plugin-managed runtime using `uv` and installs `mkdocs`.
  *
@@ -161,9 +195,17 @@ open class UvBootstrapService(
      * @return bootstrap status, executed commands, and error details on failure.
      */
     open fun bootstrap(projectPath: String): BootstrapResult {
-        val runtimeDirectory = Path.of(projectPath).resolve(".mkdocs-plugin-venv")
+        val projectRoot = normalizePath(Path.of(projectPath))
+        val mkdocsScope = MkdocsScope(
+            projectRoot = projectRoot,
+            configPath = resolveMkdocsConfigPath(projectRoot),
+        )
+        val runtimeDirectory = projectRoot.resolve(".mkdocs-plugin-venv")
         val runtimePath = runtimeDirectory.toString()
         val projectKey = normalizeProjectKey(projectPath)
+        val explicitConfigPath = mkdocsScope.configPath?.takeIf { configPath ->
+            requiresExplicitConfig(scope = mkdocsScope, configPath = configPath)
+        }
 
         val uvResolution = uvExecutableProvider.resolve(projectPath)
         if (!uvResolution.success) {
@@ -184,7 +226,7 @@ open class UvBootstrapService(
         val strictVerificationRequested = strictVerificationRequestedProjects.remove(projectKey)
         val allowGetDepsBypass = dependencyBypassRequestedProjects.remove(projectKey)
 
-        val currentFingerprint = computeDependencyFingerprint(projectPath, runtimeDirectory, uvExecutable)
+        val currentFingerprint = computeDependencyFingerprint(mkdocsScope, runtimeDirectory, uvExecutable)
         val cachedFingerprint = bootstrappedProjectHashes[projectKey]
         val runtimeExists = runtimeDirectory.exists()
         val dependencyFingerprintChanged = cachedFingerprint == null || cachedFingerprint != currentFingerprint
@@ -195,7 +237,7 @@ open class UvBootstrapService(
         var pythonVersion = ""
         var mkdocsVersion = ""
         var getDepsOutcome = DependencyBootstrapOutcome.NOT_RUN
-        val fallbackDependencySource = resolveFallbackDependencySource(projectPath)
+        val fallbackDependencySource = resolveFallbackDependencySource(mkdocsScope)
         var verificationMode = BootstrapVerificationMode.NONE
         var verificationSucceeded: Boolean? = null
         var verificationDetails = ""
@@ -226,7 +268,7 @@ open class UvBootstrapService(
 
             pythonExecutable = resolveVenvPython(runtimeDirectory)
 
-            val requirementsFiles = resolveRequirementsPaths(projectPath)
+            val requirementsFiles = resolveRequirementsPaths(mkdocsScope.configDirectory)
             val baseInstallCommand = buildList {
                 addAll(listOf(uvExecutable, "pip", "install", "--python", pythonExecutable, "mkdocs"))
                 requirementsFiles.forEach { requirementsFile ->
@@ -255,8 +297,12 @@ open class UvBootstrapService(
                 )
             }
 
-            val getDepsCommand = listOf(pythonExecutable, "-m", "mkdocs", "get-deps")
-            val getDepsResult = commandRunner.run(getDepsCommand, projectPath)
+            val getDepsCommand = buildMkdocsCommand(
+                pythonExecutable = pythonExecutable,
+                configPath = explicitConfigPath,
+                args = listOf("get-deps"),
+            )
+            val getDepsResult = commandRunner.run(getDepsCommand, mkdocsScope.configDirectory.toString())
             executed += getDepsCommand
 
             if (getDepsResult.exitCode != 0) {
@@ -364,8 +410,15 @@ open class UvBootstrapService(
 
         val shouldRunStrictVerification = dependencyFingerprintChanged || strictVerificationRequested || forceBootstrap
         if (shouldRunStrictVerification) {
-            val strictVerificationCommand = listOf(pythonExecutable, "-m", "mkdocs", "build", "--strict")
-            val strictVerificationResult = commandRunner.run(strictVerificationCommand, projectPath)
+            val strictVerificationCommand = buildMkdocsCommand(
+                pythonExecutable = pythonExecutable,
+                configPath = explicitConfigPath,
+                args = listOf("build", "--strict"),
+            )
+            val strictVerificationResult = commandRunner.run(
+                strictVerificationCommand,
+                mkdocsScope.configDirectory.toString(),
+            )
             executed += strictVerificationCommand
 
             verificationMode = BootstrapVerificationMode.STRICT
@@ -519,21 +572,36 @@ open class UvBootstrapService(
         return runtimeDirectory.resolve("bin").resolve("python").toString()
     }
 
-    private fun resolveRequirementsPaths(projectPath: String): List<Path> {
-        val projectRoot = Path.of(projectPath)
-        if (!projectRoot.exists()) {
+    private fun buildMkdocsCommand(
+        pythonExecutable: String,
+        configPath: Path?,
+        args: List<String>,
+    ): List<String> {
+        return buildList {
+            addAll(listOf(pythonExecutable, "-m", "mkdocs"))
+            if (configPath != null) {
+                add("-f")
+                add(configPath.toString())
+            }
+            addAll(args)
+        }
+    }
+
+    private fun resolveRequirementsPaths(configDirectory: Path): List<Path> {
+        if (!configDirectory.exists()) {
             return emptyList()
         }
 
         val requirements = mutableListOf<Path>()
         runCatching {
-            Files.newDirectoryStream(projectRoot).use { entries ->
+            Files.newDirectoryStream(configDirectory).use { entries ->
                 for (entry in entries) {
                     val fileName = entry.fileName.toString()
                     if (
                         entry.isRegularFile() &&
                         fileName.startsWith("requirements", ignoreCase = true) &&
-                        fileName.endsWith(".txt", ignoreCase = true)
+                        fileName.endsWith(".txt", ignoreCase = true) &&
+                        runCatching { Files.size(entry) > 0L }.getOrDefault(false)
                     ) {
                         requirements.add(entry)
                     }
@@ -543,17 +611,17 @@ open class UvBootstrapService(
         return requirements.distinct().sortedBy { it.fileName.toString().lowercase() }
     }
 
-    private fun resolvePyprojectPath(projectPath: String): Path? {
-        val pyproject = Path.of(projectPath).resolve("pyproject.toml")
+    private fun resolvePyprojectPath(configDirectory: Path): Path? {
+        val pyproject = configDirectory.resolve("pyproject.toml")
         return if (pyproject.exists() && pyproject.isRegularFile()) pyproject else null
     }
 
-    private fun resolveFallbackDependencySource(projectPath: String): String {
-        val requirementFiles = resolveRequirementsPaths(projectPath)
+    private fun resolveFallbackDependencySource(scope: MkdocsScope): String {
+        val requirementFiles = resolveRequirementsPaths(scope.configDirectory)
         if (requirementFiles.isNotEmpty()) {
             return requirementFiles.joinToString(",") { it.fileName.toString() }
         }
-        val pyproject = resolvePyprojectPath(projectPath)
+        val pyproject = resolvePyprojectPath(scope.configDirectory)
         if (pyproject != null) {
             return pyproject.fileName.toString()
         }
@@ -564,10 +632,10 @@ open class UvBootstrapService(
      * Computes a hash of dependency declarations and runtime metadata to
      * determine if a re-bootstrap is needed.
      */
-    private fun computeDependencyFingerprint(projectPath: String, runtimeDirectory: Path, uvExecutable: String): String {
+    private fun computeDependencyFingerprint(scope: MkdocsScope, runtimeDirectory: Path, uvExecutable: String): String {
         val digest = MessageDigest.getInstance("SHA-256")
 
-        collectTrackedDependencyFiles(projectPath).forEach { trackedFile ->
+        collectTrackedDependencyFiles(scope).forEach { trackedFile ->
             runCatching {
                 if (Files.isRegularFile(trackedFile)) {
                     digest.update(trackedFile.toString().toByteArray())
@@ -593,22 +661,14 @@ open class UvBootstrapService(
         return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
     }
 
-    private fun collectTrackedDependencyFiles(projectPath: String): List<Path> {
-        val root = Path.of(projectPath)
+    private fun collectTrackedDependencyFiles(scope: MkdocsScope): List<Path> {
+        val root = scope.configDirectory
         val tracked = mutableListOf<Path>()
 
-        val mkdocsYml = root.resolve("mkdocs.yml")
-        if (mkdocsYml.exists() && mkdocsYml.isRegularFile()) {
-            tracked.add(mkdocsYml)
-        }
+        scope.configPath?.let { tracked.add(it) }
 
-        val mkdocsYaml = root.resolve("mkdocs.yaml")
-        if (mkdocsYaml.exists() && mkdocsYaml.isRegularFile()) {
-            tracked.add(mkdocsYaml)
-        }
-
-        tracked.addAll(resolveRequirementsPaths(projectPath))
-        resolvePyprojectPath(projectPath)?.let { tracked.add(it) }
+        tracked.addAll(resolveRequirementsPaths(root))
+        resolvePyprojectPath(root)?.let { tracked.add(it) }
 
         val lockFiles = listOf(
             "uv.lock",
@@ -625,6 +685,99 @@ open class UvBootstrapService(
         }
 
         return tracked.distinct().sortedBy { it.toString() }
+    }
+
+    private fun resolveMkdocsConfigPath(projectRoot: Path): Path? {
+        if (!projectRoot.exists() || !Files.isDirectory(projectRoot)) {
+            return null
+        }
+
+        resolveConfigInDirectory(projectRoot)?.let { return it }
+
+        var bestPath: Path? = null
+        var bestDepth = Int.MAX_VALUE
+        var bestPriority = Int.MAX_VALUE
+        var bestLexicographicKey = ""
+
+        runCatching {
+            Files.walkFileTree(
+                projectRoot,
+                object : SimpleFileVisitor<Path>() {
+                    override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
+                        if (dir == projectRoot) {
+                            return FileVisitResult.CONTINUE
+                        }
+                        val depth = relativeDepth(projectRoot, dir)
+                        if (depth > MKDOCS_CONFIG_SEARCH_MAX_DIRECTORY_DEPTH) {
+                            return FileVisitResult.SKIP_SUBTREE
+                        }
+                        val directoryName = dir.fileName?.toString()?.lowercase(Locale.ROOT).orEmpty()
+                        if (ignoredMkdocsConfigSearchDirectories.contains(directoryName)) {
+                            return FileVisitResult.SKIP_SUBTREE
+                        }
+                        return FileVisitResult.CONTINUE
+                    }
+
+                    override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
+                        if (!attrs.isRegularFile) {
+                            return FileVisitResult.CONTINUE
+                        }
+                        val fileName = file.fileName?.toString()?.lowercase(Locale.ROOT) ?: return FileVisitResult.CONTINUE
+                        val priority = mkdocsConfigDiscoveryPriorityByName[fileName] ?: return FileVisitResult.CONTINUE
+                        val depth = relativeDepth(projectRoot, file)
+                        if (depth > MKDOCS_CONFIG_SEARCH_MAX_DIRECTORY_DEPTH + 1) {
+                            return FileVisitResult.CONTINUE
+                        }
+
+                        val normalizedFile = normalizePath(file)
+                        val lexicographicKey = normalizedFile.toString().replace('\\', '/').lowercase(Locale.ROOT)
+                        val shouldReplace = when {
+                            depth < bestDepth -> true
+                            depth > bestDepth -> false
+                            priority < bestPriority -> true
+                            priority > bestPriority -> false
+                            else -> bestPath == null || lexicographicKey < bestLexicographicKey
+                        }
+                        if (shouldReplace) {
+                            bestPath = normalizedFile
+                            bestDepth = depth
+                            bestPriority = priority
+                            bestLexicographicKey = lexicographicKey
+                        }
+                        return FileVisitResult.CONTINUE
+                    }
+                },
+            )
+        }
+
+        return bestPath
+    }
+
+    private fun resolveConfigInDirectory(directory: Path): Path? {
+        mkdocsConfigDiscoveryPriority.forEach { fileName ->
+            val candidate = directory.resolve(fileName)
+            if (candidate.exists() && candidate.isRegularFile()) {
+                return normalizePath(candidate)
+            }
+        }
+        return null
+    }
+
+    private fun relativeDepth(root: Path, candidate: Path): Int {
+        return runCatching { root.relativize(candidate).nameCount }.getOrDefault(Int.MAX_VALUE)
+    }
+
+    private fun normalizePath(path: Path): Path {
+        return runCatching { path.toAbsolutePath().normalize() }.getOrDefault(path)
+    }
+
+    private fun requiresExplicitConfig(scope: MkdocsScope, configPath: Path): Boolean {
+        val normalizedProjectRoot = normalizePath(scope.projectRoot)
+        val normalizedConfig = normalizePath(configPath)
+        val normalizedFileName = normalizedConfig.fileName?.toString()?.lowercase(Locale.ROOT).orEmpty()
+        val isDefaultRootConfig = normalizedConfig.parent == normalizedProjectRoot &&
+            (normalizedFileName == "mkdocs.yml" || normalizedFileName == "mkdocs.yaml")
+        return !isDefaultRootConfig
     }
 
     private fun describeUvExecutable(uvExecutable: String): String {

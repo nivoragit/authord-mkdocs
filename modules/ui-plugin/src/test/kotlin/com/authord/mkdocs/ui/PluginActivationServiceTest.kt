@@ -327,11 +327,85 @@ class PluginActivationServiceTest {
             assertFalse(result.success)
             assertEquals(ActivationFailureReason.START_FAILED, result.reason)
             assertTrue(result.message.contains("mkdocs-material"))
-            assertTrue(result.message.contains("-m pip install mkdocs-material"))
+            assertTrue(result.message.contains("uv pip install --python"))
+            assertTrue(result.message.contains("mkdocs-material"))
             assertTrue(result.message.contains("requirements.txt / requirements-docs.txt / pyproject.toml"))
             assertTrue(result.message.contains("Retry dependency setup"))
             assertEquals("mkdocs-material", result.diagnostics.suggestedPackage)
             assertTrue(result.diagnostics.pythonExecutable.contains(".mkdocs-plugin-venv"))
+            assertTrue(result.diagnostics.uvExecutablePath.isNotBlank())
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `scopes dependency declaration hint and serve config to subdirectory mkdocs project`() {
+        val projectRoot = createTempDirectory(prefix = "plugin-activation-subdir-config-")
+        try {
+            val docsSiteRoot = projectRoot.resolve("docs-site")
+            Files.createDirectories(docsSiteRoot.resolve("docs"))
+            Files.writeString(
+                docsSiteRoot.resolve("mkdocs.yml"),
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                    theme:
+                      name: material
+                """.trimIndent() + "\n",
+            )
+            Files.writeString(docsSiteRoot.resolve("requirements.txt"), "mkdocs-material\n")
+
+            val handle = object : ManagedProcessHandle {
+                override val id: String = "subdir-dep-failure-handle"
+                private var aliveChecks = 0
+                private var stopped = false
+
+                override fun stop() {
+                    stopped = true
+                }
+
+                override fun isAlive(): Boolean {
+                    if (stopped) {
+                        return false
+                    }
+                    aliveChecks += 1
+                    return aliveChecks == 1
+                }
+
+                override fun startupOutput(): String {
+                    return "Authord process exited before readiness probe succeeded."
+                }
+
+                override fun stdoutOutput(): String = ""
+
+                override fun stderrOutput(): String {
+                    return "ModuleNotFoundError: No module named 'material'"
+                }
+
+                override fun exitCodeOrNull(): Int? = 1
+            }
+            val launcher = RecordingStartLauncher(handle)
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = MkdocsProcessManager(launcher),
+                readinessProbe = HttpReadinessProbe { false },
+                maxStartupAttempts = 1,
+                startupProbeTimeoutMillis = 1_000L,
+                startupPollIntervalMillis = 1L,
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertFalse(result.success)
+            assertTrue(launcher.command.contains("-f"))
+            assertTrue(launcher.command.contains(docsSiteRoot.resolve("mkdocs.yml").toString()))
+            assertTrue(result.diagnostics.dependencyDeclarationHint.contains("appears declared"))
         } finally {
             projectRoot.toFile().deleteRecursively()
         }

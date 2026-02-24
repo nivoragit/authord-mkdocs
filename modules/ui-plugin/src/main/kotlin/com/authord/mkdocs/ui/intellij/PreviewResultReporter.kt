@@ -61,7 +61,9 @@ internal fun formatPreviewResultMessage(result: ActivationResult): String {
             result.message.ifBlank { "Preview start failed." },
             context = PreviewStartupFailureContext(
                 pythonExecutable = result.diagnostics.pythonExecutable.ifBlank { null },
+                uvExecutablePath = result.diagnostics.uvExecutablePath.ifBlank { null },
                 dependencyDeclarationHint = result.diagnostics.dependencyDeclarationHint.ifBlank { null },
+                suggestedPackage = result.diagnostics.suggestedPackage.ifBlank { null },
             ),
         )
         return buildString {

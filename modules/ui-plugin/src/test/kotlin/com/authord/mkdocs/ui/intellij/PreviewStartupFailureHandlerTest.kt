@@ -98,5 +98,57 @@ class PreviewStartupFailureHandlerTest {
             projectRoot.toFile().deleteRecursively()
         }
     }
-}
 
+    @Test
+    fun `creates empty requirements txt in scoped config directory before dependency notification`() {
+        val projectRoot = Files.createTempDirectory("startup-failure-handler-scaffold-requirements")
+        try {
+            val docsSiteRoot = projectRoot.resolve("docs-site")
+            Files.createDirectories(docsSiteRoot.resolve("docs"))
+            Files.writeString(
+                docsSiteRoot.resolve("mkdocs.yml"),
+                "site_name: Demo\ndocs_dir: docs\n",
+            )
+            val selectedPath = docsSiteRoot.resolve("docs/index.md").toString()
+            Files.writeString(docsSiteRoot.resolve("docs/index.md"), "# Demo\n")
+
+            val bypassStore = FailureBypassStore()
+            val project = IntellijTestFixtures.project(
+                basePath = projectRoot.toString(),
+                locationHash = "startup-failure-handler-scaffold",
+                services = mapOf(FailureBypassStore::class.java to bypassStore),
+            )
+            var capturedPayload: PreviewFailureNotificationPayload? = null
+            val notifier = PreviewFailureNotifier(
+                emit = { _, payload -> capturedPayload = payload },
+            )
+            val handler = PreviewStartupFailureHandler(
+                routerResolver = { PreviewRouterService() },
+                bypassStoreResolver = { bypassStore },
+                notifier = notifier,
+                fallbackInvoker = { _, _ -> Unit },
+            )
+
+            handler.handleFailure(
+                project = project,
+                result = ActivationResult(
+                    success = false,
+                    reason = ActivationFailureReason.START_FAILED,
+                    message = "ModuleNotFoundError: No module named 'material'",
+                ),
+                selectedPath = selectedPath,
+                onRetry = {},
+            )
+
+            val requirementsPath = docsSiteRoot.resolve("requirements.txt")
+            assertTrue(Files.exists(requirementsPath))
+            assertEquals(0L, Files.size(requirementsPath))
+            assertTrue(capturedPayload != null)
+            val dependencyHint = capturedPayload!!.failure.dependencyDeclarationHint.orEmpty()
+            assertTrue(dependencyHint.contains("Created empty requirements.txt"))
+            assertTrue(dependencyHint.contains("restart preview", ignoreCase = true))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+}

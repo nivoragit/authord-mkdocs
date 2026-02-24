@@ -6,6 +6,8 @@ import com.intellij.openapi.application.ModalityState
 import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.vfs.LocalFileSystem
+import java.nio.file.Files
+import java.nio.file.Path
 
 internal class PreviewStartupFailureHandler(
     private val routerResolver: () -> PreviewRouterService = { PreviewRouterService() },
@@ -27,7 +29,9 @@ internal class PreviewStartupFailureHandler(
             result.message.ifBlank { "Preview start failed." },
             context = PreviewStartupFailureContext(
                 pythonExecutable = result.diagnostics.pythonExecutable.ifBlank { null },
+                uvExecutablePath = result.diagnostics.uvExecutablePath.ifBlank { null },
                 dependencyDeclarationHint = result.diagnostics.dependencyDeclarationHint.ifBlank { null },
+                suggestedPackage = result.diagnostics.suggestedPackage.ifBlank { null },
             ),
         )
 
@@ -41,6 +45,15 @@ internal class PreviewStartupFailureHandler(
                 fallbackInvoker(project, selectedPath)
             }
         }
+        if (configPath.isNullOrBlank()) {
+            configPath = resolveMkdocsConfigPath(project)
+        }
+
+        val notificationFailure = scaffoldRequirementsFileForDependencyFailure(
+            project = project,
+            configPath = configPath,
+            failure = failure,
+        )
 
         fun wrapAction(action: (() -> Unit)?): (() -> Unit)? {
             if (action == null) {
@@ -60,13 +73,72 @@ internal class PreviewStartupFailureHandler(
 
         notifier.notifyStartupFailure(
             project = project,
-            failure = failure,
+            failure = notificationFailure,
             configPath = configPath,
             onRetry = wrappedRetry,
             onRetryDependencySetup = wrappedRetryDependencySetup,
             onStartAnyway = wrappedStartAnyway,
         )
     }
+}
+
+private fun resolveMkdocsConfigPath(project: Project): String? {
+    val basePath = project.basePath ?: return null
+    val projectRoot = runCatching { Path.of(basePath).toAbsolutePath().normalize() }.getOrNull() ?: return null
+    val configPath = findMkdocsConfig(projectRoot) ?: return null
+    return configPath.toAbsolutePath().normalize().toString()
+}
+
+private fun scaffoldRequirementsFileForDependencyFailure(
+    project: Project,
+    configPath: String?,
+    failure: PreviewStartupFailure,
+): PreviewStartupFailure {
+    if (failure.category != PreviewStartupFailureCategory.MISSING_DEPENDENCY) {
+        return failure
+    }
+
+    val requirementsPath = ensureRequirementsFile(project, configPath) ?: return failure
+    val normalizedRequirementsPath = requirementsPath.toAbsolutePath().normalize().toString().replace('\\', '/')
+    val scaffoldHint = "Created empty requirements.txt at `$normalizedRequirementsPath`. Add required extensions and restart preview, then retry dependency setup."
+    val mergedHint = listOfNotNull(
+        failure.dependencyDeclarationHint?.takeIf { it.isNotBlank() },
+        scaffoldHint,
+    ).joinToString(" ")
+    return failure.copy(dependencyDeclarationHint = mergedHint)
+}
+
+private fun ensureRequirementsFile(project: Project, configPath: String?): Path? {
+    val requirementsPath = resolveRequirementsPath(project, configPath) ?: return null
+    if (Files.exists(requirementsPath)) {
+        return requirementsPath.takeIf { Files.isRegularFile(it) }
+    }
+    return runCatching {
+        Files.createDirectories(requirementsPath.parent)
+        Files.createFile(requirementsPath)
+        requirementsPath
+    }.getOrNull()
+}
+
+private fun resolveRequirementsPath(project: Project, configPath: String?): Path? {
+    val configDirectory = resolveMkdocsConfigDirectory(project, configPath) ?: return null
+    return configDirectory.resolve("requirements.txt")
+}
+
+private fun resolveMkdocsConfigDirectory(project: Project, configPath: String?): Path? {
+    val candidateConfig = configPath
+        ?.takeIf { it.isNotBlank() }
+        ?.let { rawPath -> runCatching { Path.of(rawPath).toAbsolutePath().normalize() }.getOrNull() }
+    val explicitParent = candidateConfig?.parent
+    if (explicitParent != null) {
+        return explicitParent
+    }
+
+    val projectRoot = project.basePath
+        ?.let { basePath -> runCatching { Path.of(basePath).toAbsolutePath().normalize() }.getOrNull() }
+        ?: return null
+    val discoveredConfig = findMkdocsConfig(projectRoot)
+    return discoveredConfig?.parent ?: projectRoot
 }
 
 internal fun reopenFileForRoutingRefresh(project: Project, selectedPath: String) {

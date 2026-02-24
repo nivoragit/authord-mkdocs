@@ -216,6 +216,66 @@ class UvBootstrapServiceTest {
     }
 
     @Test
+    fun `bootstrap succeeds after adding mkdocs material to requirements`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-material-requirements-")
+        try {
+            projectRoot.resolve("mkdocs.yml").writeText(
+                """
+                site_name: Demo
+                markdown_extensions:
+                  - material.extensions.emoji
+                """.trimIndent() + "\n",
+            )
+
+            var materialInstalledInRuntime = false
+            val service = UvBootstrapService { command, _ ->
+                when {
+                    command.size > 1 && command[1] == "pip" -> {
+                        val requirementFlagIndex = command.indexOf("-r")
+                        if (requirementFlagIndex >= 0) {
+                            val requirementsPath = Path.of(command[requirementFlagIndex + 1])
+                            val requirementsContent = requirementsPath.toFile().takeIf { it.exists() }?.readText().orEmpty()
+                            materialInstalledInRuntime = requirementsContent.contains("mkdocs-material")
+                        }
+                        CommandResult(exitCode = 0)
+                    }
+                    command.contains("get-deps") -> {
+                        if (materialInstalledInRuntime) {
+                            CommandResult(exitCode = 0, stdout = "mkdocs-material\n")
+                        } else {
+                            CommandResult(
+                                exitCode = 1,
+                                stderr = "ModuleNotFoundError: No module named 'material'",
+                            )
+                        }
+                    }
+                    else -> CommandResult(exitCode = 0)
+                }
+            }
+
+            val first = service.bootstrap(projectRoot.toString())
+            assertFalse(first.success)
+            assertEquals(BootstrapFailureCategory.GET_DEPS, first.failureCategory)
+
+            projectRoot.resolve("requirements.txt").writeText("mkdocs-material\n")
+            materialInstalledInRuntime = false
+
+            val second = service.bootstrap(projectRoot.toString())
+            assertTrue(second.success)
+            assertFalse(second.skipped)
+            assertEquals(DependencyBootstrapOutcome.SUCCESS, second.diagnostics.getDepsOutcome)
+            val baseInstall = second.executedCommands.firstOrNull { command ->
+                command.size > 1 && command[1] == "pip" && command.contains("mkdocs")
+            }
+            assertTrue(baseInstall != null)
+            assertTrue(baseInstall.contains("-r"))
+            assertTrue(baseInstall.any { it.endsWith("requirements.txt") })
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `start anyway bypass allows bootstrap to continue after get deps failure`() {
         val projectRoot = createTempDirectory(prefix = "uv-bootstrap-start-anyway-")
         try {
@@ -274,6 +334,94 @@ class UvBootstrapServiceTest {
                 setOf(requirementsPath.toString(), docsRequirementsPath.toString()),
                 requirementPairs.mapNotNull { pair -> pair.getOrNull(1) }.toSet(),
             )
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `includes only non empty requirements txt files in base install command`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-requirements-non-empty-")
+        try {
+            projectRoot.resolve(".mkdocs-plugin-venv").createDirectories()
+            projectRoot.resolve("mkdocs.yml").writeText("site_name: Demo\n")
+            val emptyRequirementsPath = projectRoot.resolve("requirements.txt")
+            emptyRequirementsPath.writeText("")
+            val docsRequirementsPath = projectRoot.resolve("requirements-docs.txt")
+            docsRequirementsPath.writeText("mkdocs-material==9.5.0\n")
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                CommandResult(exitCode = 0)
+            }
+            val expectedPython = runtimePython(projectRoot.toString())
+
+            val result = service.bootstrap(projectRoot.toString())
+
+            assertTrue(result.success)
+            assertFalse(result.skipped)
+            val baseInstall = commands[0]
+            assertEquals(
+                listOf("uv", "pip", "install", "--python", expectedPython, "mkdocs"),
+                baseInstall.take(6),
+            )
+            val requirementPairs = baseInstall.drop(6).chunked(2)
+            assertEquals(
+                setOf(docsRequirementsPath.toString()),
+                requirementPairs.mapNotNull { pair -> pair.getOrNull(1) }.toSet(),
+            )
+            assertTrue(!baseInstall.contains(emptyRequirementsPath.toString()))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `scopes dependency discovery and requirements install to discovered mkdocs config directory`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-scoped-config-")
+        try {
+            val docsProject = projectRoot.resolve("docs-site")
+            docsProject.createDirectories()
+            docsProject.resolve("mkdocs.yml").writeText("site_name: Demo\n")
+            docsProject.resolve("requirements.txt").writeText("mkdocs-material==9.5.0\n")
+            projectRoot.resolve("requirements.txt").writeText("should-not-be-used==1.0.0\n")
+
+            val invocations = mutableListOf<Pair<List<String>, String>>()
+            val service = UvBootstrapService { command, workingDir ->
+                invocations += command to workingDir
+                if (command.contains("get-deps")) {
+                    CommandResult(exitCode = 0, stdout = "mkdocs-material\n")
+                } else {
+                    CommandResult(exitCode = 0)
+                }
+            }
+
+            val result = service.bootstrap(projectRoot.toString())
+            val expectedPython = runtimePython(projectRoot.toString())
+            val scopedRequirements = docsProject.resolve("requirements.txt").toString()
+            val rootRequirements = projectRoot.resolve("requirements.txt").toString()
+
+            assertTrue(result.success)
+            val baseInstall = invocations
+                .map { it.first }
+                .first { command -> command.size > 1 && command[1] == "pip" && command.contains("mkdocs") }
+            assertTrue(baseInstall.contains("-r"))
+            assertTrue(baseInstall.contains(scopedRequirements))
+            assertTrue(!baseInstall.contains(rootRequirements))
+            assertEquals(listOf("uv", "pip", "install", "--python", expectedPython, "mkdocs"), baseInstall.take(6))
+
+            val getDepsInvocation = invocations.first { (command, _) -> command.contains("get-deps") }
+            assertEquals(docsProject.toString(), getDepsInvocation.second)
+            assertTrue(getDepsInvocation.first.contains("-f"))
+            assertTrue(getDepsInvocation.first.contains(docsProject.resolve("mkdocs.yml").toString()))
+
+            val strictInvocation = invocations.first { (command, _) ->
+                command.size >= 4 && command[1] == "-m" && command[2] == "mkdocs" && command.contains("--strict")
+            }
+            assertEquals(docsProject.toString(), strictInvocation.second)
+            assertTrue(strictInvocation.first.contains("-f"))
+            assertTrue(strictInvocation.first.contains(docsProject.resolve("mkdocs.yml").toString()))
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
