@@ -12,6 +12,7 @@ private const val DEFAULT_ROUTE_READY_DELAY_MS: Long = 150L
 private const val DEFAULT_DIRTY_LIVERELOAD_MAX_WAIT_MS: Long = 30_000L
 private const val DEFAULT_DIRTY_LIVERELOAD_INITIAL_DELAY_MS: Long = 150L
 private const val DEFAULT_DIRTY_LIVERELOAD_MAX_DELAY_MS: Long = 1_500L
+private const val DEFAULT_DIRTY_LIVERELOAD_MAX_NUDGES_PER_CYCLE: Int = 2
 private const val DEFAULT_DIRTY_LIVERELOAD_REPLAY_ATTEMPTS: Int = 2
 private const val DEFAULT_DIRTY_LIVERELOAD_REPLAY_DELAY_MS: Long = 1_000L
 
@@ -309,6 +310,7 @@ private fun awaitDirtyLivereloadRoute(
     var delay = initialDelayMillis.coerceIn(100L, maxDelayMillis.coerceAtLeast(100L))
     val maxDelay = maxDelayMillis.coerceAtLeast(delay)
     var nextNudgeAt = nowMillisProvider()
+    var routeMissNudgesSent = 0
 
     while (true) {
         if (isCancelled()) {
@@ -330,7 +332,11 @@ private fun awaitDirtyLivereloadRoute(
 
         val nowForNudge = nowMillisProvider()
         if (nowForNudge >= nextNudgeAt) {
-            runCatching { onRouteMiss?.invoke() }
+            // Bound config touches during one readiness cycle to avoid prolonged rebuild churn.
+            if (routeMissNudgesSent < DEFAULT_DIRTY_LIVERELOAD_MAX_NUDGES_PER_CYCLE) {
+                runCatching { onRouteMiss?.invoke() }
+                routeMissNudgesSent += 1
+            }
             nextNudgeAt = nowForNudge + delay.coerceAtLeast(100L)
         }
 

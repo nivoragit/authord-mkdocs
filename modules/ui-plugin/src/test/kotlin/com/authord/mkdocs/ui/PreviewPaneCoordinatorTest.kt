@@ -39,6 +39,17 @@ class PreviewPaneCoordinatorTest {
 
         assertEquals("http://127.0.0.1:8000/guide/", coordinator.currentUrl("project-1"))
     }
+
+    @Test
+    fun `preserves html route without appending trailing slash`() {
+        val coordinator = PreviewPaneCoordinator()
+        coordinator.open("project-1", "http://127.0.0.1:8000/")
+
+        coordinator.navigate("project-1", "/guide/setup.html")
+
+        assertEquals("http://127.0.0.1:8000/guide/setup.html", coordinator.currentUrl("project-1"))
+    }
+
     @Test
     fun `handles edge cases in url normalization`() {
         val coordinator = PreviewPaneCoordinator()

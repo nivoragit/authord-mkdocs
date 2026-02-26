@@ -597,6 +597,157 @@ class PluginRuntimeIntegrationServiceTest {
     }
 
     @Test
+    fun `buildPreviewRouteIntent honors use_directory_urls false and uppercase markdown extension`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-preview-intent-html-route-")
+        try {
+            val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
+            val pagePath = docsDir.resolve("Guide.MD")
+            Files.writeString(pagePath, "# Guide\n")
+            val configPath = projectRoot.resolve("mkdocs.yml")
+            Files.writeString(
+                configPath,
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                    use_directory_urls: false
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "preview-intent-html-route")
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            processManager.start(
+                projectId = project.locationHash,
+                workingDir = projectRoot.toString(),
+                config = com.authord.mkdocs.runtime.RuntimeServerConfig(
+                    command = listOf(
+                        "mkdocs",
+                        "serve",
+                        "-f",
+                        configPath.toString(),
+                    ),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            previewPane.open(project.locationHash, "https://preview.example/")
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+
+            val intent = service.buildPreviewRouteIntent(
+                selectedPath = pagePath.toString(),
+                source = PreviewRouteIntentSource.DIRECT_NAVIGATION,
+            )
+
+            assertTrue(intent != null)
+            assertEquals("/Guide.html", intent.route)
+            assertEquals("https://preview.example/Guide.html", intent.targetUrl)
+            assertTrue(service.isPreviewEligibleMarkdownPath(pagePath.toString()))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `buildPreviewRouteIntent reads inherited use_directory_urls from fallback config`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-preview-intent-inherited-html-route-")
+        try {
+            val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
+            val pagePath = docsDir.resolve("guide.md")
+            Files.writeString(pagePath, "# Guide\n")
+
+            val baseConfig = projectRoot.resolve("mkdocs.yml")
+            Files.writeString(
+                baseConfig,
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                    use_directory_urls: false
+                """.trimIndent() + "\n",
+            )
+
+            val fallbackConfig = projectRoot.resolve(".authord.theme.yml")
+            Files.writeString(
+                fallbackConfig,
+                """
+                    INHERIT: '${baseConfig.toAbsolutePath().normalize()}'
+                    docs_dir: '${docsDir.toAbsolutePath().normalize()}'
+                    theme:
+                      name: mkdocs
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "preview-intent-inherited-html-route")
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            processManager.start(
+                projectId = project.locationHash,
+                workingDir = projectRoot.toString(),
+                config = com.authord.mkdocs.runtime.RuntimeServerConfig(
+                    command = listOf(
+                        "mkdocs",
+                        "serve",
+                        "-f",
+                        fallbackConfig.toString(),
+                    ),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            previewPane.open(project.locationHash, "https://preview.example/")
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+
+            val intent = service.buildPreviewRouteIntent(
+                selectedPath = pagePath.toString(),
+                source = PreviewRouteIntentSource.DIRECT_NAVIGATION,
+            )
+
+            assertTrue(intent != null)
+            assertEquals("/guide.html", intent.route)
+            assertEquals("https://preview.example/guide.html", intent.targetUrl)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `topic mutation preview dispatch waits for source file to exist before loading browser`() {
         val projectRoot = createTempDirectory(prefix = "runtime-dispatch-file-ready-")
         try {
@@ -820,7 +971,7 @@ class PluginRuntimeIntegrationServiceTest {
     }
 
     @Test
-    fun `topic mutation preview dispatch loads verified local route immediately`() {
+    fun `topic mutation preview dispatch keeps cached local routes behind readiness guard`() {
         val projectRoot = createTempDirectory(prefix = "runtime-dispatch-local-immediate-")
         try {
             val docsDir = Files.createDirectories(projectRoot.resolve("docs").resolve("guides"))
@@ -851,7 +1002,7 @@ class PluginRuntimeIntegrationServiceTest {
                 ),
             )
             val previewPane = PreviewPaneCoordinator()
-            previewPane.open(project.locationHash, "http://127.0.0.1:8000/")
+            previewPane.open(project.locationHash, "http://127.0.0.1:65530/")
             val dependencies = RuntimeIntegrationDependencies(
                 activationService = PluginActivationService(
                     bootstrapService = UvBootstrapService(SuccessCommandRunner()),
@@ -874,7 +1025,7 @@ class PluginRuntimeIntegrationServiceTest {
             val service = PluginRuntimeIntegrationService(project)
             service.overrideDependenciesForTesting(dependencies)
             val loaded = mutableListOf<Pair<String, Boolean>>()
-            val expectedUrl = "http://127.0.0.1:8000/guides/new-page/"
+            val expectedUrl = "http://127.0.0.1:65530/guides/new-page/"
 
             service.onTopicMutationCommitted()
             assertTrue(cachedPreviewTargetUrls(service).contains(expectedUrl))
@@ -888,7 +1039,7 @@ class PluginRuntimeIntegrationServiceTest {
             )
 
             assertTrue(dispatched)
-            assertEquals(listOf(expectedUrl to true), loaded)
+            assertTrue(loaded.isEmpty())
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -1001,6 +1152,24 @@ class PluginRuntimeIntegrationServiceTest {
 
         assertFalse(nudged)
         assertNull(sharedLastLoadedUrl(browserService))
+    }
+
+    @Test
+    fun `onTopicMutationCommittedAsync falls back to synchronous execution when application is unavailable`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-topic-mutation-async-fallback-")
+        try {
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "mutation-async-fallback")
+            val service = PluginRuntimeIntegrationService(project)
+            var callbackResult: Boolean? = null
+
+            service.onTopicMutationCommittedAsync(navPresent = false) { result ->
+                callbackResult = result
+            }
+
+            assertEquals(false, callbackResult)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
     }
 
     @Test

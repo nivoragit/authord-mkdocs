@@ -7,6 +7,8 @@ import com.authord.mkdocs.runtime.RuntimeProcessDiagnostics
 import com.authord.mkdocs.runtime.RuntimeServerConfig
 import com.authord.mkdocs.runtime.UvBootstrapService
 import com.authord.mkdocs.ui.intellij.AuthordUiBundle
+import com.authord.mkdocs.ui.intellij.SiteContext
+import com.authord.mkdocs.ui.intellij.SiteContextResolver
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
 import java.net.HttpURLConnection
@@ -111,9 +113,9 @@ class PluginActivationService(
     }
 
     private val siteNameKeyRegex = Regex("""^\s*site_name\s*:""")
-    private val docsDirKeyRegex = Regex("""^\s*docs_dir\s*:\s*(.+)$""")
     private val themeKeyRegex = Regex("""^(?:theme|["']theme["'])\s*:""")
     private val fallbackThemeConfigFileName = ".authord.theme.yml"
+    private val siteContextResolver = SiteContextResolver()
 
     /**
      * Activates plugin runtime for a project.
@@ -138,7 +140,8 @@ class PluginActivationService(
             )
         }
 
-        if (isMaterializedProjectRoot(projectPath) && resolveConfigPath(projectPath) == null) {
+        val siteContext = resolveSiteContext(projectPath)
+        if (isMaterializedProjectRoot(projectPath) && siteContext == null) {
             val reason = ActivationFailureReason.START_FAILED
             val details = AuthordUiBundle.message("activation.error.configNotFound", projectPath)
             return ActivationResult(
@@ -185,6 +188,7 @@ class PluginActivationService(
                     command = parentBoundServeCommand(
                         projectId = projectId,
                         projectPath = projectPath,
+                        siteContext = siteContext,
                         runtimePath = bootstrapResult.runtimePath,
                         uvExecutablePath = bootstrapResult.uvExecutablePath,
                         host = host,
@@ -273,13 +277,17 @@ class PluginActivationService(
         var latestDiagnostics = processManager.diagnostics(projectId)
 
         while (nowMillisProvider() <= deadline) {
-            if (readinessProbe.isReady(baseUrl)) {
-                return StartupReadiness.Ready(processManager.diagnostics(projectId) ?: latestDiagnostics)
-            }
-
-            latestDiagnostics = processManager.diagnostics(projectId)
+            latestDiagnostics = processManager.diagnostics(projectId) ?: latestDiagnostics
             if (latestDiagnostics != null && !latestDiagnostics.isAlive) {
                 return StartupReadiness.ProcessExited(latestDiagnostics)
+            }
+
+            if (readinessProbe.isReady(baseUrl)) {
+                val postProbeDiagnostics = processManager.diagnostics(projectId) ?: latestDiagnostics
+                if (postProbeDiagnostics != null && !postProbeDiagnostics.isAlive) {
+                    return StartupReadiness.ProcessExited(postProbeDiagnostics)
+                }
+                return StartupReadiness.Ready(postProbeDiagnostics)
             }
 
             if (!safeSleep(pollInterval)) {
@@ -398,8 +406,7 @@ class PluginActivationService(
             return normalizedOutput
         }
 
-        val rootPath = Path.of(projectPath)
-        val hasConfigFile = rootPath.resolve("mkdocs.yml").exists() || rootPath.resolve("mkdocs.yaml").exists()
+        val hasConfigFile = resolveConfigPath(projectPath) != null
         if (!hasConfigFile) {
             return AuthordUiBundle.message("activation.error.configNotFound", projectPath)
         }
@@ -415,17 +422,24 @@ class PluginActivationService(
     private fun parentBoundServeCommand(
         projectId: String,
         projectPath: String,
+        siteContext: SiteContext?,
         runtimePath: String,
         uvExecutablePath: String,
         host: String,
         port: Int,
     ): List<String> {
-        ensureSiteNameRequiredByConfig(projectPath)
+        val activeConfigPath = siteContext?.configPath
+        ensureSiteNameRequiredByConfig(projectPath, activeConfigPath)
         val scriptPath = ensureParentGuardScript(projectPath)
         val parentPid = ProcessHandle.current().pid().toString()
-        val fallbackThemeConfigPath = ensureFallbackThemeConfig(projectId, projectPath)
-        val fallbackThemeConfigArgs = if (fallbackThemeConfigPath != null) {
-            listOf("-f", fallbackThemeConfigPath.toString())
+        val fallbackThemeConfigPath = ensureFallbackThemeConfig(
+            projectId = projectId,
+            projectPath = projectPath,
+            siteContext = siteContext,
+        )
+        val servedConfigPath = fallbackThemeConfigPath ?: activeConfigPath
+        val configArgs = if (servedConfigPath != null) {
+            listOf("-f", servedConfigPath.toString())
         } else {
             emptyList()
         }
@@ -448,7 +462,7 @@ class PluginActivationService(
             "-m",
             "mkdocs",
             "serve",
-        ) + hostBindingArgs + fallbackThemeConfigArgs + listOf(
+        ) + hostBindingArgs + configArgs + listOf(
             "--livereload",
             "--dirty",
         )
@@ -473,14 +487,18 @@ class PluginActivationService(
         }
     }
 
-    private fun ensureFallbackThemeConfig(projectId: String, projectPath: String): Path? {
-        if (!shouldUseDefaultThemeOverrides(projectPath)) {
+    private fun ensureFallbackThemeConfig(
+        projectId: String,
+        projectPath: String,
+        siteContext: SiteContext?,
+    ): Path? {
+        if (!shouldUseDefaultThemeOverrides(siteContext)) {
             return null
         }
 
-        val baseConfigPath = resolveConfigPath(projectPath) ?: return null
+        val baseConfigPath = siteContext?.configPath ?: return null
         val resolvedBaseConfigPath = baseConfigPath.toAbsolutePath().normalize().toString()
-        val resolvedDocsDirPath = resolveDocsDirPath(projectPath, baseConfigPath).toAbsolutePath().normalize().toString()
+        val resolvedDocsDirPath = siteContext.docsDirPath.toAbsolutePath().normalize().toString()
         val fallbackThemeConfigPath = pluginScopedThemeConfigPath(projectId, projectPath)
         val fallbackColorMode = if (runCatching { isDarkIdeTheme() }.getOrDefault(false)) "dark" else "light"
         val fallbackConfig = buildString {
@@ -523,8 +541,8 @@ class PluginActivationService(
             .resolve(fallbackThemeConfigFileName)
     }
 
-    private fun shouldUseDefaultThemeOverrides(projectPath: String): Boolean {
-        val configPath = resolveConfigPath(projectPath) ?: return true
+    private fun shouldUseDefaultThemeOverrides(siteContext: SiteContext?): Boolean {
+        val configPath = siteContext?.configPath ?: return true
         val existing = runCatching { Files.readString(configPath) }.getOrNull() ?: return true
         return existing.lineSequence().none { line ->
             val trimmed = line.trimStart()
@@ -534,44 +552,9 @@ class PluginActivationService(
         }
     }
 
-    private fun resolveDocsDirPath(projectPath: String, configPath: Path): Path {
-        val configuredDocsDir = runCatching { Files.readString(configPath) }
-            .getOrNull()
-            ?.lineSequence()
-            ?.map { it.trim() }
-            ?.filter { it.isNotEmpty() && !it.startsWith("#") }
-            ?.mapNotNull { line ->
-                val match = docsDirKeyRegex.find(line) ?: return@mapNotNull null
-                parseYamlScalar(match.groupValues[1])
-            }
-            ?.firstOrNull()
-            ?.takeIf { it.isNotBlank() }
-            ?: "docs"
-
-        val configuredPath = runCatching { Path.of(configuredDocsDir) }.getOrNull()
-        return if (configuredPath != null && configuredPath.isAbsolute) {
-            configuredPath
-        } else {
-            Path.of(projectPath).resolve(configuredDocsDir)
-        }
-    }
-
-    private fun parseYamlScalar(rawValue: String): String {
-        val trimmed = rawValue.trim()
-        if (trimmed.length >= 2 && trimmed.startsWith('\'') && trimmed.endsWith('\'')) {
-            return trimmed.substring(1, trimmed.length - 1).replace("''", "'")
-        }
-        if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
-            return trimmed.substring(1, trimmed.length - 1)
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\")
-        }
-        return trimmed.substringBefore('#').trim()
-    }
-
-    private fun ensureSiteNameRequiredByConfig(projectPath: String) {
-        val configPath = resolveConfigPath(projectPath) ?: return
-        val existing = runCatching { Files.readString(configPath) }.getOrNull() ?: return
+    private fun ensureSiteNameRequiredByConfig(projectPath: String, configPath: Path?) {
+        val resolvedConfigPath = configPath ?: return
+        val existing = runCatching { Files.readString(resolvedConfigPath) }.getOrNull() ?: return
         if (existing.lineSequence().any { line ->
                 val trimmed = line.trimStart()
                 trimmed.isNotEmpty() && !trimmed.startsWith("#") && siteNameKeyRegex.containsMatchIn(trimmed)
@@ -588,21 +571,17 @@ class PluginActivationService(
             append("site_name: '${escapeSingleQuotedYaml(fallbackSiteName)}'\n")
         }
         runCatching {
-            Files.writeString(configPath, addition, StandardOpenOption.APPEND)
+            Files.writeString(resolvedConfigPath, addition, StandardOpenOption.APPEND)
         }
     }
 
     private fun resolveConfigPath(projectPath: String): Path? {
-        val rootPath = Path.of(projectPath)
-        val yml = rootPath.resolve("mkdocs.yml")
-        if (yml.exists()) {
-            return yml
-        }
-        val yaml = rootPath.resolve("mkdocs.yaml")
-        if (yaml.exists()) {
-            return yaml
-        }
-        return null
+        return resolveSiteContext(projectPath)?.configPath
+    }
+
+    private fun resolveSiteContext(projectPath: String): SiteContext? {
+        val rootPath = runCatching { Path.of(projectPath).toAbsolutePath().normalize() }.getOrNull() ?: return null
+        return siteContextResolver.resolveProjectDefault(rootPath)
     }
 
     private fun defaultSiteName(projectPath: Path): String {

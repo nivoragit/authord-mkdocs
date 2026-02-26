@@ -49,7 +49,12 @@ open class PreviewPaneCoordinator {
 
     private fun normalizeRoute(route: String): String {
         if (route == "/") return route
-        val withLeading = if (route.startsWith("/")) route else "/$route"
+        val trimmed = route.trim()
+        val withLeading = if (trimmed.startsWith("/")) trimmed else "/$trimmed"
+        val routePath = withLeading.substringBefore('?').substringBefore('#')
+        if (routePath.endsWith(".html", ignoreCase = true)) {
+            return withLeading
+        }
         return if (withLeading.endsWith("/")) withLeading else "$withLeading/"
     }
 

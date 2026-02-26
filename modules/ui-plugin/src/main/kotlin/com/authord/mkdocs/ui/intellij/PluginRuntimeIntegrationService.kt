@@ -154,6 +154,7 @@ class PluginRuntimeIntegrationService(
 
     private var dependencies: RuntimeIntegrationDependencies = RuntimeIntegrationDependencies.createDefault()
     private val routeMappingService = RouteMappingService()
+    private val siteContextResolver = SiteContextResolver()
     private val previewRuntimeService = MkDocsPreviewService(
         processManagerProvider = { dependencies.processManager },
         projectIdProvider = { project.locationHash },
@@ -468,14 +469,8 @@ class PluginRuntimeIntegrationService(
      * Returns the config path currently associated with the active runtime command, when available.
      */
     fun activeRuntimeConfigPath(): String? {
-        val projectRoot = project.basePath
-            ?.let { basePath -> runCatching { Path.of(basePath).toAbsolutePath().normalize() }.getOrNull() }
-        val command = dependencies.processManager
-            .diagnostics(project.locationHash)
-            ?.command
-            .orEmpty()
-        val configPath = resolveWatchedConfigPath(command, projectRoot) ?: return null
-        return configPath.toAbsolutePath().normalize().toString().replace('\\', '/')
+        val configPath = resolveActiveRuntimeScope().configPath ?: return null
+        return configPath.toString().replace('\\', '/')
     }
 
     /**
@@ -506,6 +501,35 @@ class PluginRuntimeIntegrationService(
             return false
         }
         return nudgeDirtyLivereloadReload()
+    }
+
+    /**
+     * Runs topic-mutation runtime reconciliation off the UI thread and dispatches completion on UI.
+     *
+     * Falls back to synchronous execution when no IntelliJ application is available (unit tests).
+     */
+    fun onTopicMutationCommittedAsync(
+        navPresent: Boolean = navPresentFromParsedConfigState,
+        onComplete: ((Boolean) -> Unit)? = null,
+    ) {
+        val application = ApplicationManager.getApplication()
+        if (application == null) {
+            val result = onTopicMutationCommitted(navPresent)
+            onComplete?.invoke(result)
+            return
+        }
+
+        application.executeOnPooledThread {
+            val result = onTopicMutationCommitted(navPresent)
+            application.invokeLater(
+                {
+                    if (!project.isDisposed) {
+                        onComplete?.invoke(result)
+                    }
+                },
+                ModalityState.any(),
+            )
+        }
     }
 
     /**
@@ -634,19 +658,6 @@ class PluginRuntimeIntegrationService(
                 onRouteUnavailable = onRouteUnavailable,
                 onStateChanged = onStateChanged,
             )
-        }
-
-        if (source == PreviewRouteIntentSource.TOPIC_MUTATION) {
-            val routeEntry = lookupVerifiedPreviewRouteEntry(selectedPath)
-                ?: run {
-                    rebuildVerifiedPreviewRouteCacheFromDisk()
-                    lookupVerifiedPreviewRouteEntry(selectedPath)
-                }
-            if (routeEntry != null) {
-                dependencies.previewPaneCoordinator.navigate(project.locationHash, routeEntry.route)
-                loadUrl(routeEntry.targetUrl, true)
-                return true
-            }
         }
 
         val applied = dispatchPreviewForSelectedFile(
@@ -913,8 +924,9 @@ class PluginRuntimeIntegrationService(
 
         val docsRelativePath = resolveDocsRelativeMarkdownPath(selectedPath, scope) ?: return null
         val navigationResult = dependencies.navigationCoordinator.onFileSelected(
-            project.locationHash,
-            "docs/$docsRelativePath",
+            projectId = project.locationHash,
+            selectedPath = "docs/$docsRelativePath",
+            useDirectoryUrls = scope.useDirectoryUrls,
         )
         if (!navigationResult.applied) {
             return null
@@ -931,7 +943,8 @@ class PluginRuntimeIntegrationService(
 
     private fun rebuildVerifiedPreviewRouteCacheFromDisk() {
         val baseUrl = ensureVerifiedPreviewRouteCacheBaseUrl() ?: return
-        val docsDirPath = resolveActiveRuntimeScope().docsDirPath
+        val scope = resolveActiveRuntimeScope()
+        val docsDirPath = scope.docsDirPath
         if (docsDirPath == null || !runCatching { Files.isDirectory(docsDirPath) }.getOrDefault(false)) {
             verifiedPreviewRouteCache = emptyMap()
             return
@@ -948,7 +961,10 @@ class PluginRuntimeIntegrationService(
                         docsDirPath.relativize(candidate).toString().replace('\\', '/')
                     }.getOrNull() ?: return@forEach
                     val markdownRelative = normalizeMarkdownRelativePath(relativePath) ?: return@forEach
-                    val route = routeMappingService.mapToRoute("docs/${markdownRelative.trimStart('/')}") ?: return@forEach
+                    val route = routeMappingService.mapToRoute(
+                        selectedPath = "docs/${markdownRelative.trimStart('/')}",
+                        useDirectoryUrls = scope.useDirectoryUrls,
+                    ) ?: return@forEach
                     entries[previewRouteCacheKey(candidate)] = VerifiedPreviewRouteEntry(
                         route = route,
                         targetUrl = composePreviewTargetUrl(baseUrl, route),
@@ -1098,58 +1114,15 @@ class PluginRuntimeIntegrationService(
             .diagnostics(project.locationHash)
             ?.command
             .orEmpty()
-        val configPath = resolveWatchedConfigPath(command, projectRoot)
-            ?: project.basePath?.let(::resolveConfigPath)
-        val docsDirPath = configPath?.let(::resolveDocsDirPathFromConfig)
-            ?: projectRoot?.resolve("docs")?.normalize()
+        val activeContext = siteContextResolver.resolveFromRuntimeCommand(projectRoot, command)
+            ?: projectRoot?.let(siteContextResolver::resolveProjectDefault)
+        val configPath = activeContext?.configPath
+        val docsDirPath = activeContext?.docsDirPath ?: projectRoot?.resolve("docs")?.normalize()
         return RuntimeScope(
             configPath = configPath,
             docsDirPath = docsDirPath,
+            useDirectoryUrls = activeContext?.useDirectoryUrls ?: true,
         )
-    }
-
-    private fun resolveDocsDirPathFromConfig(configPath: Path): Path {
-        val docsDir = readDocsDirValue(configPath) ?: "docs"
-        val configuredPath = runCatching { Path.of(docsDir) }.getOrNull()
-        val absolute = if (configuredPath != null && configuredPath.isAbsolute) {
-            configuredPath
-        } else {
-            configPath.parent.resolve(docsDir)
-        }
-        return absolute.toAbsolutePath().normalize()
-    }
-
-    private fun readDocsDirValue(configPath: Path): String? {
-        if (!Files.exists(configPath) || !Files.isRegularFile(configPath)) {
-            return null
-        }
-
-        return runCatching {
-            Files.readAllLines(configPath)
-                .asSequence()
-                .map { line ->
-                    docsDirLineRegex.find(line)?.groupValues?.getOrNull(1)
-                }
-                .mapNotNull { raw -> raw?.let(::parseYamlScalar) }
-                .firstOrNull { it.isNotBlank() }
-        }.getOrNull()
-    }
-
-    private fun parseYamlScalar(rawValue: String): String {
-        val trimmed = rawValue.trim()
-        if (trimmed.isEmpty()) {
-            return ""
-        }
-        if (trimmed.startsWith("'") && trimmed.endsWith("'") && trimmed.length >= 2) {
-            return trimmed.substring(1, trimmed.length - 1).replace("''", "'").trim()
-        }
-        if (trimmed.startsWith("\"") && trimmed.endsWith("\"") && trimmed.length >= 2) {
-            return trimmed.substring(1, trimmed.length - 1)
-                .replace("\\\"", "\"")
-                .replace("\\\\", "\\")
-                .trim()
-        }
-        return trimmed.substringBefore('#').trim()
     }
 
     private fun resolveDocsRelativeMarkdownPath(
@@ -1198,11 +1171,8 @@ class PluginRuntimeIntegrationService(
     private data class RuntimeScope(
         val configPath: Path?,
         val docsDirPath: Path?,
+        val useDirectoryUrls: Boolean,
     )
-
-    companion object {
-        private val docsDirLineRegex = Regex("""^\s*docs_dir\s*:\s*(.+?)\s*(?:#.*)?$""")
-    }
 }
 
 /**

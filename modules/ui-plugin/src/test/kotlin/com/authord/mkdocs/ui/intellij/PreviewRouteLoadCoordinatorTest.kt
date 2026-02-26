@@ -262,4 +262,52 @@ class PreviewRouteLoadCoordinatorTest {
         assertTrue(nudges >= 2)
         assertNull(warning)
     }
+
+    @Test
+    fun `dirty livereload mode nudges config once per probe cycle to avoid rebuild loops`() {
+        val project = IntellijTestFixtures.project(locationHash = "preview-route-dirty-livereload-single-nudge")
+        val targetUrl = "http://127.0.0.1:8000/single-nudge/"
+        val loaded = mutableListOf<Pair<String, Boolean>>()
+        var warning: String? = null
+        var probes = 0
+        var nowMillis = 0L
+        var nudges = 0
+
+        loadPreviewRouteWithReadinessGuard(
+            project = project,
+            targetUrl = targetUrl,
+            isRequestCurrent = { true },
+            isRuntimeRunning = { true },
+            loadUrl = { url, forceReload -> loaded += url to forceReload },
+            routeReadyProbe = { url ->
+                if (url != targetUrl) {
+                    false
+                } else {
+                    probes += 1
+                    probes >= 3
+                }
+            },
+            maxAttempts = 1,
+            retryDelayMillis = 0L,
+            dirtyLivereloadMode = true,
+            dirtyLivereloadMaxWaitMillis = 10_000L,
+            dirtyLivereloadInitialDelayMillis = 200L,
+            dirtyLivereloadMaxDelayMillis = 600L,
+            dirtyLivereloadReplayAttempts = 0,
+            onDirtyLivereloadRouteMiss = { nudges += 1 },
+            nowMillisProvider = { nowMillis },
+            backgroundRunner = { task -> task() },
+            uiRunner = { task -> task() },
+            sleeper = { delay ->
+                nowMillis += delay
+                true
+            },
+            onRouteUnavailable = { message -> warning = message },
+        )
+
+        assertEquals(listOf(targetUrl to false), loaded)
+        assertTrue(nudges in 1..2)
+        assertTrue(probes >= 3)
+        assertNull(warning)
+    }
 }

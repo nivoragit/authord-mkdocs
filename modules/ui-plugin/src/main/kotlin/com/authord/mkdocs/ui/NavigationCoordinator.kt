@@ -22,8 +22,15 @@ class NavigationCoordinator(
     /**
      * Applies route navigation for a selected file path.
      */
-    fun onFileSelected(projectId: String, selectedPath: String): NavigationResult {
-        val route = routeMappingService.mapToRoute(selectedPath)
+    fun onFileSelected(
+        projectId: String,
+        selectedPath: String,
+        useDirectoryUrls: Boolean = true,
+    ): NavigationResult {
+        val route = routeMappingService.mapToRoute(
+            selectedPath = selectedPath,
+            useDirectoryUrls = useDirectoryUrls,
+        )
             ?: return NavigationResult(
                 applied = false,
                 message = failureHandler.messageFor(selectedPath),

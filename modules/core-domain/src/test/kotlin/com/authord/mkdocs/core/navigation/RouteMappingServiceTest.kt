@@ -23,6 +23,16 @@ class RouteMappingServiceTest {
     }
 
     @Test
+    fun `maps uppercase markdown extension to route`() {
+        assertEquals("/guide/", service.mapToRoute("docs/guide.MD"))
+    }
+
+    @Test
+    fun `maps markdown extension variant to route`() {
+        assertEquals("/guide/setup/", service.mapToRoute("docs/guide/setup.markdown"))
+    }
+
+    @Test
     fun `maps nested index path`() {
         assertEquals("/guide/setup/", service.mapToRoute("docs/guide/setup/index.md"))
     }
@@ -40,5 +50,15 @@ class RouteMappingServiceTest {
     @Test
     fun `returns null for non markdown files under docs`() {
         assertNull(service.mapToRoute("docs/readme.txt"))
+    }
+
+    @Test
+    fun `maps markdown route to html when use directory urls is disabled`() {
+        assertEquals("/guide/setup.html", service.mapToRoute("docs/guide/setup.md", useDirectoryUrls = false))
+    }
+
+    @Test
+    fun `maps nested index route to html when use directory urls is disabled`() {
+        assertEquals("/guide/setup/index.html", service.mapToRoute("docs/guide/setup/index.md", useDirectoryUrls = false))
     }
 }

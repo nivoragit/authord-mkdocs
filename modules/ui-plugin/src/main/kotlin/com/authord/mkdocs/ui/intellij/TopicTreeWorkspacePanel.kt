@@ -972,7 +972,7 @@ internal class TopicTreeWorkspacePanel(
         openPreferredPathFallback: Boolean = true,
     ) {
         reconcileFromDisk()
-        runtimeServiceOrNull()?.onTopicMutationCommitted(navPresent = navPresentFromParsedConfigState)
+        runtimeServiceOrNull()?.onTopicMutationCommittedAsync(navPresent = navPresentFromParsedConfigState)
         val preferredNode = findNode(preferredNodeId)
             ?: findNodeByRelativePath(preferredPath)
             ?: preferredTitle?.let { findNodeByTitleAndParent(title = it, parentNodeId = preferredParentNodeId) }

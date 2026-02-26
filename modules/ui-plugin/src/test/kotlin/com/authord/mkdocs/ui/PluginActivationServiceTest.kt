@@ -486,7 +486,8 @@ class PluginActivationServiceTest {
             )
 
             assertTrue(result.success)
-            assertTrue("-f" !in launcher.command)
+            assertTrue("-f" in launcher.command)
+            assertTrue(projectRoot.resolve("mkdocs.yml").toString() in launcher.command)
             val fallbackThemePath = expectedFallbackThemePath(pluginEnvRoot, "project-1", projectRoot.toString())
             assertTrue(fallbackThemePath.toString() !in launcher.command)
             assertTrue("--theme" !in launcher.command)
@@ -533,7 +534,8 @@ class PluginActivationServiceTest {
             )
 
             assertTrue(result.success)
-            assertTrue("-f" !in launcher.command)
+            assertTrue("-f" in launcher.command)
+            assertTrue(projectRoot.resolve("mkdocs.yml").toString() in launcher.command)
             val fallbackThemePath = expectedFallbackThemePath(pluginEnvRoot, "project-1", projectRoot.toString())
             assertTrue(fallbackThemePath.toString() !in launcher.command)
             assertTrue("--theme" !in launcher.command)
@@ -629,6 +631,93 @@ class PluginActivationServiceTest {
         } finally {
             projectRoot.toFile().deleteRecursively()
             pluginEnvRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `activates when only nested mkdocs config exists`() {
+        val projectRoot = createTempDirectory(prefix = "plugin-activation-nested-config-")
+        try {
+            val nestedSiteRoot = Files.createDirectories(projectRoot.resolve("sites").resolve("nested"))
+            val nestedConfig = nestedSiteRoot.resolve("mkdocs.yml")
+            Files.writeString(
+                nestedConfig,
+                """
+                    site_name: Nested
+                    docs_dir: docs
+                    theme:
+                      name: material
+                """.trimIndent() + "\n",
+            )
+            Files.createDirectories(nestedSiteRoot.resolve("docs"))
+
+            val launcher = RecordingStartLauncher(
+                ActivationHandle("p1", alive = true, startupOutputText = "Serving at http://127.0.0.1:8000/"),
+            )
+            val svc = service(
+                bootstrap = UvBootstrapService(
+                    commandRunner = { _, _ -> CommandResult(0) },
+                    uvExecutableProvider = StaticUvExecutableProvider("/tmp/custom-uv"),
+                ),
+                processManager = MkdocsProcessManager(launcher),
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertTrue(result.success)
+            assertTrue("-f" in launcher.command)
+            assertTrue(nestedConfig.toString() in launcher.command)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `does not mark startup ready when probe succeeds after process exit`() {
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-probe-race-")
+        try {
+            var alive = true
+            var stopCalls = 0
+            val handle = object : ManagedProcessHandle {
+                override val id: String = "probe-race"
+
+                override fun stop() {
+                    stopCalls += 1
+                    alive = false
+                }
+
+                override fun isAlive(): Boolean = alive
+            }
+
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> handle }),
+                readinessProbe = HttpReadinessProbe {
+                    alive = false
+                    true
+                },
+                maxStartupAttempts = 1,
+                startupProbeTimeoutMillis = 1_000L,
+                startupPollIntervalMillis = 1L,
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertFalse(result.success)
+            assertEquals(ActivationFailureReason.START_FAILED, result.reason)
+            assertTrue(stopCalls >= 1)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
         }
     }
 }
