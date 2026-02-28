@@ -422,6 +422,42 @@ class TopicTreeFileMutationDerivationTest {
     }
 
     @Test
+    fun `same-parent move applies pre-removal index semantics in config nav`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(nodeId = "a", title = "A", path = "a.md"),
+                    TopicNavNode(nodeId = "b", title = "B", path = "b.md"),
+                    TopicNavNode(nodeId = "c", title = "C", path = "c.md"),
+                ),
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-same-parent-move",
+                    instance = instance,
+                    command = MoveTopicNodeCommand(
+                        commandId = "cmd-same-parent-move",
+                        treeId = "default",
+                        nodeId = "a",
+                        newParentNodeId = "root",
+                        newOrderIndex = 2,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertTrue(docsGateway.calls.isEmpty())
+        assertEquals(listOf("b", "a", "c"), configGateway.writes.last().nav.map { it.nodeId })
+    }
+
+    @Test
     fun `no-nav remove section alias deletes subtree markdown files without config writes`() {
         val configGateway = MutableConfigGatewayForDerivation(
             MkDocsConfigDocument(
@@ -622,6 +658,167 @@ class TopicTreeFileMutationDerivationTest {
         )
         val written = configGateway.writes.last()
         assertTrue(written.nav.isEmpty())
+    }
+
+    @Test
+    fun `remove child collapses empty parent section in nav mode`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(
+                        nodeId = "guide",
+                        title = "Guide",
+                        children = listOf(
+                            TopicNavNode(
+                                nodeId = "guide-intro",
+                                title = "Intro",
+                                path = "guide/intro.md",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-remove-leaf",
+                    instance = instance,
+                    command = RemoveTopicNodeCommand(
+                        commandId = "cmd-remove-leaf",
+                        treeId = "default",
+                        nodeId = "guide-intro",
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertEquals(listOf("delete:guide/intro.md:RECOVERABLE"), docsGateway.calls)
+        assertTrue(configGateway.writes.last().nav.isEmpty())
+    }
+
+    @Test
+    fun `add child to node with both path and children preserves existing children and page path`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(
+                        nodeId = "mixed",
+                        title = "Mixed",
+                        path = "mixed/index.md",
+                        children = listOf(
+                            TopicNavNode(
+                                nodeId = "mixed-existing",
+                                title = "Existing",
+                                path = "mixed/existing.md",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-add-mixed-child",
+                    instance = instance,
+                    command = AddChildTopicNodeCommand(
+                        commandId = "cmd-add-mixed-child",
+                        treeId = "default",
+                        targetNodeId = "mixed",
+                        childNodeId = "mixed-new",
+                        childTitle = "New Child",
+                        childOrderIndex = 1,
+                        childSourcePath = null,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertEquals(listOf("create:mixed/new-child.md"), docsGateway.calls)
+        val mixed = configGateway.writes.last().nav.single()
+        assertEquals("mixed/index.md", mixed.path)
+        assertEquals(listOf("mixed-existing", "mixed-new"), mixed.children.map { it.nodeId })
+    }
+
+    @Test
+    fun `move section in nav mode rewrites descendant markdown paths`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(
+                        nodeId = "guides",
+                        title = "Guides",
+                        children = listOf(
+                            TopicNavNode(
+                                nodeId = "guides__page",
+                                title = "Guides Home",
+                                path = "guides/index.md",
+                            ),
+                        ),
+                    ),
+                    TopicNavNode(
+                        nodeId = "install",
+                        title = "Install",
+                        children = listOf(
+                            TopicNavNode(
+                                nodeId = "install__page",
+                                title = "Install Home",
+                                path = "install/index.md",
+                            ),
+                            TopicNavNode(
+                                nodeId = "install-a1",
+                                title = "A1",
+                                path = "install/a1.md",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-move-section-nav",
+                    instance = instance,
+                    command = MoveTopicNodeCommand(
+                        commandId = "cmd-move-section-nav",
+                        treeId = "default",
+                        nodeId = "install",
+                        newParentNodeId = "guides",
+                        newOrderIndex = 1,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertEquals(
+            setOf(
+                "move:install/index.md->guides/install/index.md",
+                "rewrite:install/index.md->guides/install/index.md",
+                "move:install/a1.md->guides/install/a1.md",
+                "rewrite:install/a1.md->guides/install/a1.md",
+            ),
+            docsGateway.calls.toSet(),
+        )
+        val guides = configGateway.writes.last().nav.first { it.nodeId == "guides" }
+        val moved = guides.children.first { it.nodeId == "install" }
+        assertEquals(listOf("guides/install/index.md", "guides/install/a1.md"), moved.children.map { it.path })
     }
 
     private fun orchestrator(

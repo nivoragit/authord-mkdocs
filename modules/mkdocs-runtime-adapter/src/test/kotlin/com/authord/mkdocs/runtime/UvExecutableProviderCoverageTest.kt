@@ -96,6 +96,13 @@ class UvExecutableProviderCoverageTest {
             assertEquals(output.toString(), zipOk.executablePath)
             assertEquals("zip-uv", output.readText())
 
+            val zipTraversalEntry = root.resolve("uv-zip-slip.zip")
+            createZip(zipTraversalEntry, mapOf("../../$executableName" to "zip-slip"))
+            val zipTraversal = extractor.extract(zipTraversalEntry, output)
+            assertFalse(zipTraversal.success)
+            assertTrue(zipTraversal.errorMessage.contains("Failed to extract uv archive"))
+            assertEquals("zip-uv", output.readText())
+
             val zipWithoutExecutable = root.resolve("uv-missing.zip")
             createZip(zipWithoutExecutable, mapOf("nested/not-uv" to "other"))
             val zipMissing = extractor.extract(zipWithoutExecutable, output)

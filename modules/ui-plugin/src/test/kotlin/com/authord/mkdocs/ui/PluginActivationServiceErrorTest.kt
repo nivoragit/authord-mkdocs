@@ -2,6 +2,7 @@ package com.authord.mkdocs.ui
 
 import com.authord.mkdocs.core.flags.FeatureFlagPolicy
 import com.authord.mkdocs.runtime.BaseUrlDetector
+import com.authord.mkdocs.runtime.ManagedProcessHandle
 import com.authord.mkdocs.runtime.MkdocsProcessManager
 import com.authord.mkdocs.runtime.UvBootstrapService
 import com.authord.mkdocs.runtime.BootstrapResult
@@ -82,7 +83,13 @@ class PluginActivationServiceErrorTest {
         
         return PluginActivationService(
             bootstrapService = StubUvBootstrapService(),
-            processManager = StubProcessManager(),
+            processManager = MkdocsProcessManager { _, _ ->
+                object : ManagedProcessHandle {
+                    override val id: String = "test"
+                    override fun stop() = Unit
+                    override fun isAlive(): Boolean = true
+                }
+            },
             baseUrlDetector = StubBaseUrlDetector(),
             previewPaneCoordinator = StubPreviewPaneCoordinator(),
             errorPresenter = StubErrorPresenter()
@@ -95,22 +102,6 @@ class PluginActivationServiceErrorTest {
             BootstrapResult(true, "", "uv", emptyList(), false, "")
     }
 
-    class StubProcessManager : MkdocsProcessManager({ _, _ ->
-        object : com.authord.mkdocs.runtime.ManagedProcessHandle {
-            override val id = "test"
-            override fun stop() {}
-            override fun isAlive() = true
-        }
-    }) {
-        override fun start(projectId: String, workingDir: String, config: com.authord.mkdocs.runtime.RuntimeServerConfig): com.authord.mkdocs.runtime.RuntimeStartResult {
-            // Note: RuntimeStartResult was renamed or different in signature?
-            // Let's check imports in the test file... 
-            // Wait, I saw RuntimeStartResult in the file view.
-            return com.authord.mkdocs.runtime.RuntimeStartResult(true, "pid", emptyList(), false, "")
-        }
-        override fun stop(projectId: String): Boolean = true
-    }
-    
     class StubBaseUrlDetector : BaseUrlDetector() {
         override fun detectBaseUrl(startupOutput: String): String? = "http://localhost:8000"
     }

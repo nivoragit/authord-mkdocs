@@ -120,6 +120,62 @@ class MkDocsYamlGatewayRoundTripTest {
         assertTrue(firstWrite.contains("not_in_nav:"))
     }
 
+    @Test
+    fun `writeConfig preserves unknown keys and custom docs_dir when nav is present`() {
+        val projectRoot = Files.createTempDirectory("mkdocs-preserve-unknown")
+        val configPath = projectRoot.resolve("mkdocs.yml")
+        Files.writeString(
+            configPath,
+            """
+            site_name: Demo Site
+            docs_dir: content
+            theme:
+              name: material
+            plugins:
+              - search
+            extra_css:
+              - styles/custom.css
+            nav:
+              - Home: index.md
+            """.trimIndent() + "\n",
+        )
+
+        val instance = TopicInstanceRef(
+            instanceId = "default",
+            configPath = configPath.toString(),
+            docsDirPath = projectRoot.resolve("content").toString(),
+        )
+        val gateway = MkDocsYamlGateway()
+        val loaded = requireSuccess(gateway.loadConfig(instance))
+
+        val updated = loaded.copy(
+            nav = loaded.nav + TopicNavNode(nodeId = "n2", title = "Guide", path = "guide/intro.md"),
+        )
+        requireSuccess(gateway.writeConfig(instance, updated))
+
+        val written = Files.readString(configPath)
+        assertTrue(written.contains("docs_dir: content"))
+        assertTrue(written.contains("theme:"))
+        assertTrue(written.contains("plugins:"))
+        assertTrue(written.contains("extra_css:"))
+        assertTrue(written.contains("- Guide: guide/intro.md"))
+    }
+
+    @Test
+    fun `serializeDeterministically uses document docs_dir when no raw yaml is present`() {
+        val gateway = MkDocsYamlGateway()
+        val serialized = requireSuccess(
+            gateway.serializeDeterministically(
+                MkDocsConfigDocument(
+                    docsDir = "documentation",
+                    nav = listOf(TopicNavNode(nodeId = "n1", title = "Home", path = "index.md")),
+                ),
+            ),
+        )
+
+        assertTrue(serialized.contains("docs_dir: documentation"))
+    }
+
     private fun <T> requireSuccess(result: TopicGatewayResult<T>): T {
         return when (result) {
             is TopicGatewayResult.Success -> result.value

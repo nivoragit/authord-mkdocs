@@ -42,6 +42,8 @@ subprojects {
 
     tasks.withType<Test>().configureEach {
         useJUnitPlatform()
+        // Run tests in parallel within the module
+        maxParallelForks = (Runtime.getRuntime().availableProcessors() / 2).coerceAtLeast(1)
 
         if (project.path == ":modules:ui-plugin") {
             extensions.configure(JacocoTaskExtension::class.java) {
@@ -63,27 +65,17 @@ subprojects {
         finalizedBy("jacocoTestReport", "jacocoTestCoverageVerification")
     }
 
-    val testTaskProvider = tasks.named<Test>("test")
-
-    fun hasFilteredTestSelection(): Boolean {
-        val filter = testTaskProvider.get().filter
-        val includesConfiguredInBuild = filter.includePatterns.isNotEmpty()
-        val includesFromCommandLine = runCatching {
-            @Suppress("UNCHECKED_CAST")
-            val reflected = filter.javaClass
-                .getMethod("getCommandLineIncludePatterns")
-                .invoke(filter) as? Set<String>
-            reflected?.isNotEmpty() == true
-        }.getOrDefault(false)
-        return includesConfiguredInBuild || includesFromCommandLine
-    }
+    val hasFilteredTestSelection = gradle.startParameter.taskRequests
+        .asSequence()
+        .flatMap { it.args.asSequence() }
+        .any { arg -> arg == "--tests" }
 
     tasks.named<JacocoReport>("jacocoTestReport") {
         dependsOn("test")
         // Skip report generation for filtered test runs (e.g., --tests "*Foo*"),
         // because report/verification on a partial suite is not representative.
         onlyIf {
-            !hasFilteredTestSelection()
+            !hasFilteredTestSelection
         }
         reports {
             xml.required.set(true)
@@ -95,7 +87,7 @@ subprojects {
         dependsOn("test")
         // Keep strict 100% gate for full suite runs while allowing focused test commands.
         onlyIf {
-            !hasFilteredTestSelection()
+            !hasFilteredTestSelection
         }
 
         if (project.path != ":modules:ui-plugin" && project.path != ":modules:mkdocs-runtime-adapter") {

@@ -84,7 +84,7 @@ class StartMkdocsAction(
             return result.success
         }
 
-        runtimeService.startPreviewAsync(PreviewStartTrigger.ACTION) { result ->
+        runtimeService.startPreviewWithProgress(PreviewStartTrigger.ACTION) { result ->
             val message = formatPreviewResultMessage(result)
             resultPresenter(project, message, result.success)
             if (result.success) {

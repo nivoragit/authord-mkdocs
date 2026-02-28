@@ -301,9 +301,10 @@ class TopicTreeAggregate(
             return rejected(command.commandId, "CYCLE", "Move would create cycle")
         }
 
-        nodes[command.nodeId] = existing.copy(
-            parentNodeId = command.newParentNodeId,
-            orderIndex = command.newOrderIndex,
+        relocateNode(
+            existing = existing,
+            newParentNodeId = command.newParentNodeId,
+            requestedOrderIndex = command.newOrderIndex,
         )
         return success(command.commandId)
     }
@@ -338,7 +339,15 @@ class TopicTreeAggregate(
             return rejected(command.commandId, "CYCLE", "Reparent would create cycle")
         }
 
-        nodes[command.nodeId] = existing.copy(parentNodeId = command.newParentNodeId)
+        if (existing.parentNodeId == command.newParentNodeId) {
+            return success(command.commandId)
+        }
+
+        relocateNode(
+            existing = existing,
+            newParentNodeId = command.newParentNodeId,
+            requestedOrderIndex = orderedChildNodeIds(command.newParentNodeId).size,
+        )
         return success(command.commandId)
     }
 
@@ -429,6 +438,59 @@ class TopicTreeAggregate(
     private fun childNodesOf(parentId: String): List<TopicNode> {
         return nodes.values
             .filter { it.parentNodeId == parentId && it.status == TopicNodeStatus.ACTIVE }
+    }
+
+    private fun orderedChildNodeIds(parentId: String): List<String> {
+        return childNodesOf(parentId)
+            .sortedWith(compareBy<TopicNode> { it.orderIndex }.thenBy { it.nodeId })
+            .map { it.nodeId }
+    }
+
+    private fun applySiblingOrder(orderedNodeIds: List<String>) {
+        orderedNodeIds.forEachIndexed { index, nodeId ->
+            val node = nodes[nodeId] ?: return@forEachIndexed
+            nodes[nodeId] = node.copy(orderIndex = index)
+        }
+    }
+
+    private fun relocateNode(
+        existing: TopicNode,
+        newParentNodeId: String,
+        requestedOrderIndex: Int,
+    ) {
+        val sourceParentNodeId = existing.parentNodeId
+        val sourceOrderedSiblings = sourceParentNodeId?.let(::orderedChildNodeIds).orEmpty()
+        val sourceIndex = sourceOrderedSiblings.indexOf(existing.nodeId)
+        val movingWithinSameParent = sourceParentNodeId != null && sourceParentNodeId == newParentNodeId
+
+        if (movingWithinSameParent) {
+            val reorderedSiblings = sourceOrderedSiblings.toMutableList().apply {
+                remove(existing.nodeId)
+            }
+            val adjustedOrderIndex = if (sourceIndex >= 0 && sourceIndex < requestedOrderIndex) {
+                requestedOrderIndex - 1
+            } else {
+                requestedOrderIndex
+            }
+            val insertionIndex = adjustedOrderIndex.coerceIn(0, reorderedSiblings.size)
+            reorderedSiblings.add(insertionIndex, existing.nodeId)
+            nodes[existing.nodeId] = existing.copy(parentNodeId = newParentNodeId)
+            applySiblingOrder(reorderedSiblings)
+            return
+        }
+
+        nodes[existing.nodeId] = existing.copy(parentNodeId = newParentNodeId)
+        if (sourceParentNodeId != null) {
+            val sourceWithoutMovingNode = sourceOrderedSiblings.filterNot { it == existing.nodeId }
+            applySiblingOrder(sourceWithoutMovingNode)
+        }
+
+        val targetOrderedSiblings = orderedChildNodeIds(newParentNodeId)
+            .filterNot { it == existing.nodeId }
+            .toMutableList()
+        val insertionIndex = requestedOrderIndex.coerceIn(0, targetOrderedSiblings.size)
+        targetOrderedSiblings.add(insertionIndex, existing.nodeId)
+        applySiblingOrder(targetOrderedSiblings)
     }
 
     private fun normalizeSiblingOrder(parentId: String, forcedFirstNodeId: String? = null) {

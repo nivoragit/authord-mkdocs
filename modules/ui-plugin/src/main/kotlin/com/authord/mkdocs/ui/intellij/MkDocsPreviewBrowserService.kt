@@ -2,6 +2,7 @@ package com.authord.mkdocs.ui.intellij
 
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.components.Service
+import com.intellij.openapi.diagnostic.Logger
 import com.intellij.openapi.project.Project
 import java.awt.BorderLayout
 import javax.swing.JComponent
@@ -31,12 +32,11 @@ class MkDocsPreviewBrowserService(
         var activationOrder: Long = 0L,
     )
 
-    @Volatile
     private var previewContent: PreviewContent? = null
-    @Volatile
     private var markdownActivated: Boolean = false
-    @Volatile
     private var sharedLastLoadedUrl: String? = null
+    private var coalescingLastLoadedUrl: String? = null
+    private val reloadCoalescingGate = ReloadCoalescingGate()
     private val ownersByKey = linkedMapOf<String, OwnerRegistryEntry>()
     private var activeOwnerKey: String? = null
     private var activationCounter: Long = 0L
@@ -48,8 +48,11 @@ class MkDocsPreviewBrowserService(
         previewContent?.let { return it }
         synchronized(this) {
             previewContent?.let { return it }
-            val created = runCatching { createDefaultPreviewContent() }.getOrElse {
+            val created = runCatching {
+                createDefaultPreviewContent(onMainFrameLoadEnd = reloadCoalescingGate::recordReload)
+            }.getOrElse {
                 // Tests may run without full IntelliJ/JCEF runtime.
+                LOG.warn("Authord preview browser initialization failed; falling back to NoOpPreviewContent.", it)
                 NoOpPreviewContent()
             }
             previewContent = created
@@ -60,42 +63,57 @@ class MkDocsPreviewBrowserService(
     /**
      * Returns preview content only when already initialized.
      */
-    fun previewContentOrNull(): PreviewContent? = previewContent
+    fun previewContentOrNull(): PreviewContent? = synchronized(this) { previewContent }
 
     /**
      * Returns whether preview content has been initialized at least once.
      */
-    fun hasInitializedPreviewContent(): Boolean = previewContent != null
+    fun hasInitializedPreviewContent(): Boolean = synchronized(this) { previewContent != null }
 
     /**
      * Marks preview as markdown-activated and ensures preview surface exists.
      */
     fun markMarkdownActivated(): PreviewContent {
-        markdownActivated = true
-        return ensurePreviewContent()
+        synchronized(this) {
+            markdownActivated = true
+            return ensurePreviewContent()
+        }
     }
 
     /**
      * Returns whether markdown open has activated preview usage for this project.
      */
-    fun markdownPreviewActivated(): Boolean = markdownActivated
+    fun markdownPreviewActivated(): Boolean = synchronized(this) { markdownActivated }
 
     /**
      * Loads URL in the persistent preview surface.
      */
     fun loadUrl(url: String, forceReload: Boolean = false) {
-        if (!forceReload && sharedLastLoadedUrl == url) {
-            return
+        val previewToLoad = synchronized(this) {
+            if (!forceReload && sharedLastLoadedUrl == url) {
+                return
+            }
+            if (!forceReload &&
+                coalescingLastLoadedUrl == url &&
+                reloadCoalescingGate.shouldSuppressReload()
+            ) {
+                return
+            }
+            sharedLastLoadedUrl = url
+            coalescingLastLoadedUrl = url
+            markdownActivated = true
+            ensurePreviewContent()
         }
-        sharedLastLoadedUrl = url
-        markMarkdownActivated().loadUrl(url)
+        previewToLoad.loadUrl(url)
     }
 
     /**
      * Clears shared URL dedupe cache so the next load request is always applied.
      */
     fun resetLastLoadedUrl() {
-        sharedLastLoadedUrl = null
+        synchronized(this) {
+            sharedLastLoadedUrl = null
+        }
     }
 
     /**
@@ -170,6 +188,7 @@ class MkDocsPreviewBrowserService(
             previewContent?.dispose()
             previewContent = null
             sharedLastLoadedUrl = null
+            coalescingLastLoadedUrl = null
             markdownActivated = false
         }
     }
@@ -315,5 +334,9 @@ class MkDocsPreviewBrowserService(
         override val component: JComponent = JPanel(BorderLayout())
 
         override fun loadUrl(url: String) = Unit
+    }
+
+    private companion object {
+        private val LOG: Logger = Logger.getInstance(MkDocsPreviewBrowserService::class.java)
     }
 }

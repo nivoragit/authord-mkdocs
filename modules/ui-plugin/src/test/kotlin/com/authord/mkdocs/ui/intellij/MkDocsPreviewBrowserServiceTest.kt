@@ -4,6 +4,7 @@ import javax.swing.JPanel
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
@@ -21,6 +22,14 @@ class MkDocsPreviewBrowserServiceTest {
         val field = MkDocsPreviewBrowserService::class.java.getDeclaredField("previewContent")
         field.isAccessible = true
         field.set(service, preview)
+    }
+
+    private fun recordObservedReload(service: MkDocsPreviewBrowserService) {
+        val field = MkDocsPreviewBrowserService::class.java.getDeclaredField("reloadCoalescingGate")
+        field.isAccessible = true
+        val gate = field.get(service) as? ReloadCoalescingGate
+        assertNotNull(gate)
+        gate.recordReload()
     }
 
     @Test
@@ -117,6 +126,45 @@ class MkDocsPreviewBrowserServiceTest {
         service.loadUrl("http://127.0.0.1:8000/a/")
         service.resetLastLoadedUrl()
         service.loadUrl("http://127.0.0.1:8000/a/")
+
+        assertEquals(
+            listOf(
+                "http://127.0.0.1:8000/a/",
+                "http://127.0.0.1:8000/a/",
+            ),
+            recordingPreview.loadedUrls,
+        )
+    }
+
+    @Test
+    fun `reload gate suppresses duplicate non forced navigation after recent browser reload`() {
+        val project = IntellijTestFixtures.project(locationHash = "preview-browser-reload-gate")
+        val service = MkDocsPreviewBrowserService(project)
+        val recordingPreview = RecordingPreviewContent()
+        injectPreviewContent(service, recordingPreview)
+
+        service.loadUrl("http://127.0.0.1:8000/a/")
+        recordObservedReload(service)
+        service.resetLastLoadedUrl()
+        service.loadUrl("http://127.0.0.1:8000/a/")
+
+        assertEquals(
+            listOf("http://127.0.0.1:8000/a/"),
+            recordingPreview.loadedUrls,
+        )
+    }
+
+    @Test
+    fun `force reload bypasses coalescing gate`() {
+        val project = IntellijTestFixtures.project(locationHash = "preview-browser-reload-gate-force")
+        val service = MkDocsPreviewBrowserService(project)
+        val recordingPreview = RecordingPreviewContent()
+        injectPreviewContent(service, recordingPreview)
+
+        service.loadUrl("http://127.0.0.1:8000/a/")
+        recordObservedReload(service)
+        service.resetLastLoadedUrl()
+        service.loadUrl("http://127.0.0.1:8000/a/", forceReload = true)
 
         assertEquals(
             listOf(

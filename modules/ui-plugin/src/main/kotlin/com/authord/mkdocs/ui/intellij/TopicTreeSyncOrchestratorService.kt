@@ -57,6 +57,10 @@ class TopicTreeSyncOrchestratorService(
 
     private val transactionOutcomes = ConcurrentHashMap<String, TopicSyncOutcome>()
     private val configStateByInstanceId = ConcurrentHashMap<String, MkDocsConfigDocument>()
+    private val configFileTimestampByInstanceId = ConcurrentHashMap<String, Long>()
+    private val transactionOutcomeOrder = ArrayDeque<String>()
+    private val configStateOrder = ArrayDeque<String>()
+    private val cacheLock = Any()
 
     /**
      * Applies one topic-sync transaction and returns apply/rollback/compensation metadata.
@@ -88,21 +92,10 @@ class TopicTreeSyncOrchestratorService(
             is TopicGatewayResult.Failure -> return mutated
         }
 
-        // In no-nav mode we treat filesystem hierarchy as the source of truth and avoid writing
-        // synthetic nav content into mkdocs.yml.
-        if (config.navPresent) {
-            // Keep nav/config persistence ahead of file mutations so a file operation failure can
-            // be compensated without losing canonical navigation intent.
-            when (val write = mkDocsConfigGateway.writeConfig(transaction.instance, mutation.document)) {
-                is TopicGatewayResult.Failure -> return write
-                is TopicGatewayResult.Success -> Unit
-            }
-        }
-        configStateByInstanceId[transaction.instance.instanceId] = mutation.document
-
         // Compensation is pushed in execution order and popped in reverse order (LIFO), mirroring
         // transaction semantics for create/rename/move undo paths.
         val compensationStack = ArrayDeque<() -> TopicGatewayResult<*>>()
+
         val allFileOperations = (transaction.fileOperations + mutation.fileOperations).distinct()
         for (operation in allFileOperations) {
             when (val applyResult = applyFileOperation(transaction, operation, mutation.document)) {
@@ -116,7 +109,7 @@ class TopicTreeSyncOrchestratorService(
                         compensated = compensationSucceeded,
                         message = "Operation failed (${operation.kind}): ${applyResult.error.detail}",
                     )
-                    transactionOutcomes[transaction.transactionId] = outcome
+                    rememberTransactionOutcome(outcome)
                     return TopicGatewayResult.Success(outcome)
                 }
             }
@@ -133,10 +126,36 @@ class TopicTreeSyncOrchestratorService(
                     compensated = compensationSucceeded,
                     message = "Heading synchronization failed: ${titleSync.error.detail}",
                 )
-                transactionOutcomes[transaction.transactionId] = outcome
+                rememberTransactionOutcome(outcome)
                 return TopicGatewayResult.Success(outcome)
             }
         }
+
+        // In no-nav mode we treat filesystem hierarchy as the source of truth and avoid writing
+        // synthetic nav content into mkdocs.yml.
+        if (config.navPresent) {
+            when (val write = mkDocsConfigGateway.writeConfig(transaction.instance, mutation.document)) {
+                is TopicGatewayResult.Success -> Unit
+                is TopicGatewayResult.Failure -> {
+                    val compensationSucceeded = runCompensationStack(compensationStack)
+                    val outcome = TopicSyncOutcome(
+                        transactionId = transaction.transactionId,
+                        applied = false,
+                        rolledBack = true,
+                        compensated = compensationSucceeded,
+                        message = "Config write failed: ${write.error.detail}",
+                    )
+                    rememberTransactionOutcome(outcome)
+                    return TopicGatewayResult.Success(outcome)
+                }
+            }
+        }
+
+        rememberConfigState(
+            instanceId = transaction.instance.instanceId,
+            document = mutation.document,
+            configTimestampMillis = currentConfigTimestamp(transaction.instance),
+        )
 
         val outcome = TopicSyncOutcome(
             transactionId = transaction.transactionId,
@@ -145,7 +164,7 @@ class TopicTreeSyncOrchestratorService(
             compensated = false,
             message = "Applied",
         )
-        transactionOutcomes[transaction.transactionId] = outcome
+        rememberTransactionOutcome(outcome)
         return TopicGatewayResult.Success(outcome)
     }
 
@@ -154,7 +173,7 @@ class TopicTreeSyncOrchestratorService(
         instanceId: String,
         config: MkDocsConfigDocument,
     ) {
-        configStateByInstanceId[instanceId] = config
+        rememberConfigState(instanceId, config)
         when (val port = topicTreePort) {
             is TopicTreeAggregateRefreshPort -> port.refreshTreeFromNav(
                 treeId = treeId,
@@ -180,7 +199,7 @@ class TopicTreeSyncOrchestratorService(
             compensated = prior?.compensated ?: true,
             message = "Rollback requested: $reason",
         )
-        transactionOutcomes[transactionId] = outcome
+        rememberTransactionOutcome(outcome)
         return TopicGatewayResult.Success(outcome)
     }
 
@@ -191,20 +210,29 @@ class TopicTreeSyncOrchestratorService(
         val cached = configStateByInstanceId[instanceId]
         if (cached != null) {
             if (cached.navPresent) {
-                return TopicGatewayResult.Success(cached)
+                val cachedTimestamp = configFileTimestampByInstanceId[instanceId]
+                val currentTimestamp = currentConfigTimestamp(transaction.instance)
+                if (cachedTimestamp == null || currentTimestamp == null || cachedTimestamp == currentTimestamp) {
+                    return TopicGatewayResult.Success(cached)
+                }
+            } else {
+                val refreshed = hydrateNoNavConfigFromDocs(
+                    instance = transaction.instance,
+                    loadedConfig = cached,
+                )
+                val rebased = refreshed.copy(
+                    nav = rebindNoNavNodeIds(
+                        previousNodes = cached.nav,
+                        currentNodes = refreshed.nav,
+                    ),
+                )
+                rememberConfigState(
+                    instanceId = instanceId,
+                    document = rebased,
+                    configTimestampMillis = currentConfigTimestamp(transaction.instance),
+                )
+                return TopicGatewayResult.Success(rebased)
             }
-            val refreshed = hydrateNoNavConfigFromDocs(
-                instance = transaction.instance,
-                loadedConfig = cached,
-            )
-            val rebased = refreshed.copy(
-                nav = rebindNoNavNodeIds(
-                    previousNodes = cached.nav,
-                    currentNodes = refreshed.nav,
-                ),
-            )
-            configStateByInstanceId[instanceId] = rebased
-            return TopicGatewayResult.Success(rebased)
         }
         return when (val loaded = mkDocsConfigGateway.loadConfig(transaction.instance)) {
             is TopicGatewayResult.Success -> {
@@ -212,7 +240,11 @@ class TopicTreeSyncOrchestratorService(
                     instance = transaction.instance,
                     loadedConfig = loaded.value,
                 )
-                configStateByInstanceId[instanceId] = hydrated
+                rememberConfigState(
+                    instanceId = instanceId,
+                    document = hydrated,
+                    configTimestampMillis = currentConfigTimestamp(transaction.instance),
+                )
                 TopicGatewayResult.Success(hydrated)
             }
 
@@ -381,6 +413,9 @@ class TopicTreeSyncOrchestratorService(
         val updatedTarget = if (target.node.path == null) {
             targetChildren.addAt(command.childOrderIndex, newChild)
             target.node.copy(children = targetChildren.toList())
+        } else if (target.node.children.isNotEmpty()) {
+            targetChildren.addAt(command.childOrderIndex, newChild)
+            target.node.copy(children = targetChildren.toList())
         } else {
             val originalTargetPath = normalizePath(target.node.path)
             val preservedPagePath = if (noNavFolderHierarchy && originalTargetPath != null) {
@@ -493,10 +528,11 @@ class TopicTreeSyncOrchestratorService(
         if (removed == null) {
             return configFailure("Cannot locate node '${command.nodeId}' for removal")
         }
+        val cleanedNodes = collapseEmptySections(updatedNodes)
         val fileOperations = collectPaths(removed)
             .distinct()
             .map { path -> TopicFileOperation(TopicFileOperationKind.DELETE, path) }
-        return successMutation(document.copy(nav = updatedNodes), fileOperations)
+        return successMutation(document.copy(nav = cleanedNodes), fileOperations)
     }
 
     private fun reorderNodesInConfig(
@@ -524,7 +560,29 @@ class TopicTreeSyncOrchestratorService(
     ): TopicGatewayResult<ConfigMutationResult> {
         val sourceContext = resolveNodeContext(document.nav, nodeId)
             ?: return configFailure("Cannot locate node '$nodeId' for move")
+        val resolvedTargetParentNodeId = if (newParentNodeId == ROOT_NODE_ID) {
+            ROOT_NODE_ID
+        } else {
+            resolveNodeContext(document.nav, newParentNodeId)?.node?.nodeId
+                ?: return configFailure("Cannot locate parent '$newParentNodeId' for move")
+        }
         val resolvedSourceNodeId = sourceContext.node.nodeId
+        val sourceParentNodeId = sourceContext.parentNodeId ?: ROOT_NODE_ID
+        val sourceSiblings = if (sourceParentNodeId == ROOT_NODE_ID) {
+            document.nav
+        } else {
+            resolveNodeContext(document.nav, sourceParentNodeId)?.node?.children.orEmpty()
+        }
+        val sourceIndex = sourceSiblings.indexOfFirst { sibling -> sibling.nodeId == resolvedSourceNodeId }
+        val adjustedOrderIndex = if (
+            sourceParentNodeId == resolvedTargetParentNodeId &&
+            sourceIndex >= 0 &&
+            sourceIndex < newOrderIndex
+        ) {
+            newOrderIndex - 1
+        } else {
+            newOrderIndex
+        }
         val (effectiveWithoutSource, removedNode) = removeNode(document.nav, resolvedSourceNodeId)
         val movingNode = removedNode ?: return configFailure("Cannot locate node '$nodeId' for move")
         val fileOperations = mutableListOf<TopicFileOperation>()
@@ -569,11 +627,35 @@ class TopicTreeSyncOrchestratorService(
             } else {
                 movingNode
             }
+        } else if (movingNode.children.isNotEmpty()) {
+            val sourceDirectory = deriveNoNavDirectoryForNode(movingNode)
+            if (!sourceDirectory.isNullOrBlank()) {
+                val targetParentDirectory = resolveDirectoryForParent(
+                    nodes = effectiveWithoutSource,
+                    parentNodeId = newParentNodeId,
+                    noNavFolderHierarchy = false,
+                )
+                val targetDirectory = joinPath(targetParentDirectory, sourceDirectory.substringAfterLast('/'))
+                if (targetDirectory != sourceDirectory) {
+                    val pathRewrites = deriveDirectoryRewriteMap(movingNode, sourceDirectory, targetDirectory)
+                    pathRewrites.entries
+                        .sortedBy { it.key }
+                        .forEach { (sourcePath, targetPath) ->
+                            fileOperations += TopicFileOperation(TopicFileOperationKind.MOVE, sourcePath, targetPath)
+                            fileOperations += TopicFileOperation(TopicFileOperationKind.REWRITE_LINKS, sourcePath, targetPath)
+                        }
+                    rewriteNodePaths(movingNode, pathRewrites)
+                } else {
+                    movingNode
+                }
+            } else {
+                movingNode
+            }
         } else {
             movingNode
         }
         val sourceDocument = document.copy(nav = effectiveWithoutSource)
-        return when (val inserted = insertNode(sourceDocument, newParentNodeId, nodeToInsert, newOrderIndex)) {
+        return when (val inserted = insertNode(sourceDocument, newParentNodeId, nodeToInsert, adjustedOrderIndex)) {
             is TopicGatewayResult.Success -> {
                 successMutation(inserted.value, fileOperations)
             }
@@ -829,6 +911,21 @@ class TopicTreeSyncOrchestratorService(
         return null
     }
 
+    private fun collapseEmptySections(nodes: List<TopicNavNode>): List<TopicNavNode> {
+        return nodes.mapNotNull { node ->
+            val collapsedChildren = collapseEmptySections(node.children)
+            val collapsed = node.copy(children = collapsedChildren)
+            val isEmptySection = collapsed.path == null &&
+                collapsed.externalUrl == null &&
+                collapsed.children.isEmpty()
+            if (isEmptySection) {
+                null
+            } else {
+                collapsed
+            }
+        }
+    }
+
     private fun reorderNodeList(
         nodes: List<TopicNavNode>,
         orderedNodeIds: List<String>,
@@ -1047,8 +1144,48 @@ class TopicTreeSyncOrchestratorService(
             compensated = true,
             message = "Compensation requested: $reason",
         )
-        transactionOutcomes[transactionId] = outcome
+        rememberTransactionOutcome(outcome)
         return TopicGatewayResult.Success(outcome)
+    }
+
+    private fun rememberTransactionOutcome(outcome: TopicSyncOutcome) {
+        synchronized(cacheLock) {
+            transactionOutcomes[outcome.transactionId] = outcome
+            transactionOutcomeOrder.remove(outcome.transactionId)
+            transactionOutcomeOrder.addLast(outcome.transactionId)
+            while (transactionOutcomeOrder.size > MAX_RETAINED_TRANSACTION_OUTCOMES) {
+                val evicted = transactionOutcomeOrder.removeFirst()
+                transactionOutcomes.remove(evicted)
+            }
+        }
+    }
+
+    private fun rememberConfigState(
+        instanceId: String,
+        document: MkDocsConfigDocument,
+        configTimestampMillis: Long? = null,
+    ) {
+        synchronized(cacheLock) {
+            configStateByInstanceId[instanceId] = document
+            if (configTimestampMillis != null) {
+                configFileTimestampByInstanceId[instanceId] = configTimestampMillis
+            } else {
+                configFileTimestampByInstanceId.remove(instanceId)
+            }
+            configStateOrder.remove(instanceId)
+            configStateOrder.addLast(instanceId)
+            while (configStateOrder.size > MAX_RETAINED_INSTANCE_CONFIGS) {
+                val evicted = configStateOrder.removeFirst()
+                configStateByInstanceId.remove(evicted)
+                configFileTimestampByInstanceId.remove(evicted)
+            }
+        }
+    }
+
+    private fun currentConfigTimestamp(instance: TopicInstanceRef): Long? {
+        val configPath = runCatching { Path.of(instance.configPath).toAbsolutePath().normalize() }.getOrNull()
+            ?: return null
+        return runCatching { Files.getLastModifiedTime(configPath).toMillis() }.getOrNull()
     }
 
     private fun applyFileOperation(
@@ -1227,6 +1364,9 @@ class TopicTreeSyncOrchestratorService(
 
     private companion object {
         private const val ROOT_NODE_ID: String = "root"
+        private const val MAX_RETAINED_TRANSACTION_OUTCOMES: Int = 256
+        private const val MAX_RETAINED_INSTANCE_CONFIGS: Int = 64
+        private const val MAX_DOCS_MARKDOWN_COLLECTION_DEPTH: Int = 20
 
         private fun collectDocsMarkdownPaths(docsDirPath: String): List<String> {
             val docsDir = runCatching { Path.of(docsDirPath).toAbsolutePath().normalize() }.getOrNull()
@@ -1236,7 +1376,7 @@ class TopicTreeSyncOrchestratorService(
             }
 
             val markdownPaths = mutableListOf<String>()
-            Files.walk(docsDir).use { stream ->
+            Files.walk(docsDir, MAX_DOCS_MARKDOWN_COLLECTION_DEPTH).use { stream ->
                 stream
                     .filter { Files.isRegularFile(it) }
                     .filter { path ->

@@ -29,6 +29,7 @@ data class MkDocsConfigDocument(
     val notInNav: List<String> = emptyList(),
     val navPresent: Boolean = true,
     val siteName: String? = null,
+    val rawYaml: Map<String, Any?> = emptyMap(),
 )
 
 /**

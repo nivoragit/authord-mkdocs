@@ -28,7 +28,6 @@ import com.authord.mkdocs.ui.intellij.TopicTreeApplicationService
 import com.authord.mkdocs.ui.intellij.TopicTreeUiService
 import com.intellij.openapi.components.service
 import com.intellij.openapi.project.Project
-import java.nio.file.Path
 
 /**
  * Composition root that wires default command bus and Phase 2 topic-tree service seams.
@@ -185,51 +184,6 @@ private class NoOpTreeSyncOrchestrator : TreeSyncOrchestrator {
         return TopicGatewayResult.Failure(
             DefaultTopicSyncError(TopicSyncErrorCode.UNSUPPORTED, "Sync orchestrator is not wired"),
         )
-    }
-}
-
-private class InMemoryInstanceRegistryPort : InstanceRegistryPort {
-    private val instances = linkedMapOf<String, TopicInstanceRef>()
-    private var activeInstanceId: String? = null
-
-    override fun discoverDefaultInstance(projectRootPath: String): TopicGatewayResult<TopicInstanceRef?> {
-        val projectRoot = runCatching { Path.of(projectRootPath).toAbsolutePath().normalize() }
-            .getOrElse { Path.of(projectRootPath) }
-        val defaultInstance = TopicInstanceRef(
-            instanceId = "default",
-            configPath = projectRoot.resolve("mkdocs.yml").toString(),
-            docsDirPath = projectRoot.resolve("docs").toString(),
-        )
-        instances.putIfAbsent(defaultInstance.instanceId, defaultInstance)
-        if (activeInstanceId == null) {
-            activeInstanceId = defaultInstance.instanceId
-        }
-        return TopicGatewayResult.Success(defaultInstance)
-    }
-
-    override fun registerInstance(instance: TopicInstanceRef): TopicGatewayResult<Unit> {
-        instances[instance.instanceId] = instance
-        if (activeInstanceId == null) {
-            activeInstanceId = instance.instanceId
-        }
-        return TopicGatewayResult.Success(Unit)
-    }
-
-    override fun listInstances(): TopicGatewayResult<List<TopicInstanceRef>> {
-        return TopicGatewayResult.Success(instances.values.toList())
-    }
-
-    override fun selectActiveInstance(instanceId: String): TopicGatewayResult<TopicInstanceRef> {
-        val instance = instances[instanceId]
-            ?: return TopicGatewayResult.Failure(
-                DefaultTopicSyncError(TopicSyncErrorCode.INSTANCE_SCOPE, "Unknown instance: $instanceId"),
-            )
-        activeInstanceId = instanceId
-        return TopicGatewayResult.Success(instance)
-    }
-
-    override fun activeInstance(): TopicGatewayResult<TopicInstanceRef?> {
-        return TopicGatewayResult.Success(activeInstanceId?.let(instances::get))
     }
 }
 

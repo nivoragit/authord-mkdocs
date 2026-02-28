@@ -104,17 +104,17 @@ class MkdocsProcessManagerTest {
     }
 
     @Test
-    fun `restart without existing process falls back to defaults and current dir`() {
-        val manager = MkdocsProcessManager(ProcessLauncher { command, workingDir ->
-            assertEquals(".", workingDir)
-            assertEquals(listOf("mkdocs", "serve"), command)
-            FakeHandle("process-default")
+    fun `restart without existing process returns not started result`() {
+        val manager = MkdocsProcessManager(ProcessLauncher { _, _ ->
+            throw AssertionError("restart should not launch a process when no prior runtime exists")
         })
 
         val restarted = manager.restart("project-missing")
 
-        assertEquals("process-default", restarted.processId)
-        assertTrue(restarted.started)
+        assertEquals("", restarted.processId)
+        assertTrue(!restarted.started)
+        assertEquals(emptyList(), restarted.command)
+        assertTrue(restarted.startupOutput.contains("no tracked process"))
     }
 
     @Test

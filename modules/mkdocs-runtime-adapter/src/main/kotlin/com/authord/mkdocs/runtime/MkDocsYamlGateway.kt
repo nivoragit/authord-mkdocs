@@ -8,10 +8,14 @@ import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
 import org.yaml.snakeyaml.DumperOptions
+import org.yaml.snakeyaml.LoaderOptions
 import org.yaml.snakeyaml.Yaml
+import org.yaml.snakeyaml.constructor.SafeConstructor
+import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.Paths
+import java.nio.file.StandardCopyOption
 
 /**
  * YAML-backed implementation of [MkDocsConfigGateway] with deterministic serialization.
@@ -30,10 +34,16 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
 
         return runCatching {
             val root = Files.newBufferedReader(configPath).use { reader ->
-                Yaml().load<Any?>(reader)
+                Yaml(SafeConstructor(LoaderOptions())).load<Any?>(reader)
             }
 
             val map = (root as? Map<*, *>) ?: emptyMap<String, Any>()
+            val rawYaml = linkedMapOf<String, Any?>()
+            map.forEach { (key, value) ->
+                key?.toString()?.let { normalizedKey ->
+                    rawYaml[normalizedKey] = value
+                }
+            }
             val docsDir = map["docs_dir"]?.toString()?.trim().orEmpty().ifBlank { "docs" }
             val siteName = map["site_name"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
             val navPresent = map.containsKey("nav")
@@ -45,6 +55,7 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
                 notInNav = notInNav,
                 navPresent = navPresent,
                 siteName = siteName,
+                rawYaml = rawYaml,
             )
         }.fold(
             onSuccess = { TopicGatewayResult.Success(it) },
@@ -73,7 +84,27 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
             Files.createDirectories(configPath.parent ?: Paths.get("."))
             val previous = if (Files.exists(configPath)) Files.readString(configPath) else null
             if (previous != serialized) {
-                Files.writeString(configPath, serialized)
+                val parent = configPath.parent ?: Paths.get(".")
+                val tempFile = Files.createTempFile(parent, ".${configPath.fileName}.", ".tmp")
+                try {
+                    Files.writeString(tempFile, serialized)
+                    try {
+                        Files.move(
+                            tempFile,
+                            configPath,
+                            StandardCopyOption.REPLACE_EXISTING,
+                            StandardCopyOption.ATOMIC_MOVE,
+                        )
+                    } catch (_: AtomicMoveNotSupportedException) {
+                        Files.move(
+                            tempFile,
+                            configPath,
+                            StandardCopyOption.REPLACE_EXISTING,
+                        )
+                    }
+                } finally {
+                    Files.deleteIfExists(tempFile)
+                }
             }
         }.fold(
             onSuccess = { TopicGatewayResult.Success(Unit) },
@@ -95,14 +126,19 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
         return runCatching {
             // Use linked insertion order so equivalent logical content serializes with stable key
             // ordering across repeated save cycles.
-            val root = linkedMapOf<String, Any>()
+            val root = linkedMapOf<String, Any?>().apply {
+                putAll(document.rawYaml)
+            }
             document.siteName
                 ?.trim()
                 ?.takeIf { it.isNotEmpty() }
                 ?.let { root["site_name"] = it }
-            root["docs_dir"] = "docs"
+                ?: root.remove("site_name")
+            root["docs_dir"] = document.docsDir.trim().ifBlank { "docs" }
             if (document.navPresent) {
                 root["nav"] = serializeNav(document.nav)
+            } else {
+                root.remove("nav")
             }
             if (document.notInNav.isNotEmpty()) {
                 // Normalize + sort to avoid churn from path separator or input ordering variance.
@@ -110,6 +146,8 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
                     .map { normalizePath(it) }
                     .distinct()
                     .sorted()
+            } else {
+                root.remove("not_in_nav")
             }
 
             val options = DumperOptions().apply {

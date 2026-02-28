@@ -28,17 +28,24 @@ import com.intellij.openapi.util.Disposer
 import com.intellij.openapi.util.Key
 import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.util.concurrency.AppExecutorUtil
+import java.nio.charset.StandardCharsets
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.attribute.FileTime
+import java.security.MessageDigest
+import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** API version for plugin runtime integration service. */
 const val PLUGIN_RUNTIME_INTEGRATION_API_VERSION: String = "1.0.0"
 private const val DEFAULT_PREVIEW_DISPATCH_RETRY_ATTEMPTS: Int = 2
 private const val DEFAULT_PREVIEW_DISPATCH_RETRY_DELAY_MS: Long = 1_200L
 private const val TOPIC_MUTATION_VERIFICATION_HOLD_DELAY_MS: Long = 150L
+private const val MAX_DOCS_ROUTE_SCAN_DEPTH: Int = 20
 
 /**
  * Trigger source used to start plugin preview runtime flow.
@@ -147,9 +154,20 @@ data class RuntimeIntegrationDependencies(
 class PluginRuntimeIntegrationService(
     private val project: Project,
 ) : Disposable {
+    private data class ConfigFingerprintSnapshot(
+        val hasKnownFingerprint: Boolean,
+        val hasChanged: Boolean,
+        val currentFingerprint: String?,
+    )
+
     private data class VerifiedPreviewRouteEntry(
         val route: String,
         val targetUrl: String,
+    )
+
+    private data class VerifiedPreviewRouteCacheState(
+        val baseUrl: String? = null,
+        val entries: Map<String, VerifiedPreviewRouteEntry> = emptyMap(),
     )
 
     private var dependencies: RuntimeIntegrationDependencies = RuntimeIntegrationDependencies.createDefault()
@@ -159,18 +177,21 @@ class PluginRuntimeIntegrationService(
         processManagerProvider = { dependencies.processManager },
         projectIdProvider = { project.locationHash },
     )
+    private val stateLock = ReentrantLock()
     private var lastConfigFingerprint: String? = null
     private val previewRouteIntentGeneration = AtomicInteger(0)
-    @Volatile
-    private var verifiedPreviewRouteCache: Map<String, VerifiedPreviewRouteEntry> = emptyMap()
-    @Volatile
-    private var verifiedPreviewRouteCacheBaseUrl: String? = null
-    @Volatile
+    private var verifiedPreviewRouteCacheState = VerifiedPreviewRouteCacheState()
     private var topicMutationConfigVerificationPending: Boolean = false
-    @Volatile
     private var lastVerifiedTopicMutationConfigFingerprint: String? = null
-    @Volatile
     private var navPresentFromParsedConfigState: Boolean = false
+    private val previewOperationExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "authord-preview-operation-${project.locationHash}").apply { isDaemon = true }
+    }
+    private val fallbackRetryScheduler = Executors.newSingleThreadScheduledExecutor { runnable ->
+        Thread(runnable, "authord-preview-retry-${project.locationHash}").apply { isDaemon = true }
+    }
+
+    private inline fun <T> withStateLock(action: () -> T): T = stateLock.withLock(action)
 
     init {
         Disposer.register(this, previewRuntimeService)
@@ -205,8 +226,15 @@ class PluginRuntimeIntegrationService(
      * @param trigger source entry point for diagnostics and traceability.
      * @return activation result with success, failure reason, and optional preview URL.
      */
-    @Synchronized
     fun startPreview(trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION): ActivationResult {
+        val application = ApplicationManager.getApplication()
+        if (application?.isDispatchThread == true && !application.isUnitTestMode) {
+            return ActivationResult(
+                success = false,
+                reason = ActivationFailureReason.START_FAILED,
+                message = "Preview start requested on UI thread; call startPreviewAsync() instead.",
+            )
+        }
         val projectPath = project.basePath
             ?: return ActivationResult(
                 success = false,
@@ -215,16 +243,20 @@ class PluginRuntimeIntegrationService(
             )
 
         val projectId = project.locationHash
-        val hasKnownConfigFingerprint = lastConfigFingerprint != null
-        val configChanged = hasConfigChanged(projectPath)
-        if (previewRuntimeService.isServerRunning() && hasKnownConfigFingerprint && configChanged) {
+        val isServerRunning = previewRuntimeService.isServerRunning()
+        val fingerprintSnapshot = currentFingerprintSnapshot(projectPath)
+        if (isServerRunning && fingerprintSnapshot.hasKnownFingerprint && fingerprintSnapshot.hasChanged) {
             return restartPreview(trigger)
         }
-        if (previewRuntimeService.isServerRunning() && !hasKnownConfigFingerprint) {
-            syncConfigFingerprint(projectPath)
+        if (isServerRunning && !fingerprintSnapshot.hasKnownFingerprint) {
+            withStateLock {
+                if (lastConfigFingerprint == null) {
+                    lastConfigFingerprint = fingerprintSnapshot.currentFingerprint
+                }
+            }
         }
         val existingPreviewUrl = dependencies.previewPaneCoordinator.currentUrl(projectId)
-        if (previewRuntimeService.isServerRunning() && existingPreviewUrl != null) {
+        if (isServerRunning && existingPreviewUrl != null) {
             return ActivationResult(
                 success = true,
                 previewUrl = existingPreviewUrl,
@@ -260,9 +292,48 @@ class PluginRuntimeIntegrationService(
     }
 
     /**
+     * Starts preview with IDE background-task progress shown in the status bar.
+     */
+    fun startPreviewWithProgress(
+        trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION,
+        onComplete: (ActivationResult) -> Unit,
+    ) {
+        if (ApplicationManager.getApplication() == null) {
+            onComplete(startPreview(trigger))
+            return
+        }
+
+        runAuthordBackgroundTask(
+            project = project,
+            title = "Starting Authord Preview",
+            canBeCancelled = false,
+            operation = { indicator ->
+                indicator.isIndeterminate = true
+                indicator.text = "Bootstrapping runtime environment..."
+                startPreview(trigger)
+            },
+            onSuccess = { result ->
+                if (!project.isDisposed) {
+                    onComplete(result)
+                }
+            },
+            onError = { error ->
+                if (!project.isDisposed) {
+                    onComplete(
+                        ActivationResult(
+                            success = false,
+                            reason = ActivationFailureReason.START_FAILED,
+                            message = "Unexpected error: ${error.message ?: "Unknown failure"}",
+                        ),
+                    )
+                }
+            },
+        )
+    }
+
+    /**
      * Stops active runtime instance for this project.
      */
-    @Synchronized
     fun stopPreview(): Boolean {
         clearVerifiedPreviewRouteCache()
         clearTopicMutationConfigVerification()
@@ -279,8 +350,15 @@ class PluginRuntimeIntegrationService(
      *
      * If runtime is not currently running, this method starts preview instead.
      */
-    @Synchronized
     fun restartPreview(trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION): ActivationResult {
+        val application = ApplicationManager.getApplication()
+        if (application?.isDispatchThread == true && !application.isUnitTestMode) {
+            return ActivationResult(
+                success = false,
+                reason = ActivationFailureReason.START_FAILED,
+                message = "Preview restart requested on UI thread; call restartPreviewAsync() instead.",
+            )
+        }
         val projectPath = project.basePath
             ?: return ActivationResult(
                 success = false,
@@ -317,6 +395,46 @@ class PluginRuntimeIntegrationService(
         runPreviewOperationAsync(
             operation = { restartPreview(trigger) },
             onComplete = onComplete,
+        )
+    }
+
+    /**
+     * Restarts preview with IDE background-task progress shown in the status bar.
+     */
+    fun restartPreviewWithProgress(
+        trigger: PreviewStartTrigger = PreviewStartTrigger.ACTION,
+        onComplete: (ActivationResult) -> Unit,
+    ) {
+        if (ApplicationManager.getApplication() == null) {
+            onComplete(restartPreview(trigger))
+            return
+        }
+
+        runAuthordBackgroundTask(
+            project = project,
+            title = "Restarting Authord Preview",
+            canBeCancelled = false,
+            operation = { indicator ->
+                indicator.isIndeterminate = true
+                indicator.text = "Restarting server..."
+                restartPreview(trigger)
+            },
+            onSuccess = { result ->
+                if (!project.isDisposed) {
+                    onComplete(result)
+                }
+            },
+            onError = { error ->
+                if (!project.isDisposed) {
+                    onComplete(
+                        ActivationResult(
+                            success = false,
+                            reason = ActivationFailureReason.START_FAILED,
+                            message = "Unexpected restart error: ${error.message ?: "Unknown failure"}",
+                        ),
+                    )
+                }
+            },
         )
     }
 
@@ -477,27 +595,30 @@ class PluginRuntimeIntegrationService(
      * Signals that a filesystem mutation affecting docs/nav has been committed.
      *
      * The latest parsed config nav-state is supplied by topic-tree UI flows and persisted so each
-     * mutation can decide whether a full preview restart is required.
+     * mutation can decide whether a stabilization hold is needed before livereload is nudged.
      *
      * Each invocation is treated as a mutation batch boundary and rebuilds the verified preview
      * URL cache from disk before any follow-up navigation.
      */
-    fun onTopicMutationCommitted(navPresent: Boolean = navPresentFromParsedConfigState): Boolean {
-        navPresentFromParsedConfigState = navPresent
+    fun onTopicMutationCommitted(navPresent: Boolean? = null): Boolean {
+        val effectiveNavPresent = withStateLock {
+            val resolved = navPresent ?: navPresentFromParsedConfigState
+            navPresentFromParsedConfigState = resolved
+            topicMutationConfigVerificationPending = resolved
+            resolved
+        }
         val browserService = runCatching {
             project.getService(MkDocsPreviewBrowserService::class.java)
         }.getOrNull()
-        browserService?.resetLastLoadedUrl()
-        topicMutationConfigVerificationPending = true
-
-        if (isRuntimeRunning() && navPresentFromParsedConfigState) {
-            val restarted = restartPreview(PreviewStartTrigger.ACTION)
-            rebuildVerifiedPreviewRouteCacheFromDisk()
-            return restarted.success
-        }
-
         rebuildVerifiedPreviewRouteCacheFromDisk()
+        browserService?.resetLastLoadedUrl()
         if (!isRuntimeRunning() || !usesDirtyLivereloadServeMode()) {
+            return false
+        }
+        if (!effectiveNavPresent) {
+            return false
+        }
+        if (!holdTopicMutationLivereloadNudgeWindow()) {
             return false
         }
         return nudgeDirtyLivereloadReload()
@@ -509,7 +630,7 @@ class PluginRuntimeIntegrationService(
      * Falls back to synchronous execution when no IntelliJ application is available (unit tests).
      */
     fun onTopicMutationCommittedAsync(
-        navPresent: Boolean = navPresentFromParsedConfigState,
+        navPresent: Boolean? = null,
         onComplete: ((Boolean) -> Unit)? = null,
     ) {
         val application = ApplicationManager.getApplication()
@@ -567,6 +688,16 @@ class PluginRuntimeIntegrationService(
         return touchConfigFile(configPath)
     }
 
+    private fun holdTopicMutationLivereloadNudgeWindow(): Boolean {
+        return try {
+            TimeUnit.MILLISECONDS.sleep(TOPIC_MUTATION_VERIFICATION_HOLD_DELAY_MS)
+            true
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            false
+        }
+    }
+
     /**
      * Replaces active feature-flag policy for this project integration service.
      */
@@ -586,7 +717,14 @@ class PluginRuntimeIntegrationService(
      */
     override fun dispose() {
         previewRuntimeService.stopServer()
-        lastConfigFingerprint = null
+        previewOperationExecutor.shutdownNow()
+        fallbackRetryScheduler.shutdownNow()
+        project.basePath?.takeIf { it.isNotBlank() }?.let { projectPath ->
+            dependencies.activationService.disposeProjectResources(projectPath)
+        }
+        withStateLock {
+            lastConfigFingerprint = null
+        }
         clearVerifiedPreviewRouteCache()
         clearTopicMutationConfigVerification()
     }
@@ -601,16 +739,22 @@ class PluginRuntimeIntegrationService(
             return
         }
 
-        application.executeOnPooledThread {
-            val result = operation()
-            application.invokeLater(
-                {
-                    if (!project.isDisposed) {
-                        onComplete(result)
-                    }
-                },
-                ModalityState.any(),
-            )
+        try {
+            previewOperationExecutor.execute {
+                val result = operation()
+                application.invokeLater(
+                    {
+                        if (!project.isDisposed) {
+                            onComplete(result)
+                        }
+                    },
+                    ModalityState.any(),
+                )
+            }
+        } catch (_: RejectedExecutionException) {
+            if (!project.isDisposed) {
+                onComplete(operation())
+            }
         }
     }
 
@@ -741,7 +885,7 @@ class PluginRuntimeIntegrationService(
                             source = source,
                             loadUrl = loadUrl,
                             forceReload = forceReload,
-                            remainingRetries = remainingRetries,
+                            remainingRetries = (remainingRetries - 1).coerceAtLeast(0),
                             retryDelayMillis = retryDelayMillis,
                             shouldRetry = shouldRetry,
                             onRouteUnavailable = onRouteUnavailable,
@@ -762,7 +906,8 @@ class PluginRuntimeIntegrationService(
             return
         }
         rebuildVerifiedPreviewRouteCacheFromDisk()
-        if (isRuntimeRunning() && usesDirtyLivereloadServeMode()) {
+        val navPresent = withStateLock { navPresentFromParsedConfigState }
+        if (navPresent && isRuntimeRunning() && usesDirtyLivereloadServeMode()) {
             nudgeDirtyLivereloadReload()
         }
     }
@@ -778,98 +923,63 @@ class PluginRuntimeIntegrationService(
         onRouteUnavailable: ((String) -> Unit)?,
         onStateChanged: ((PreviewRouteFlowState, String) -> Unit)?,
     ): Boolean {
-        if (source == PreviewRouteIntentSource.TOPIC_MUTATION) {
-            val app = ApplicationManager.getApplication()
-            if (app == null) {
-                return dispatchPreviewForSelectedFileWithRetryAttempt(
-                    selectedPath = selectedPath,
-                    source = source,
-                    loadUrl = loadUrl,
-                    forceReload = forceReload,
-                    remainingRetries = remainingRetries,
-                    retryDelayMillis = 0L,
-                    shouldRetry = shouldRetry,
-                    onRouteUnavailable = onRouteUnavailable,
-                    onStateChanged = onStateChanged,
-                )
-            }
-            app.invokeLater(
-                {
-                    if (project.isDisposed) {
-                        return@invokeLater
-                    }
-                    dispatchPreviewForSelectedFileWithRetryAttempt(
-                        selectedPath = selectedPath,
-                        source = source,
-                        loadUrl = loadUrl,
-                        forceReload = forceReload,
-                        remainingRetries = remainingRetries,
-                        retryDelayMillis = 0L,
-                        shouldRetry = shouldRetry,
-                        onRouteUnavailable = onRouteUnavailable,
-                        onStateChanged = onStateChanged,
-                    )
-                },
-                ModalityState.any(),
-            )
-            return true
+        val delayMillis = if (source == PreviewRouteIntentSource.TOPIC_MUTATION) {
+            0L
+        } else {
+            retryDelayMillis.coerceAtLeast(0L)
         }
-
-        val delayMillis = retryDelayMillis.coerceAtLeast(0L)
         val app = ApplicationManager.getApplication()
-        if (app == null) {
-            if (!sleepPreviewDispatchRetry(delayMillis)) {
-                return false
-            }
-            return dispatchPreviewForSelectedFileWithRetryAttempt(
-                selectedPath = selectedPath,
-                source = source,
-                loadUrl = loadUrl,
-                forceReload = forceReload,
-                remainingRetries = remainingRetries,
-                retryDelayMillis = delayMillis,
-                shouldRetry = shouldRetry,
-                onRouteUnavailable = onRouteUnavailable,
-                onStateChanged = onStateChanged,
-            )
-        }
-
-        app.executeOnPooledThread {
-            if (!sleepPreviewDispatchRetry(delayMillis)) {
-                return@executeOnPooledThread
-            }
-            app.invokeLater(
+        if (app != null) {
+            AppExecutorUtil.getAppScheduledExecutorService().schedule(
                 {
-                    if (project.isDisposed) {
-                        return@invokeLater
-                    }
-                    dispatchPreviewForSelectedFileWithRetryAttempt(
-                        selectedPath = selectedPath,
-                        source = source,
-                        loadUrl = loadUrl,
-                        forceReload = forceReload,
-                        remainingRetries = remainingRetries,
-                        retryDelayMillis = delayMillis,
-                        shouldRetry = shouldRetry,
-                        onRouteUnavailable = onRouteUnavailable,
-                        onStateChanged = onStateChanged,
+                    app.invokeLater(
+                        {
+                            if (project.isDisposed || !shouldRetry()) {
+                                return@invokeLater
+                            }
+                            dispatchPreviewForSelectedFileWithRetryAttempt(
+                                selectedPath = selectedPath,
+                                source = source,
+                                loadUrl = loadUrl,
+                                forceReload = forceReload,
+                                remainingRetries = remainingRetries,
+                                retryDelayMillis = delayMillis,
+                                shouldRetry = shouldRetry,
+                                onRouteUnavailable = onRouteUnavailable,
+                                onStateChanged = onStateChanged,
+                            )
+                        },
+                        ModalityState.any(),
                     )
                 },
-                ModalityState.any(),
+                delayMillis,
+                TimeUnit.MILLISECONDS,
             )
-        }
-        return true
-    }
-
-    private fun sleepPreviewDispatchRetry(delayMillis: Long): Boolean {
-        if (delayMillis <= 0L) {
             return true
         }
+
         return try {
-            Thread.sleep(delayMillis)
+            fallbackRetryScheduler.schedule(
+                {
+                    if (!project.isDisposed && shouldRetry()) {
+                        dispatchPreviewForSelectedFileWithRetryAttempt(
+                            selectedPath = selectedPath,
+                            source = source,
+                            loadUrl = loadUrl,
+                            forceReload = forceReload,
+                            remainingRetries = remainingRetries,
+                            retryDelayMillis = delayMillis,
+                            shouldRetry = shouldRetry,
+                            onRouteUnavailable = onRouteUnavailable,
+                            onStateChanged = onStateChanged,
+                        )
+                    }
+                },
+                delayMillis,
+                TimeUnit.MILLISECONDS,
+            )
             true
-        } catch (_: InterruptedException) {
-            Thread.currentThread().interrupt()
+        } catch (_: RejectedExecutionException) {
             false
         }
     }
@@ -892,24 +1002,30 @@ class PluginRuntimeIntegrationService(
             return false
         }
         val fingerprint = createConfigFingerprint(configPath) ?: return false
-        if (topicMutationConfigVerificationPending) {
-            if (lastVerifiedTopicMutationConfigFingerprint != null && lastVerifiedTopicMutationConfigFingerprint == fingerprint) {
-                return false
+        return withStateLock {
+            if (topicMutationConfigVerificationPending) {
+                if (lastVerifiedTopicMutationConfigFingerprint != null &&
+                    lastVerifiedTopicMutationConfigFingerprint == fingerprint
+                ) {
+                    return@withStateLock false
+                }
+                lastVerifiedTopicMutationConfigFingerprint = fingerprint
+                topicMutationConfigVerificationPending = false
+                return@withStateLock true
             }
-            lastVerifiedTopicMutationConfigFingerprint = fingerprint
-            topicMutationConfigVerificationPending = false
+            if (lastVerifiedTopicMutationConfigFingerprint != fingerprint) {
+                lastVerifiedTopicMutationConfigFingerprint = fingerprint
+            }
             return true
         }
-        if (lastVerifiedTopicMutationConfigFingerprint != fingerprint) {
-            lastVerifiedTopicMutationConfigFingerprint = fingerprint
-        }
-        return true
     }
 
     private fun clearTopicMutationConfigVerification() {
-        topicMutationConfigVerificationPending = false
-        lastVerifiedTopicMutationConfigFingerprint = null
-        navPresentFromParsedConfigState = false
+        withStateLock {
+            topicMutationConfigVerificationPending = false
+            lastVerifiedTopicMutationConfigFingerprint = null
+            navPresentFromParsedConfigState = false
+        }
     }
 
     private fun resolvePreviewRouteEntry(
@@ -946,13 +1062,17 @@ class PluginRuntimeIntegrationService(
         val scope = resolveActiveRuntimeScope()
         val docsDirPath = scope.docsDirPath
         if (docsDirPath == null || !runCatching { Files.isDirectory(docsDirPath) }.getOrDefault(false)) {
-            verifiedPreviewRouteCache = emptyMap()
+            withStateLock {
+                if (verifiedPreviewRouteCacheState.baseUrl == baseUrl) {
+                    verifiedPreviewRouteCacheState = verifiedPreviewRouteCacheState.copy(entries = emptyMap())
+                }
+            }
             return
         }
 
         val rebuilt = runCatching {
             val entries = linkedMapOf<String, VerifiedPreviewRouteEntry>()
-            Files.walk(docsDirPath).use { paths ->
+            Files.walk(docsDirPath, MAX_DOCS_ROUTE_SCAN_DEPTH).use { paths ->
                 paths.forEach { candidate ->
                     if (!runCatching { Files.isRegularFile(candidate) }.getOrDefault(false)) {
                         return@forEach
@@ -975,24 +1095,40 @@ class PluginRuntimeIntegrationService(
         }.getOrElse {
             emptyMap()
         }
-        verifiedPreviewRouteCache = rebuilt
+        withStateLock {
+            if (verifiedPreviewRouteCacheState.baseUrl == baseUrl) {
+                verifiedPreviewRouteCacheState = VerifiedPreviewRouteCacheState(
+                    baseUrl = baseUrl,
+                    entries = rebuilt,
+                )
+            }
+        }
     }
 
     private fun lookupVerifiedPreviewRouteEntry(selectedPath: String): VerifiedPreviewRouteEntry? {
         ensureVerifiedPreviewRouteCacheBaseUrl() ?: return null
         val key = previewRouteCacheKey(selectedPath) ?: return null
-        return verifiedPreviewRouteCache[key]
+        return withStateLock { verifiedPreviewRouteCacheState.entries[key] }
     }
 
     private fun cacheVerifiedPreviewRouteEntry(
         selectedPath: String,
         entry: VerifiedPreviewRouteEntry,
     ) {
-        ensureVerifiedPreviewRouteCacheBaseUrl() ?: return
+        val baseUrl = ensureVerifiedPreviewRouteCacheBaseUrl() ?: return
         val key = previewRouteCacheKey(selectedPath) ?: return
-        val updated = LinkedHashMap(verifiedPreviewRouteCache)
-        updated[key] = entry
-        verifiedPreviewRouteCache = updated
+        withStateLock {
+            val state = verifiedPreviewRouteCacheState
+            if (state.baseUrl != baseUrl) {
+                return@withStateLock
+            }
+            val updated = LinkedHashMap(state.entries)
+            updated[key] = entry
+            verifiedPreviewRouteCacheState = VerifiedPreviewRouteCacheState(
+                baseUrl = baseUrl,
+                entries = updated,
+            )
+        }
     }
 
     private fun ensureVerifiedPreviewRouteCacheBaseUrl(): String? {
@@ -1001,9 +1137,13 @@ class PluginRuntimeIntegrationService(
             clearVerifiedPreviewRouteCache()
             return null
         }
-        if (verifiedPreviewRouteCacheBaseUrl != baseUrl) {
-            verifiedPreviewRouteCache = emptyMap()
-            verifiedPreviewRouteCacheBaseUrl = baseUrl
+        withStateLock {
+            if (verifiedPreviewRouteCacheState.baseUrl != baseUrl) {
+                verifiedPreviewRouteCacheState = VerifiedPreviewRouteCacheState(
+                    baseUrl = baseUrl,
+                    entries = emptyMap(),
+                )
+            }
         }
         return baseUrl
     }
@@ -1016,8 +1156,9 @@ class PluginRuntimeIntegrationService(
     }
 
     private fun clearVerifiedPreviewRouteCache() {
-        verifiedPreviewRouteCache = emptyMap()
-        verifiedPreviewRouteCacheBaseUrl = null
+        withStateLock {
+            verifiedPreviewRouteCacheState = VerifiedPreviewRouteCacheState()
+        }
     }
 
     private fun composePreviewTargetUrl(baseUrl: String, route: String): String {
@@ -1042,13 +1183,23 @@ class PluginRuntimeIntegrationService(
         }
     }
 
-    private fun hasConfigChanged(projectPath: String): Boolean {
+    private fun currentFingerprintSnapshot(projectPath: String): ConfigFingerprintSnapshot {
         val current = currentConfigFingerprint(projectPath)
-        return current != lastConfigFingerprint
+        return withStateLock {
+            val known = lastConfigFingerprint
+            ConfigFingerprintSnapshot(
+                hasKnownFingerprint = known != null,
+                hasChanged = current != known,
+                currentFingerprint = current,
+            )
+        }
     }
 
     private fun syncConfigFingerprint(projectPath: String) {
-        lastConfigFingerprint = currentConfigFingerprint(projectPath)
+        val snapshot = currentFingerprintSnapshot(projectPath)
+        withStateLock {
+            lastConfigFingerprint = snapshot.currentFingerprint
+        }
     }
 
     private fun currentConfigFingerprint(projectPath: String): String? {
@@ -1058,8 +1209,12 @@ class PluginRuntimeIntegrationService(
 
     private fun createConfigFingerprint(configPath: Path): String? {
         val normalizedPath = configPath.toAbsolutePath().normalize()
-        val content = runCatching { Files.readString(normalizedPath) }.getOrNull() ?: return null
-        return "${normalizedPath}::${content.hashCode()}"
+        val content = runCatching { Files.readAllBytes(normalizedPath) }.getOrNull() ?: return null
+        val digest = MessageDigest.getInstance("SHA-256")
+        digest.update(normalizedPath.toString().toByteArray(StandardCharsets.UTF_8))
+        digest.update(0)
+        digest.update(content)
+        return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
     }
 
     private fun resolveConfigPath(projectPath: String): Path? {
@@ -1207,6 +1362,7 @@ class InMemoryCommandRunner : CommandRunner {
 private class InMemoryManagedProcessHandle(
     override val id: String,
 ) : ManagedProcessHandle {
+    @Volatile
     private var alive: Boolean = true
 
     /**

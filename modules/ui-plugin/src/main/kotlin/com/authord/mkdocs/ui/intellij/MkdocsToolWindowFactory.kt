@@ -483,9 +483,9 @@ class MkdocsToolWindowFactory(
         if (runtimeService.isRuntimeRunning()) {
             return
         }
-        runtimeService.startPreviewAsync(trigger) { initialResult ->
+        runtimeService.startPreviewWithProgress(trigger) { initialResult ->
             if (project.isDisposed) {
-                return@startPreviewAsync
+                return@startPreviewWithProgress
             }
             resultPresenter(project, formatPreviewResultMessage(initialResult), initialResult.success)
             if (initialResult.success) {
@@ -886,9 +886,9 @@ class MkdocsToolWindowFactory(
             return
         }
 
-        runtimeService.startPreviewAsync(trigger) { initialResult ->
+        runtimeService.startPreviewWithProgress(trigger) { initialResult ->
             if (project.isDisposed) {
-                return@startPreviewAsync
+                return@startPreviewWithProgress
             }
             val initialMessage = formatPreviewResultMessage(initialResult)
             if (initialResult.success) {
@@ -910,9 +910,9 @@ class MkdocsToolWindowFactory(
         runCatching {
             FileDocumentManager.getInstance().saveAllDocuments()
         }
-        runtimeService.restartPreviewAsync(PreviewStartTrigger.TOOL_WINDOW) { result ->
+        runtimeService.restartPreviewWithProgress(PreviewStartTrigger.TOOL_WINDOW) { result ->
             if (project.isDisposed) {
-                return@restartPreviewAsync
+                return@restartPreviewWithProgress
             }
             applyRestartResult(project, runtimeService, previewContent, result)
         }
@@ -2109,6 +2109,7 @@ private class DeferredPreviewContent(
 
 private class JcefPreviewContent(
     private val setupPageRenderer: SetupPageRenderer = SetupPageRenderer(),
+    private val onMainFrameLoadEnd: (() -> Unit)? = null,
 ) : PreviewContent {
     private val browser = JBCefBrowser()
     private val metricsQuery = JBCefJSQuery.create(browser)
@@ -2188,6 +2189,7 @@ private class JcefPreviewContent(
                     if (frame?.isMain == false) {
                         return
                     }
+                    onMainFrameLoadEnd?.invoke()
                     injectScrollPersistenceScript(browser)
                     injectDomMutationObservers(browser)
                     injectManualScrollObserver(browser)
@@ -2226,28 +2228,56 @@ private class JcefPreviewContent(
 
     /**
      * Injects JavaScript to preserve scroll position across LiveReload cycles.
-     * Saves scrollY to sessionStorage before unload and restores it after load.
+     * Saves both scrollY and the nearest visible heading anchor before unload.
      */
     private fun injectScrollPersistenceScript(cefBrowser: CefBrowser?) {
         cefBrowser ?: return
         val script = """
             (function() {
-                var KEY = '__authord_scrollY';
-                var saved = sessionStorage.getItem(KEY);
-                if (saved !== null) {
-                    var y = parseFloat(saved);
-                    if (!isNaN(y) && y > 0) {
+                var SCROLL_KEY = '__authord_scrollY';
+                var ANCHOR_KEY = '__authord_scrollAnchor';
+
+                var savedAnchor = sessionStorage.getItem(ANCHOR_KEY);
+                var savedY = parseFloat(sessionStorage.getItem(SCROLL_KEY) || '0');
+                if (savedAnchor) {
+                    var anchorElement = document.getElementById(savedAnchor);
+                    if (anchorElement) {
                         setTimeout(function() {
-                            window.scrollTo(0, y);
-                        }, 50);
+                            anchorElement.scrollIntoView({ behavior: 'instant' });
+                        }, 80);
+                    } else if (!isNaN(savedY) && savedY > 0) {
+                        setTimeout(function() {
+                            window.scrollTo(0, savedY);
+                        }, 80);
                     }
+                } else if (!isNaN(savedY) && savedY > 0) {
+                    setTimeout(function() {
+                        window.scrollTo(0, savedY);
+                    }, 80);
                 }
-                window.addEventListener('scroll', function() {
-                    sessionStorage.setItem(KEY, String(window.scrollY));
-                });
-                window.addEventListener('beforeunload', function() {
-                    sessionStorage.setItem(KEY, String(window.scrollY));
-                });
+
+                var saveState = function() {
+                    if (window.__authordIsSyncing) {
+                        return;
+                    }
+                    sessionStorage.setItem(SCROLL_KEY, String(window.scrollY));
+                    var headings = document.querySelectorAll('h1[id],h2[id],h3[id],h4[id],h5[id],h6[id]');
+                    var bestId = '';
+                    for (var i = 0; i < headings.length; i++) {
+                        var rect = headings[i].getBoundingClientRect();
+                        if (rect.top >= 0 && rect.top < window.innerHeight * 0.5) {
+                            bestId = headings[i].id;
+                            break;
+                        }
+                        if (rect.top < 0) {
+                            bestId = headings[i].id;
+                        }
+                    }
+                    sessionStorage.setItem(ANCHOR_KEY, bestId);
+                };
+
+                window.addEventListener('scroll', saveState, { passive: true });
+                window.addEventListener('beforeunload', saveState);
             })();
         """.trimIndent()
         cefBrowser.executeJavaScript(script, cefBrowser.url ?: "", 0)
@@ -2841,13 +2871,19 @@ private class HtmlPreviewContent : PreviewContent {
     }
 }
 
-internal fun createDefaultPreviewContent(): PreviewContent {
+internal fun createDefaultPreviewContent(
+    onMainFrameLoadEnd: (() -> Unit)?,
+): PreviewContent {
     val jcefSupported = JBCefApp.isSupported()
     return DeferredPreviewContent(syncCapable = jcefSupported) {
         if (jcefSupported) {
-            JcefPreviewContent()
+            JcefPreviewContent(onMainFrameLoadEnd = onMainFrameLoadEnd)
         } else {
             HtmlPreviewContent()
         }
     }
+}
+
+internal fun createDefaultPreviewContent(): PreviewContent {
+    return createDefaultPreviewContent(onMainFrameLoadEnd = null)
 }

@@ -498,6 +498,21 @@ class TopicTreeWorkspacePanelUiContractTest {
         assertEquals("child/grand-child.md", resolved)
     }
 
+    @Test
+    fun `toActualChildOrderIndex inserts before first visible child when hidden representative trails list`() {
+        val panel = panelWithDefaults()
+        panel.render(sampleSectionWithTrailingHiddenIndexState())
+        val method = TopicTreeWorkspacePanel::class.java.getDeclaredMethod(
+            "toActualChildOrderIndex",
+            String::class.java,
+            Int::class.javaPrimitiveType,
+        ).apply { isAccessible = true }
+
+        val actual = method.invoke(panel, "section:guides", 0) as Int
+
+        assertEquals(0, actual)
+    }
+
     private fun sampleFallbackSectionState(): StartupTreeState {
         return StartupTreeState(
             source = StartupTreeSource.FALLBACK,
@@ -564,6 +579,40 @@ class TopicTreeWorkspacePanelUiContractTest {
                 "child/grand-child.md",
                 "child/grand-child/great-grand-child.md",
             ),
+            unlinkedPaths = emptyList(),
+            validationIssues = emptyList(),
+            destructiveChangesApplied = false,
+            instanceId = "default",
+        )
+    }
+
+    private fun sampleSectionWithTrailingHiddenIndexState(): StartupTreeState {
+        return StartupTreeState(
+            source = StartupTreeSource.NAV,
+            nodes = listOf(
+                com.authord.mkdocs.ports.topic.TopicNavNode(
+                    nodeId = "section:guides",
+                    title = "Guides",
+                    children = listOf(
+                        com.authord.mkdocs.ports.topic.TopicNavNode(
+                            nodeId = "page:guides/a.md",
+                            title = "A",
+                            path = "guides/a.md",
+                        ),
+                        com.authord.mkdocs.ports.topic.TopicNavNode(
+                            nodeId = "page:guides/b.md",
+                            title = "B",
+                            path = "guides/b.md",
+                        ),
+                        com.authord.mkdocs.ports.topic.TopicNavNode(
+                            nodeId = "page:guides/index.md",
+                            title = "Guides",
+                            path = "guides/index.md",
+                        ),
+                    ),
+                ),
+            ),
+            navOrderedPaths = listOf("guides/a.md", "guides/b.md", "guides/index.md"),
             unlinkedPaths = emptyList(),
             validationIssues = emptyList(),
             destructiveChangesApplied = false,

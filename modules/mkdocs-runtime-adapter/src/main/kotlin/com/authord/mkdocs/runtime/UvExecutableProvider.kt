@@ -108,11 +108,13 @@ class DefaultUvArchiveExtractor : UvArchiveExtractor {
 
     private fun extractZip(archivePath: Path, executablePath: Path): UvExecutableResult {
         val executableName = executablePath.fileName.toString()
+        val extractionRoot = executablePath.parent.toAbsolutePath().normalize()
         val found = runCatching {
             ZipInputStream(Files.newInputStream(archivePath)).use { input ->
                 while (true) {
                     val entry = input.nextEntry ?: break
                     if (!entry.isDirectory && matchesExecutableEntry(entry.name, executableName)) {
+                        ensureSafeArchiveEntry(entry.name, extractionRoot)
                         Files.copy(input, executablePath, StandardCopyOption.REPLACE_EXISTING)
                         return@use true
                     }
@@ -138,6 +140,7 @@ class DefaultUvArchiveExtractor : UvArchiveExtractor {
 
     private fun extractTarGz(archivePath: Path, executablePath: Path): UvExecutableResult {
         val executableName = executablePath.fileName.toString()
+        val extractionRoot = executablePath.parent.toAbsolutePath().normalize()
         val found = runCatching {
             Files.newInputStream(archivePath).use { fileInput ->
                 GzipCompressorInputStream(fileInput).use { gzipInput ->
@@ -145,6 +148,7 @@ class DefaultUvArchiveExtractor : UvArchiveExtractor {
                         while (true) {
                             val entry = tarInput.nextTarEntry ?: break
                             if (!entry.isDirectory && matchesExecutableEntry(entry.name, executableName)) {
+                                ensureSafeArchiveEntry(entry.name, extractionRoot)
                                 Files.copy(tarInput, executablePath, StandardCopyOption.REPLACE_EXISTING)
                                 return@use true
                             }
@@ -173,6 +177,18 @@ class DefaultUvArchiveExtractor : UvArchiveExtractor {
     private fun matchesExecutableEntry(entryName: String, executableName: String): Boolean {
         val normalized = entryName.replace('\\', '/')
         return normalized == executableName || normalized.endsWith("/$executableName")
+    }
+
+    private fun ensureSafeArchiveEntry(entryName: String, extractionRoot: Path) {
+        val archivePath = runCatching { Path.of(entryName.replace('\\', '/')) }
+            .getOrElse { throw SecurityException("Invalid archive entry path: $entryName") }
+        if (archivePath.isAbsolute) {
+            throw SecurityException("Archive entry must be relative: $entryName")
+        }
+        val resolved = extractionRoot.resolve(archivePath).normalize()
+        if (!resolved.startsWith(extractionRoot)) {
+            throw SecurityException("Archive entry escaped extraction root: $entryName")
+        }
     }
 }
 

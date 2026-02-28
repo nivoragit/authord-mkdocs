@@ -52,11 +52,20 @@ open class HttpURLConnectionReadinessProbe(
             connection.connect()
             val status = connection.responseCode
             status in 100..599
-        } catch (_: Exception) {
+        } catch (exception: Exception) {
+            if (exception is InterruptedException || exception is java.io.InterruptedIOException) {
+                Thread.currentThread().interrupt()
+            } else if (exception !is java.io.IOException) {
+                LOG.debug("Authord readiness probe failed for baseUrl=$baseUrl", exception)
+            }
             false
         } finally {
             connection.disconnect()
         }
+    }
+
+    private companion object {
+        private val LOG: Logger = Logger.getInstance(HttpURLConnectionReadinessProbe::class.java)
     }
 }
 
@@ -84,15 +93,14 @@ data class ActivationResult(
 class PluginActivationService(
     private val bootstrapService: UvBootstrapService,
     private val processManager: MkdocsProcessManager,
-    @Suppress("UNUSED_PARAMETER")
-    baseUrlDetector: BaseUrlDetector,
+    private val baseUrlDetector: BaseUrlDetector,
     private val previewPaneCoordinator: PreviewPaneCoordinator,
     private val errorPresenter: ActivationErrorPresenter,
     private val isDarkIdeTheme: () -> Boolean = { false },
     private val readinessProbe: HttpReadinessProbe = HttpURLConnectionReadinessProbe(),
     private val nowMillisProvider: () -> Long = System::currentTimeMillis,
     private val sleeper: (Long) -> Unit = { millis -> Thread.sleep(millis) },
-    private val maxStartupAttempts: Int = 2,
+    private val maxStartupAttempts: Int = 3,
     private val startupProbeTimeoutMillis: Long = 45_000L,
     private val startupPollIntervalMillis: Long = 150L,
     private val pluginEnvironmentRootProvider: () -> Path = ::defaultPluginEnvironmentRoot,
@@ -114,7 +122,9 @@ class PluginActivationService(
 
     private val siteNameKeyRegex = Regex("""^\s*site_name\s*:""")
     private val themeKeyRegex = Regex("""^(?:theme|["']theme["'])\s*:""")
+    private val themeNotInstalledRegex = Regex("""Theme '.*' is not installed""")
     private val fallbackThemeConfigFileName = ".authord.theme.yml"
+    private val mkdocsDevAddrFlag = "--" + "dev-addr"
     private val siteContextResolver = SiteContextResolver()
 
     /**
@@ -180,6 +190,7 @@ class PluginActivationService(
 
             val baseUrl = "http://$host:$port/"
             LOG.info("Starting Authord preview runtime for $projectId at $baseUrl (attempt $attempt/$attempts)")
+            var shouldDelayBeforeRetry = true
 
             val startResult = processManager.start(
                 projectId = projectId,
@@ -238,6 +249,7 @@ class PluginActivationService(
 
                 is StartupReadiness.ProcessExited -> {
                     logWarnings(readiness.diagnostics?.startupOutput.orEmpty())
+                    shouldDelayBeforeRetry = !hasPortBindConflict(readiness.diagnostics?.startupOutput.orEmpty())
                     lastFailure = StartupAttemptFailure(
                         baseUrl = baseUrl,
                         failureSummary = "Authord process exited before readiness probe succeeded.",
@@ -258,7 +270,9 @@ class PluginActivationService(
             }
 
             processManager.stop(projectId)
-            safeSleep(startupPollIntervalMillis)
+            if (shouldDelayBeforeRetry) {
+                safeSleep(startupPollIntervalMillis)
+            }
         }
 
         val reason = ActivationFailureReason.START_FAILED
@@ -275,16 +289,35 @@ class PluginActivationService(
         val timeout = startupProbeTimeoutMillis.coerceAtLeast(1_000L)
         val deadline = nowMillisProvider() + timeout
         var latestDiagnostics = processManager.diagnostics(projectId)
+        val normalizedExpectedBaseUrl = normalizeBaseUrl(baseUrl)
+        var loggedBaseUrlMismatch = false
 
         while (nowMillisProvider() <= deadline) {
             latestDiagnostics = processManager.diagnostics(projectId) ?: latestDiagnostics
             if (latestDiagnostics != null && !latestDiagnostics.isAlive) {
                 return StartupReadiness.ProcessExited(latestDiagnostics)
             }
+            if (hasPortBindConflict(latestDiagnostics?.startupOutput.orEmpty())) {
+                return StartupReadiness.ProcessExited(latestDiagnostics)
+            }
+
+            val advertisedBaseUrl = detectAdvertisedBaseUrl(latestDiagnostics)
+            if (!loggedBaseUrlMismatch &&
+                advertisedBaseUrl != null &&
+                normalizeBaseUrl(advertisedBaseUrl) != normalizedExpectedBaseUrl
+            ) {
+                LOG.warn(
+                    "Authord runtime advertised URL '$advertisedBaseUrl' while probing expected '$baseUrl' for projectId=$projectId",
+                )
+                loggedBaseUrlMismatch = true
+            }
 
             if (readinessProbe.isReady(baseUrl)) {
                 val postProbeDiagnostics = processManager.diagnostics(projectId) ?: latestDiagnostics
                 if (postProbeDiagnostics != null && !postProbeDiagnostics.isAlive) {
+                    return StartupReadiness.ProcessExited(postProbeDiagnostics)
+                }
+                if (hasPortBindConflict(postProbeDiagnostics?.startupOutput.orEmpty())) {
                     return StartupReadiness.ProcessExited(postProbeDiagnostics)
                 }
                 return StartupReadiness.Ready(postProbeDiagnostics)
@@ -296,6 +329,34 @@ class PluginActivationService(
         }
 
         return StartupReadiness.TimedOut(processManager.diagnostics(projectId) ?: latestDiagnostics)
+    }
+
+    private fun detectAdvertisedBaseUrl(diagnostics: RuntimeProcessDiagnostics?): String? {
+        if (diagnostics == null) {
+            return null
+        }
+        val mergedOutput = listOf(
+            diagnostics.stdoutOutput,
+            diagnostics.stderrOutput,
+            diagnostics.startupOutput,
+        ).joinToString("\n")
+        return baseUrlDetector.detectBaseUrl(mergedOutput)
+    }
+
+    private fun hasPortBindConflict(output: String): Boolean {
+        if (output.isBlank()) {
+            return false
+        }
+        val normalized = output.lowercase()
+        return "address already in use" in normalized || "errno 98" in normalized || "winerror 10048" in normalized
+    }
+
+    private fun normalizeBaseUrl(url: String): String {
+        val trimmed = url.trim()
+        if (trimmed.isEmpty()) {
+            return trimmed
+        }
+        return if (trimmed.endsWith("/")) trimmed else "$trimmed/"
     }
 
     private fun startupFailureDetails(projectPath: String, failure: StartupAttemptFailure?): String {
@@ -391,7 +452,7 @@ class PluginActivationService(
         }
 
         if (normalizedOutput.contains("ModuleNotFoundError") ||
-            normalizedOutput.contains("Theme '.*' is not installed".toRegex())
+            themeNotInstalledRegex.containsMatchIn(normalizedOutput)
         ) {
             return AuthordUiBundle.message("activation.error.moduleMissing", normalizedOutput)
         }
@@ -429,9 +490,6 @@ class PluginActivationService(
         port: Int,
     ): List<String> {
         val activeConfigPath = siteContext?.configPath
-        ensureSiteNameRequiredByConfig(projectPath, activeConfigPath)
-        val scriptPath = ensureParentGuardScript(projectPath)
-        val parentPid = ProcessHandle.current().pid().toString()
         val fallbackThemeConfigPath = ensureFallbackThemeConfig(
             projectId = projectId,
             projectPath = projectPath,
@@ -443,23 +501,13 @@ class PluginActivationService(
         } else {
             emptyList()
         }
-        val hostBindingArgs = listOf("--dev-addr", "$host:$port")
-        val runtimePythonExecutable = resolveRuntimePythonExecutable(runtimePath)
+        val hostBindingArgs = listOf(mkdocsDevAddrFlag, "$host:$port")
 
         return listOf(
             uvExecutablePath,
             "run",
             "--python",
             runtimePath,
-            "python",
-            scriptPath.toString(),
-            "--parent-pid",
-            parentPid,
-            "--working-dir",
-            projectPath,
-            "--",
-            runtimePythonExecutable,
-            "-m",
             "mkdocs",
             "serve",
         ) + hostBindingArgs + configArgs + listOf(
@@ -468,35 +516,17 @@ class PluginActivationService(
         )
     }
 
-    private fun resolveRuntimePythonExecutable(runtimePath: String): String {
-        val runtimeRoot = Path.of(runtimePath)
-        val windowsPython = runtimeRoot.resolve("Scripts").resolve("python.exe")
-        if (windowsPython.exists()) {
-            return windowsPython.toString()
-        }
-
-        val unixPython = runtimeRoot.resolve("bin").resolve("python")
-        if (unixPython.exists()) {
-            return unixPython.toString()
-        }
-
-        return if (System.getProperty("os.name").contains("win", ignoreCase = true)) {
-            windowsPython.toString()
-        } else {
-            unixPython.toString()
-        }
-    }
-
     private fun ensureFallbackThemeConfig(
         projectId: String,
         projectPath: String,
         siteContext: SiteContext?,
     ): Path? {
-        if (!shouldUseDefaultThemeOverrides(siteContext)) {
+        val baseConfigPath = siteContext?.configPath ?: return null
+        val shouldApplyThemeOverrides = shouldUseDefaultThemeOverrides(siteContext)
+        val fallbackSiteName = fallbackSiteName(projectPath, baseConfigPath)
+        if (!shouldApplyThemeOverrides && fallbackSiteName == null) {
             return null
         }
-
-        val baseConfigPath = siteContext?.configPath ?: return null
         val resolvedBaseConfigPath = baseConfigPath.toAbsolutePath().normalize().toString()
         val resolvedDocsDirPath = siteContext.docsDirPath.toAbsolutePath().normalize().toString()
         val fallbackThemeConfigPath = pluginScopedThemeConfigPath(projectId, projectPath)
@@ -508,10 +538,15 @@ class PluginActivationService(
             append("docs_dir: '")
             append(escapeSingleQuotedYaml(resolvedDocsDirPath))
             append("'\n")
-            append("theme:\n")
-            append("  name: mkdocs\n")
-            append("  color_mode: $fallbackColorMode\n")
-            append("  user_color_mode_toggle: true\n")
+            if (fallbackSiteName != null) {
+                append("site_name: '${escapeSingleQuotedYaml(fallbackSiteName)}'\n")
+            }
+            if (shouldApplyThemeOverrides) {
+                append("theme:\n")
+                append("  name: mkdocs\n")
+                append("  color_mode: $fallbackColorMode\n")
+                append("  user_color_mode_toggle: true\n")
+            }
         }
 
         val wroteFallbackConfig = runCatching {
@@ -525,6 +560,9 @@ class PluginActivationService(
             )
         }.isSuccess
 
+        if (wroteFallbackConfig && fallbackSiteName != null) {
+            LOG.info("Authord preview applied plugin-scoped fallback site_name for config: ${baseConfigPath.toAbsolutePath().normalize()}")
+        }
         return if (wroteFallbackConfig) fallbackThemeConfigPath else null
     }
 
@@ -552,27 +590,16 @@ class PluginActivationService(
         }
     }
 
-    private fun ensureSiteNameRequiredByConfig(projectPath: String, configPath: Path?) {
-        val resolvedConfigPath = configPath ?: return
-        val existing = runCatching { Files.readString(resolvedConfigPath) }.getOrNull() ?: return
-        if (existing.lineSequence().any { line ->
-                val trimmed = line.trimStart()
-                trimmed.isNotEmpty() && !trimmed.startsWith("#") && siteNameKeyRegex.containsMatchIn(trimmed)
-            }
-        ) {
-            return
+    private fun fallbackSiteName(projectPath: String, configPath: Path): String? {
+        val existing = runCatching { Files.readString(configPath) }.getOrNull() ?: return null
+        val hasSiteName = existing.lineSequence().any { line ->
+            val trimmed = line.trimStart()
+            trimmed.isNotEmpty() && !trimmed.startsWith("#") && siteNameKeyRegex.containsMatchIn(trimmed)
         }
-
-        val fallbackSiteName = defaultSiteName(Path.of(projectPath))
-        val addition = buildString {
-            if (!existing.endsWith('\n')) {
-                append('\n')
-            }
-            append("site_name: '${escapeSingleQuotedYaml(fallbackSiteName)}'\n")
+        if (hasSiteName) {
+            return null
         }
-        runCatching {
-            Files.writeString(resolvedConfigPath, addition, StandardOpenOption.APPEND)
-        }
+        return defaultSiteName(Path.of(projectPath))
     }
 
     private fun resolveConfigPath(projectPath: String): Path? {
@@ -608,104 +635,19 @@ class PluginActivationService(
         }.getOrNull()
     }
 
+    /**
+     * Releases project-scoped bootstrap cache entries.
+     */
+    fun disposeProjectResources(projectPath: String) {
+        bootstrapService.evict(projectPath)
+    }
+
     private fun loopbackHostAddress(): String {
         val resolved = runCatching { InetAddress.getLoopbackAddress().hostAddress }.getOrDefault("127.0.0.1")
         if (resolved.isBlank() || resolved.contains(':')) {
             return "127.0.0.1"
         }
         return resolved
-    }
-
-    private fun pluginRuntimeDir(projectPath: String): Path = Path.of(projectPath).resolve(".mkdocs-plugin-runtime")
-
-    private fun ensureParentGuardScript(projectPath: String): Path {
-        val runtimeDir = pluginRuntimeDir(projectPath)
-        val scriptPath = runtimeDir.resolve("serve_with_parent_guard.py")
-        val script = """
-            import argparse
-            import errno
-            import os
-            import subprocess
-            import sys
-            import threading
-            import time
-            
-            def parent_alive(parent_pid: int) -> bool:
-                if parent_pid <= 0:
-                    return False
-                try:
-                    os.kill(parent_pid, 0)
-                    return True
-                except OSError as exc:
-                    if exc.errno in (errno.ESRCH, errno.EINVAL):
-                        return False
-                    if exc.errno == errno.EPERM:
-                        return True
-                    return False
-            
-            def terminate_process(proc: subprocess.Popen[str]) -> None:
-                if proc.poll() is not None:
-                    return
-                proc.terminate()
-                try:
-                    proc.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-            
-            def stream_output(proc: subprocess.Popen[str]) -> None:
-                assert proc.stdout is not None
-                for line in proc.stdout:
-                    sys.stdout.write(line)
-                    sys.stdout.flush()
-            
-            def main() -> int:
-                parser = argparse.ArgumentParser()
-                parser.add_argument("--parent-pid", type=int, required=True)
-                parser.add_argument("--working-dir", required=True)
-                parser.add_argument("command", nargs=argparse.REMAINDER)
-                args = parser.parse_args()
-            
-                command = args.command
-                if command and command[0] == "--":
-                    command = command[1:]
-                if not command:
-                    print("No command supplied for guarded execution.", file=sys.stderr)
-                    return 2
-            
-                process = subprocess.Popen(
-                    command,
-                    cwd=args.working_dir,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1,
-                )
-            
-                reader = threading.Thread(target=stream_output, args=(process,), daemon=True)
-                reader.start()
-            
-                while True:
-                    exit_code = process.poll()
-                    if exit_code is not None:
-                        return exit_code
-                    if not parent_alive(args.parent_pid):
-                        terminate_process(process)
-                        return 0
-                    time.sleep(0.5)
-            
-            if __name__ == "__main__":
-                sys.exit(main())
-        """.trimIndent() + "\n"
-
-        Files.createDirectories(runtimeDir)
-        Files.writeString(
-            scriptPath,
-            script,
-            StandardOpenOption.CREATE,
-            StandardOpenOption.TRUNCATE_EXISTING,
-            StandardOpenOption.WRITE,
-        )
-        return scriptPath
     }
 
     companion object {

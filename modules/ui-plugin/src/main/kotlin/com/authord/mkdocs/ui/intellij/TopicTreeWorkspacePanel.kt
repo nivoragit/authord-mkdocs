@@ -706,7 +706,6 @@ internal class TopicTreeWorkspacePanel(
         newOrderIndex: Int,
     ): Boolean {
         val draggedNode = findNode(draggedNodeId) ?: return false
-        val targetParent = findNode(newParentNodeId) ?: root
         val controllers = controllersOrNull() ?: return false
         val result = controllers.dragDropController.moveTopic(
             treeId = activeTreeId(),
@@ -722,7 +721,6 @@ internal class TopicTreeWorkspacePanel(
                     publishStatus(uiMessage("topicTree.status.dragDropFailedSafely"))
                     return false
                 }
-                moveNodeInTree(draggedNode, targetParent, newOrderIndex)
                 val movedView = draggedNode.userObject as? TopicTreeNodeView
                 reconcileAfterMutation(
                     preferredNodeId = draggedNodeId,
@@ -739,31 +737,6 @@ internal class TopicTreeWorkspacePanel(
                 false
             }
         }
-    }
-
-    private fun moveNodeInTree(
-        draggedNode: DefaultMutableTreeNode,
-        newParentNode: DefaultMutableTreeNode,
-        requestedIndex: Int,
-    ) {
-        val oldParent = draggedNode.parent as? DefaultMutableTreeNode
-        val oldIndex = oldParent?.getIndex(draggedNode) ?: -1
-        var index = requestedIndex.coerceIn(0, newParentNode.childCount)
-        if (oldParent === newParentNode && oldIndex in 0 until index) {
-            index -= 1
-        }
-        if (oldParent != null) {
-            model.removeNodeFromParent(draggedNode)
-        }
-
-        val parentView = newParentNode.userObject as? TopicTreeNodeView ?: TopicTreeNodeView.root()
-        val draggedView = draggedNode.userObject as? TopicTreeNodeView
-        if (draggedView != null) {
-            draggedNode.userObject = draggedView.copy(parentNodeId = parentView.nodeId)
-        }
-        model.insertNodeInto(draggedNode, newParentNode, index.coerceIn(0, newParentNode.childCount))
-        tree.selectionPath = TreePath(draggedNode.path)
-        tree.scrollPathToVisible(TreePath(draggedNode.path))
     }
 
     private fun selectedMutableNode(): DefaultMutableTreeNode? {
@@ -1400,10 +1373,18 @@ internal class TopicTreeWorkspacePanel(
         val hiddenRepresentativeChildIds = hiddenSectionRepresentativeChildren(parentStateNode)
             .map { it.nodeId }
             .toSet()
-        val hiddenRepresentativeChildrenCount = parentStateNode.children.count { child ->
-            hiddenRepresentativeChildIds.contains(child.nodeId)
+        var domainIndex = 0
+        var visibleChildCount = 0
+        for (child in parentStateNode.children) {
+            if (!hiddenRepresentativeChildIds.contains(child.nodeId)) {
+                if (visibleChildCount == uiChildIndex) {
+                    return domainIndex
+                }
+                visibleChildCount++
+            }
+            domainIndex++
         }
-        return uiChildIndex + hiddenRepresentativeChildrenCount
+        return domainIndex
     }
 
     private fun findStateNodeById(nodeId: String): TopicNavNode? {

@@ -5,10 +5,18 @@ import com.authord.mkdocs.runtime.CommandRunner
 import com.authord.mkdocs.runtime.ManagedProcessHandle
 import com.authord.mkdocs.runtime.ProcessLauncher
 import java.io.File
+import java.io.OutputStream
+import java.util.ArrayDeque
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.streams.toList
+
+private const val PROCESS_OUTPUT_BUFFER_MAX_CHARS: Int = 200_000
+private const val COMMAND_RUNNER_TIMEOUT_MILLIS: Long = 180_000L
+private const val COMMAND_RUNNER_GRACEFUL_SHUTDOWN_MILLIS: Long = 2_000L
+private const val PARENT_PIPE_GUARD_STOP_WAIT_MILLIS: Long = 500L
 
 /**
  * Registers JVM shutdown hooks for process cleanup.
@@ -87,11 +95,75 @@ class ProcessBuilderSystemProcessFactory : SystemProcessFactory {
     }
 }
 
+private data class ParentPipeGuard(
+    private val process: Process,
+    private val sentinelOutputStream: OutputStream,
+) {
+    private val stopped = AtomicBoolean(false)
+
+    fun stop() {
+        if (!stopped.compareAndSet(false, true)) {
+            return
+        }
+        runCatching { process.destroyForcibly() }
+        runCatching { sentinelOutputStream.close() }
+        runCatching { process.waitFor(PARENT_PIPE_GUARD_STOP_WAIT_MILLIS, TimeUnit.MILLISECONDS) }
+    }
+}
+
+private fun interface ParentPipeGuardLauncher {
+    fun launch(targetPid: Long, workingDir: String): ParentPipeGuard?
+}
+
+private object ShellParentPipeGuardLauncher : ParentPipeGuardLauncher {
+    override fun launch(targetPid: Long, workingDir: String): ParentPipeGuard? {
+        val command = guardCommand(targetPid) ?: return null
+        val process = runCatching {
+            ProcessBuilder(command)
+                .directory(File(workingDir))
+                .redirectErrorStream(true)
+                .start()
+        }.getOrNull() ?: return null
+        return ParentPipeGuard(
+            process = process,
+            sentinelOutputStream = process.outputStream,
+        )
+    }
+
+    private fun guardCommand(targetPid: Long): List<String>? {
+        if (targetPid <= 0L) {
+            return null
+        }
+
+        return if (isWindows()) {
+            listOf(
+                "cmd",
+                "/d",
+                "/c",
+                "set /p _= & taskkill /PID $targetPid /T /F >NUL 2>NUL",
+            )
+        } else {
+            listOf(
+                "sh",
+                "-c",
+                "read _; kill -TERM -\$1 2>/dev/null; kill -TERM \$1 2>/dev/null",
+                "--",
+                targetPid.toString(),
+            )
+        }
+    }
+
+    private fun isWindows(): Boolean {
+        return System.getProperty("os.name").contains("win", ignoreCase = true)
+    }
+}
+
 /**
  * Command runner backed by JVM process execution.
  */
 class ProcessBuilderCommandRunner(
     private val processFactory: SystemProcessFactory = ProcessBuilderSystemProcessFactory(),
+    private val waitTimeoutMillis: Long = COMMAND_RUNNER_TIMEOUT_MILLIS,
 ) : CommandRunner {
     /**
      * Runs command tokens and returns merged output + exit code.
@@ -99,14 +171,47 @@ class ProcessBuilderCommandRunner(
     override fun run(command: List<String>, workingDir: String): CommandResult {
         return try {
             val process = processFactory.start(command, workingDir, mergeErrorStream = true)
-            val mergedOutput = process.inputStream.bufferedReader().use { it.readText() }
-            val exitCode = process.waitFor()
+            val outputBuffer = CappedOutputBuffer(PROCESS_OUTPUT_BUFFER_MAX_CHARS)
+            val outputLock = Any()
+            val outputReader = thread(
+                start = true,
+                isDaemon = true,
+                name = "authord-command-runner-output",
+            ) {
+                process.inputStream.bufferedReader().forEachLine { line ->
+                    synchronized(outputLock) {
+                        outputBuffer.appendLine(line)
+                    }
+                }
+            }
+            val completed = process.waitFor(waitTimeoutMillis, TimeUnit.MILLISECONDS)
+            if (!completed) {
+                destroyProcessTree(process, forcibly = false)
+                if (!process.waitFor(COMMAND_RUNNER_GRACEFUL_SHUTDOWN_MILLIS, TimeUnit.MILLISECONDS)) {
+                    destroyProcessTree(process, forcibly = true)
+                }
+            }
+            outputReader.join(1_000L)
+            val mergedOutput = synchronized(outputLock) { outputBuffer.snapshot() }
+            if (!completed) {
+                val timeoutMessage = "Command timed out after ${waitTimeoutMillis}ms"
+                val stderr = if (mergedOutput.isBlank()) timeoutMessage else "$mergedOutput\n$timeoutMessage"
+                return CommandResult(
+                    exitCode = 1,
+                    stdout = mergedOutput,
+                    stderr = stderr,
+                )
+            }
+            val exitCode = runCatching { process.exitValue() }.getOrDefault(1)
             CommandResult(
                 exitCode = exitCode,
                 stdout = mergedOutput,
                 stderr = if (exitCode == 0) "" else mergedOutput,
             )
         } catch (exception: Exception) {
+            if (exception is InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
             val message = exception.message ?: "Process execution failed"
             CommandResult(exitCode = 1, stderr = message)
         }
@@ -116,15 +221,20 @@ class ProcessBuilderCommandRunner(
 private class ProcessBackedManagedProcessHandle(
     override val id: String,
     private val process: Process,
-    private val stdoutBuffer: StringBuilder,
-    private val stderrBuffer: StringBuilder,
+    private val stdoutBuffer: CappedOutputBuffer,
+    private val stderrBuffer: CappedOutputBuffer,
     private val outputLock: Any,
     private val stdoutReaderThread: Thread,
     private val stderrReaderThread: Thread,
+    private val parentPipeGuard: ParentPipeGuard?,
+    private val parentGuardReleaseThread: Thread?,
     private val shutdownHookRegistrar: ShutdownHookRegistrar,
 ) : ManagedProcessHandle {
     private val shutdownHook: Thread = Thread(
-        { destroyProcessTree(process, forcibly = true) },
+        {
+            parentPipeGuard?.stop()
+            destroyProcessTree(process, forcibly = true)
+        },
         "authord-$id-shutdown-hook",
     )
     private var shutdownHookRegistered: Boolean = shutdownHookRegistrar.register(shutdownHook)
@@ -134,6 +244,7 @@ private class ProcessBackedManagedProcessHandle(
      */
     override fun stop() {
         unregisterShutdownHook()
+        parentPipeGuard?.stop()
         destroyProcessTree(process, forcibly = false)
         try {
             if (!process.waitFor(3, TimeUnit.SECONDS)) {
@@ -141,6 +252,7 @@ private class ProcessBackedManagedProcessHandle(
             }
             stdoutReaderThread.join(500)
             stderrReaderThread.join(500)
+            parentGuardReleaseThread?.join(PARENT_PIPE_GUARD_STOP_WAIT_MILLIS)
         } catch (ignored: InterruptedException) {
             Thread.currentThread().interrupt()
             destroyProcessTree(process, forcibly = true)
@@ -156,15 +268,12 @@ private class ProcessBackedManagedProcessHandle(
      * Returns currently captured startup/runtime output snapshot.
      */
     override fun startupOutput(): String = synchronized(outputLock) {
-        buildString {
-            append(stdoutBuffer)
-            append(stderrBuffer)
-        }
+        stdoutBuffer.snapshot() + stderrBuffer.snapshot()
     }
 
-    override fun stdoutOutput(): String = synchronized(outputLock) { stdoutBuffer.toString() }
+    override fun stdoutOutput(): String = synchronized(outputLock) { stdoutBuffer.snapshot() }
 
-    override fun stderrOutput(): String = synchronized(outputLock) { stderrBuffer.toString() }
+    override fun stderrOutput(): String = synchronized(outputLock) { stderrBuffer.snapshot() }
 
     override fun exitCodeOrNull(): Int? {
         return if (process.isAlive) null else runCatching { process.exitValue() }.getOrNull()
@@ -220,8 +329,11 @@ class ProcessBuilderProcessLauncher(
         val process = processFactory.start(command, workingDir, mergeErrorStream = false)
         val processId = "process-${counter.incrementAndGet()}"
         val outputLock = Any()
-        val stdoutBuffer = StringBuilder()
-        val stderrBuffer = StringBuilder()
+        val stdoutBuffer = CappedOutputBuffer(PROCESS_OUTPUT_BUFFER_MAX_CHARS)
+        val stderrBuffer = CappedOutputBuffer(PROCESS_OUTPUT_BUFFER_MAX_CHARS)
+        val parentPipeGuard = runCatching { process.pid() }
+            .getOrNull()
+            ?.let { ShellParentPipeGuardLauncher.launch(targetPid = it, workingDir = workingDir) }
 
         val stdoutReaderThread = thread(
             start = true,
@@ -247,6 +359,22 @@ class ProcessBuilderProcessLauncher(
             }
         }
 
+        val parentGuardReleaseThread = parentPipeGuard?.let { guard ->
+            thread(
+                start = true,
+                isDaemon = true,
+                name = "authord-$processId-parent-guard-release",
+            ) {
+                try {
+                    process.waitFor()
+                } catch (ignored: InterruptedException) {
+                    Thread.currentThread().interrupt()
+                } finally {
+                    guard.stop()
+                }
+            }
+        }
+
         waitForReaderDrainIfProcessExited(process, stdoutReaderThread, stderrReaderThread)
 
         return ProcessBackedManagedProcessHandle(
@@ -257,6 +385,8 @@ class ProcessBuilderProcessLauncher(
             outputLock = outputLock,
             stdoutReaderThread = stdoutReaderThread,
             stderrReaderThread = stderrReaderThread,
+            parentPipeGuard = parentPipeGuard,
+            parentGuardReleaseThread = parentGuardReleaseThread,
             shutdownHookRegistrar = shutdownHookRegistrar,
         )
     }
@@ -275,5 +405,44 @@ class ProcessBuilderProcessLauncher(
         } catch (ignored: InterruptedException) {
             Thread.currentThread().interrupt()
         }
+    }
+}
+
+private class CappedOutputBuffer(
+    private val maxChars: Int,
+) {
+    private val lines = ArrayDeque<String>()
+    private var currentLength: Int = 0
+
+    fun appendLine(line: String) {
+        if (maxChars <= 0) {
+            lines.clear()
+            currentLength = 0
+            return
+        }
+
+        val normalized = "$line\n"
+        if (normalized.length >= maxChars) {
+            lines.clear()
+            val tail = normalized.takeLast(maxChars)
+            lines.addLast(tail)
+            currentLength = tail.length
+            return
+        }
+
+        lines.addLast(normalized)
+        currentLength += normalized.length
+        while (currentLength > maxChars && lines.isNotEmpty()) {
+            currentLength -= lines.removeFirst().length
+        }
+    }
+
+    fun snapshot(): String {
+        if (lines.isEmpty()) {
+            return ""
+        }
+        val builder = StringBuilder(currentLength.coerceAtLeast(16))
+        lines.forEach(builder::append)
+        return builder.toString()
     }
 }

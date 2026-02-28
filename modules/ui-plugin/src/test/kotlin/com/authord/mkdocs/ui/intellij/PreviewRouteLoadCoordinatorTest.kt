@@ -259,7 +259,7 @@ class PreviewRouteLoadCoordinatorTest {
 
         assertEquals(listOf(targetUrl to false), loaded)
         assertTrue(probes >= 7)
-        assertTrue(nudges >= 2)
+        assertTrue(nudges in 1..2)
         assertNull(warning)
     }
 
@@ -306,7 +306,7 @@ class PreviewRouteLoadCoordinatorTest {
         )
 
         assertEquals(listOf(targetUrl to false), loaded)
-        assertTrue(nudges in 1..2)
+        assertEquals(1, nudges)
         assertTrue(probes >= 3)
         assertNull(warning)
     }

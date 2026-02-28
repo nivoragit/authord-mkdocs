@@ -12,8 +12,13 @@ import com.authord.mkdocs.ports.topic.TopicSyncTransaction
 import com.authord.mkdocs.ports.topic.TopicTreeCommand
 import com.authord.mkdocs.ports.topic.TreeSyncOrchestrator
 import com.authord.mkdocs.ports.topic.ValidateTopicTreeCommand
+import com.authord.mkdocs.ui.intellij.InstanceRegistryService
+import com.authord.mkdocs.ui.intellij.InstanceRegistryStateStore
+import com.authord.mkdocs.ui.intellij.PersistedInstanceRegistryState
 import com.authord.mkdocs.ui.intellij.TopicTreeApplicationService
 import com.authord.mkdocs.ui.intellij.TopicTreeUiService
+import java.nio.file.Files
+import java.nio.file.Path
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -95,14 +100,29 @@ class PluginCompositionRootCoverageTest {
     }
 
     @Test
-    fun `in-memory instance registry port covers discovery registration and selection branches`() {
-        val registry = newInMemoryInstanceRegistry()
+    fun `instance registry service covers discovery registration and selection branches`() {
+        val stateStore = object : InstanceRegistryStateStore {
+            private var state: PersistedInstanceRegistryState? = null
 
-        val discoveredDefault = requireSuccess(registry.discoverDefaultInstance("/tmp/topic-tree-alpha"))
+            override fun load(projectKey: String): PersistedInstanceRegistryState? = state
+
+            override fun save(projectKey: String, state: PersistedInstanceRegistryState) {
+                this.state = state
+            }
+        }
+        val registry = InstanceRegistryService(stateStore = stateStore)
+        val projectRoot = Files.createTempDirectory("registry-default")
+        Files.createDirectories(projectRoot.resolve("docs"))
+        Files.writeString(
+            projectRoot.resolve("mkdocs.yml"),
+            "site_name: Demo\ndocs_dir: docs\n",
+        )
+
+        val discoveredDefault = requireSuccess(registry.discoverDefaultInstance(projectRoot.toString()))
         assertNotNull(discoveredDefault)
         assertEquals("default", discoveredDefault.instanceId)
 
-        val discoveredAgain = requireSuccess(registry.discoverDefaultInstance("/tmp/topic-tree-beta"))
+        val discoveredAgain = requireSuccess(registry.discoverDefaultInstance(projectRoot.toString()))
         assertNotNull(discoveredAgain)
 
         val missingSelection = registry.selectActiveInstance("missing-instance")
@@ -115,12 +135,37 @@ class PluginCompositionRootCoverageTest {
         val listed = requireSuccess(registry.listInstances())
         assertTrue(listed.any { it.instanceId == discoveredDefault.instanceId })
 
-        val freshRegistry = newInMemoryInstanceRegistry()
-        val explicit = topicInstance("secondary")
+        val isolatedStore = object : InstanceRegistryStateStore {
+            private var state: PersistedInstanceRegistryState? = null
+
+            override fun load(projectKey: String): PersistedInstanceRegistryState? = state
+
+            override fun save(projectKey: String, state: PersistedInstanceRegistryState) {
+                this.state = state
+            }
+        }
+        val freshRegistry = InstanceRegistryService(stateStore = isolatedStore)
+        val secondaryRoot = Files.createTempDirectory("registry-secondary")
+        Files.createDirectories(secondaryRoot.resolve("docs"))
+        val secondaryConfig = secondaryRoot.resolve("mkdocs.yml")
+        Files.writeString(secondaryConfig, "site_name: Secondary\ndocs_dir: docs\n")
+        val explicit = TopicInstanceRef(
+            instanceId = "secondary",
+            configPath = secondaryConfig.toString(),
+            docsDirPath = secondaryRoot.resolve("docs").toString(),
+        )
         requireSuccess(freshRegistry.registerInstance(explicit))
         assertEquals(explicit.instanceId, requireSuccess(freshRegistry.activeInstance())?.instanceId)
 
-        val replacement = topicInstance("replacement")
+        val replacementRoot = Files.createTempDirectory("registry-replacement")
+        Files.createDirectories(replacementRoot.resolve("docs"))
+        val replacementConfig = replacementRoot.resolve("mkdocs.yml")
+        Files.writeString(replacementConfig, "site_name: Replacement\ndocs_dir: docs\n")
+        val replacement = TopicInstanceRef(
+            instanceId = "replacement",
+            configPath = replacementConfig.toString(),
+            docsDirPath = replacementRoot.resolve("docs").toString(),
+        )
         requireSuccess(freshRegistry.registerInstance(replacement))
         assertEquals(explicit.instanceId, requireSuccess(freshRegistry.activeInstance())?.instanceId)
     }
@@ -240,14 +285,6 @@ class PluginCompositionRootCoverageTest {
             is TopicGatewayResult.Success -> result.value
             is TopicGatewayResult.Failure -> fail("Expected success but was failure: ${result.error.code} ${result.error.detail}")
         }
-    }
-
-    @Suppress("UNCHECKED_CAST")
-    private fun newInMemoryInstanceRegistry(): InstanceRegistryPort {
-        val type = Class.forName("com.authord.mkdocs.ui.InMemoryInstanceRegistryPort")
-        val constructor = type.getDeclaredConstructor()
-        constructor.isAccessible = true
-        return constructor.newInstance() as InstanceRegistryPort
     }
 
     @Suppress("UNCHECKED_CAST")

@@ -5,11 +5,13 @@ import com.authord.mkdocs.ports.topic.DefaultTopicSyncError
 import com.authord.mkdocs.ports.topic.DocsFileGateway
 import com.authord.mkdocs.ports.topic.MkDocsConfigDocument
 import com.authord.mkdocs.ports.topic.MkDocsConfigGateway
+import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.TopicDeleteMode
 import com.authord.mkdocs.ports.topic.TopicFileOperation
 import com.authord.mkdocs.ports.topic.TopicFileOperationKind
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicInstanceRef
+import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
 import com.authord.mkdocs.ports.topic.TopicSyncTransaction
 import com.authord.mkdocs.ports.topic.TopicTreeCommand
@@ -76,6 +78,61 @@ class TreeSyncOrchestratorAtomicityTest {
         )
     }
 
+    @Test
+    fun `failed remove mutation keeps cached nav state consistent for retry`() {
+        val docsGateway = RecordingDocsFileGateway(failOnDelete = true)
+        val configGateway = MutableStateConfigGateway(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(
+                        nodeId = "node-1",
+                        title = "Node",
+                        path = "node.md",
+                    ),
+                ),
+            ),
+        )
+        val orchestrator = TopicTreeSyncOrchestratorService(
+            topicTreePort = SuccessfulTopicTreePort(),
+            mkDocsConfigGateway = configGateway,
+            docsFileGateway = docsGateway,
+        )
+        val removeTransaction = TopicSyncTransaction(
+            transactionId = "tx-remove",
+            instance = TopicInstanceRef("default", "/project/mkdocs.yml", "/project/docs"),
+            command = RemoveTopicNodeCommand(
+                commandId = "cmd-remove",
+                treeId = "tree-1",
+                nodeId = "node-1",
+            ),
+        )
+
+        val first = requireSuccess(orchestrator.apply(removeTransaction))
+        val second = requireSuccess(
+            orchestrator.apply(
+                removeTransaction.copy(
+                    transactionId = "tx-remove-retry",
+                    command = RemoveTopicNodeCommand(
+                        commandId = "cmd-remove-retry",
+                        treeId = "tree-1",
+                        nodeId = "node-1",
+                    ),
+                ),
+            ),
+        )
+
+        assertFalse(first.applied)
+        assertFalse(second.applied)
+        assertEquals(
+            listOf(
+                "delete:node.md:RECOVERABLE",
+                "delete:node.md:RECOVERABLE",
+            ),
+            docsGateway.calls,
+        )
+    }
+
     private fun transaction(fileOperations: List<TopicFileOperation>): TopicSyncTransaction {
         return TopicSyncTransaction(
             transactionId = "tx-1",
@@ -121,8 +178,26 @@ private class SuccessfulConfigGateway : MkDocsConfigGateway {
     }
 }
 
+private class MutableStateConfigGateway(
+    private var document: MkDocsConfigDocument,
+) : MkDocsConfigGateway {
+    override fun loadConfig(instance: TopicInstanceRef): TopicGatewayResult<MkDocsConfigDocument> {
+        return TopicGatewayResult.Success(document)
+    }
+
+    override fun writeConfig(instance: TopicInstanceRef, document: MkDocsConfigDocument): TopicGatewayResult<Unit> {
+        this.document = document
+        return TopicGatewayResult.Success(Unit)
+    }
+
+    override fun serializeDeterministically(document: MkDocsConfigDocument): TopicGatewayResult<String> {
+        return TopicGatewayResult.Success("docs_dir: docs\nnav: []\n")
+    }
+}
+
 private class RecordingDocsFileGateway(
     private val failOnMove: Boolean = false,
+    private val failOnDelete: Boolean = false,
 ) : DocsFileGateway {
     val calls = mutableListOf<String>()
 
@@ -133,7 +208,11 @@ private class RecordingDocsFileGateway(
 
     override fun deleteMarkdownFile(instance: TopicInstanceRef, relativePath: String, mode: TopicDeleteMode): TopicGatewayResult<String> {
         calls += "delete:$relativePath:$mode"
-        return TopicGatewayResult.Success(relativePath)
+        return if (failOnDelete) {
+            TopicGatewayResult.Failure(DefaultTopicSyncError(TopicSyncErrorCode.FILE_IO, "delete failed"))
+        } else {
+            TopicGatewayResult.Success(relativePath)
+        }
     }
 
     override fun renameMarkdownFile(

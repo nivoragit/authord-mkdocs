@@ -34,7 +34,7 @@ class MarkdownLinkRewriter {
 
         return runCatching {
             var replacements = 0
-            Files.walk(docsDir).use { stream ->
+            Files.walk(docsDir, MAX_DOCS_SCAN_DEPTH).use { stream ->
                 stream
                     .filter { Files.isRegularFile(it) && it.toString().endsWith(".md") }
                     .forEach { markdownFile ->
@@ -111,5 +111,9 @@ class MarkdownLinkRewriter {
 
     private fun normalizePath(path: String): String {
         return path.replace('\\', '/').trim()
+    }
+
+    private companion object {
+        private const val MAX_DOCS_SCAN_DEPTH: Int = 20
     }
 }

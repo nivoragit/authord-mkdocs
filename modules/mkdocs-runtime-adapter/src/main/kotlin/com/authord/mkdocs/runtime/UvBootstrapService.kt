@@ -3,6 +3,7 @@ package com.authord.mkdocs.runtime
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.exists
 
 /**
@@ -56,7 +57,8 @@ open class UvBootstrapService(
         uvExecutableProvider = StaticUvExecutableProvider(),
     )
 
-    private val bootstrappedProjectHashes = mutableMapOf<String, String>()
+    private val bootstrappedProjectHashes = ConcurrentHashMap<String, String>()
+    private val bootstrapLockStripes = Array(64) { Any() }
 
     /**
      * Ensures project runtime exists and required packages are installed.
@@ -71,119 +73,131 @@ open class UvBootstrapService(
      * @return bootstrap status, executed commands, and error details on failure.
      */
     open fun bootstrap(projectPath: String): BootstrapResult {
-        val runtimeDirectory = Path.of(projectPath).resolve(".mkdocs-plugin-venv")
-        val runtimePath = runtimeDirectory.toString()
-        val uvResolution = uvExecutableProvider.resolve(projectPath)
-        if (!uvResolution.success) {
-            return BootstrapResult(
-                success = false,
-                runtimePath = runtimePath,
-                uvExecutablePath = "",
-                executedCommands = emptyList(),
-                skipped = false,
-                errorMessage = uvResolution.errorMessage,
-            )
-        }
-        val uvExecutable = uvResolution.executablePath
-
-        // Check cache: skip if config hasn't changed
-        val currentHash = computeConfigHash(projectPath)
-        val cachedHash = bootstrappedProjectHashes[projectPath]
-        if (cachedHash != null && cachedHash == currentHash && runtimeDirectory.exists()) {
-            return BootstrapResult(
-                success = true,
-                runtimePath = runtimePath,
-                uvExecutablePath = uvExecutable,
-                executedCommands = emptyList(),
-                skipped = true,
-            )
-        }
-
-        val executed = mutableListOf<List<String>>()
-
-        // Step 1: Create venv if needed
-        if (!runtimeDirectory.exists()) {
-            val setupCommand = listOf(uvExecutable, "venv", runtimePath)
-            val setupResult = commandRunner.run(setupCommand, projectPath)
-            executed += setupCommand
-            if (setupResult.exitCode != 0 && !isExistingRuntimeError(setupResult)) {
+        val projectKey = normalizeProjectPath(projectPath)
+        val projectLock = lockFor(projectKey)
+        synchronized(projectLock) {
+            val runtimeDirectory = Path.of(projectPath).resolve(".mkdocs-plugin-venv")
+            val runtimePath = runtimeDirectory.toString()
+            val uvResolution = uvExecutableProvider.resolve(projectPath)
+            if (!uvResolution.success) {
                 return BootstrapResult(
                     success = false,
                     runtimePath = runtimePath,
-                    uvExecutablePath = uvExecutable,
-                    executedCommands = executed,
+                    uvExecutablePath = "",
+                    executedCommands = emptyList(),
                     skipped = false,
-                    errorMessage = setupResult.stderr.ifBlank { "Failed to create runtime" },
+                    errorMessage = uvResolution.errorMessage,
                 )
             }
-        }
+            val uvExecutable = uvResolution.executablePath
 
-        // Step 2: Install mkdocs base package (+ requirements.txt if present)
-        val baseInstallCommand = buildList {
-            addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath, "mkdocs"))
-            val requirementsFile = resolveRequirementsPath(projectPath)
-            if (requirementsFile != null) {
-                add("-r")
-                add(requirementsFile.toString())
+            // Check cache: skip if config hasn't changed
+            val currentHash = computeConfigHash(projectPath)
+            val cachedHash = bootstrappedProjectHashes[projectKey]
+            if (cachedHash != null && cachedHash == currentHash && runtimeDirectory.exists()) {
+                return BootstrapResult(
+                    success = true,
+                    runtimePath = runtimePath,
+                    uvExecutablePath = uvExecutable,
+                    executedCommands = emptyList(),
+                    skipped = true,
+                )
             }
-        }
-        val baseInstallResult = commandRunner.run(baseInstallCommand, projectPath)
-        executed += baseInstallCommand
-        if (baseInstallResult.exitCode != 0) {
-            return BootstrapResult(
-                success = false,
-                runtimePath = runtimePath,
-                uvExecutablePath = uvExecutable,
-                executedCommands = executed,
-                skipped = false,
-                errorMessage = baseInstallResult.stderr.ifBlank { "Failed to install mkdocs" },
-            )
-        }
 
-        // Step 3: Run `mkdocs get-deps` to discover all required packages
-        val pythonPath = resolveVenvPython(runtimeDirectory)
-        val getDepsCommand = listOf(pythonPath, "-m", "mkdocs", "get-deps")
-        val getDepsResult = commandRunner.run(getDepsCommand, projectPath)
-        executed += getDepsCommand
+            val executed = mutableListOf<List<String>>()
 
-        // Step 4: Install discovered dependencies (if any)
-        if (getDepsResult.exitCode == 0) {
-            val discoveredDeps = getDepsResult.stdout
-                .lines()
-                .map { it.trim() }
-                .filter { it.isNotBlank() }
-                .distinct()
-
-            if (discoveredDeps.isNotEmpty()) {
-                val depsInstallCommand = buildList {
-                    addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath))
-                    addAll(discoveredDeps)
-                }
-                val depsInstallResult = commandRunner.run(depsInstallCommand, projectPath)
-                executed += depsInstallCommand
-                if (depsInstallResult.exitCode != 0) {
+            // Step 1: Create venv if needed
+            if (!runtimeDirectory.exists()) {
+                val setupCommand = listOf(uvExecutable, "venv", runtimePath)
+                val setupResult = commandRunner.run(setupCommand, projectPath)
+                executed += setupCommand
+                if (setupResult.exitCode != 0 && !isExistingRuntimeError(setupResult)) {
                     return BootstrapResult(
                         success = false,
                         runtimePath = runtimePath,
                         uvExecutablePath = uvExecutable,
                         executedCommands = executed,
                         skipped = false,
-                        errorMessage = depsInstallResult.stderr.ifBlank { "Failed to install mkdocs dependencies" },
+                        errorMessage = setupResult.stderr.ifBlank { "Failed to create runtime" },
                     )
                 }
             }
-        }
-        // If get-deps fails (e.g., bad config), we still succeed with just mkdocs installed.
-        // The user will see the MkDocs error when they try to serve.
 
-        bootstrappedProjectHashes[projectPath] = currentHash
-        return BootstrapResult(
-            success = true,
-            runtimePath = runtimePath,
-            uvExecutablePath = uvExecutable,
-            executedCommands = executed,
-            skipped = false,
-        )
+            // Step 2: Install mkdocs base package (+ requirements.txt if present)
+            val baseInstallCommand = buildList {
+                addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath, "mkdocs"))
+                val requirementsFile = resolveRequirementsPath(projectPath)
+                if (requirementsFile != null) {
+                    add("-r")
+                    add(requirementsFile.toString())
+                }
+            }
+            val baseInstallResult = commandRunner.run(baseInstallCommand, projectPath)
+            executed += baseInstallCommand
+            if (baseInstallResult.exitCode != 0) {
+                return BootstrapResult(
+                    success = false,
+                    runtimePath = runtimePath,
+                    uvExecutablePath = uvExecutable,
+                    executedCommands = executed,
+                    skipped = false,
+                    errorMessage = baseInstallResult.stderr.ifBlank { "Failed to install mkdocs" },
+                )
+            }
+
+            // Step 3: Run `mkdocs get-deps` to discover all required packages
+            val pythonPath = resolveVenvPython(runtimeDirectory)
+            val getDepsCommand = listOf(pythonPath, "-m", "mkdocs", "get-deps")
+            val getDepsResult = commandRunner.run(getDepsCommand, projectPath)
+            executed += getDepsCommand
+
+            // Step 4: Install discovered dependencies (if any)
+            if (getDepsResult.exitCode == 0) {
+                val discoveredDeps = getDepsResult.stdout
+                    .lines()
+                    .map { it.trim() }
+                    .filter { it.isNotBlank() }
+                    .distinct()
+
+                if (discoveredDeps.isNotEmpty()) {
+                    val depsInstallCommand = buildList {
+                        addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath))
+                        addAll(discoveredDeps)
+                    }
+                    val depsInstallResult = commandRunner.run(depsInstallCommand, projectPath)
+                    executed += depsInstallCommand
+                    if (depsInstallResult.exitCode != 0) {
+                        return BootstrapResult(
+                            success = false,
+                            runtimePath = runtimePath,
+                            uvExecutablePath = uvExecutable,
+                            executedCommands = executed,
+                            skipped = false,
+                            errorMessage = depsInstallResult.stderr.ifBlank { "Failed to install mkdocs dependencies" },
+                        )
+                    }
+                }
+            }
+            // If get-deps fails (e.g., bad config), we still succeed with just mkdocs installed.
+            // The user will see the MkDocs error when they try to serve.
+
+            bootstrappedProjectHashes[projectKey] = currentHash
+            return BootstrapResult(
+                success = true,
+                runtimePath = runtimePath,
+                uvExecutablePath = uvExecutable,
+                executedCommands = executed,
+                skipped = false,
+            )
+        }
+    }
+
+    /**
+     * Evicts cached bootstrap hash state.
+     */
+    open fun evict(projectPath: String) {
+        val projectKey = normalizeProjectPath(projectPath)
+        bootstrappedProjectHashes.remove(projectKey)
     }
 
     private fun isExistingRuntimeError(result: CommandResult): Boolean {
@@ -236,5 +250,15 @@ open class UvBootstrapService(
 
         val ymlAlt = root.resolve("mkdocs.yaml")
         return if (ymlAlt.exists()) ymlAlt else null
+    }
+
+    private fun normalizeProjectPath(projectPath: String): String {
+        return runCatching { Path.of(projectPath).toAbsolutePath().normalize().toString() }
+            .getOrDefault(projectPath)
+    }
+
+    private fun lockFor(projectKey: String): Any {
+        val index = (projectKey.hashCode() and Int.MAX_VALUE) % bootstrapLockStripes.size
+        return bootstrapLockStripes[index]
     }
 }

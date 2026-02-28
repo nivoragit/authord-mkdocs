@@ -1,5 +1,9 @@
 package com.authord.mkdocs.runtime
 
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
+
 /** API version for runtime process lifecycle seams. */
 const val PROCESS_LIFECYCLE_API_VERSION: String = "1.0.0"
 
@@ -98,15 +102,26 @@ private data class RunningProcess(
 /**
  * Manages MkDocs runtime lifecycle with single-instance semantics per project.
  */
-open class MkdocsProcessManager(
+class MkdocsProcessManager(
     private val processLauncher: ProcessLauncher,
 ) {
-    private val processes = mutableMapOf<String, RunningProcess>()
+    private val processes = ConcurrentHashMap<String, RunningProcess>()
+    private val stateLock = ReentrantLock()
 
     /**
      * Starts runtime for a project, reusing an already-running process when available.
      */
-    open fun start(projectId: String, workingDir: String, config: RuntimeServerConfig = RuntimeServerConfig()): RuntimeStartResult {
+    fun start(projectId: String, workingDir: String, config: RuntimeServerConfig = RuntimeServerConfig()): RuntimeStartResult {
+        return stateLock.withLock {
+            startLocked(projectId, workingDir, config)
+        }
+    }
+
+    private fun startLocked(
+        projectId: String,
+        workingDir: String,
+        config: RuntimeServerConfig,
+    ): RuntimeStartResult {
         val existing = processes[projectId]
         if (existing != null && existing.handle.isAlive()) {
             return RuntimeStartResult(
@@ -137,22 +152,32 @@ open class MkdocsProcessManager(
      *
      * @return `true` when a running process existed and was stopped.
      */
-    open fun stop(projectId: String): Boolean {
-        val existing = processes.remove(projectId) ?: return false
-        existing.handle.stop()
-        return true
+    fun stop(projectId: String): Boolean {
+        return stateLock.withLock {
+            val existing = processes.remove(projectId) ?: return@withLock false
+            existing.handle.stop()
+            true
+        }
     }
 
     /**
      * Restarts runtime for a project, preserving prior working directory/config when known.
      */
     fun restart(projectId: String): RuntimeStartResult {
-        val existing = processes[projectId]
-            ?: return start(projectId = projectId, workingDir = ".", config = RuntimeServerConfig())
+        return stateLock.withLock {
+            val existing = processes[projectId]
+                ?: return@withLock RuntimeStartResult(
+                    started = false,
+                    processId = "",
+                    command = emptyList(),
+                    alreadyRunning = false,
+                    startupOutput = "Cannot restart runtime: no tracked process for project '$projectId'.",
+                )
 
-        existing.handle.stop()
-        processes.remove(projectId)
-        return start(projectId, existing.workingDir, existing.config)
+            existing.handle.stop()
+            processes.remove(projectId)
+            startLocked(projectId, existing.workingDir, existing.config)
+        }
     }
 
     /**
@@ -163,23 +188,27 @@ open class MkdocsProcessManager(
     /**
      * Returns `true` when runtime process is alive for a project.
      */
-    fun isRunning(projectId: String): Boolean = processes[projectId]?.handle?.isAlive() == true
+    fun isRunning(projectId: String): Boolean = stateLock.withLock {
+        processes[projectId]?.handle?.isAlive() == true
+    }
 
     /**
      * Returns current process diagnostics for a project when a handle is tracked.
      */
-    open fun diagnostics(projectId: String): RuntimeProcessDiagnostics? {
-        val running = processes[projectId] ?: return null
-        val handle = running.handle
-        return RuntimeProcessDiagnostics(
-            processId = handle.id,
-            command = running.command,
-            isAlive = handle.isAlive(),
-            startupOutput = handle.startupOutput(),
-            stdoutOutput = handle.stdoutOutput(),
-            stderrOutput = handle.stderrOutput(),
-            exitCode = handle.exitCodeOrNull(),
-        )
+    fun diagnostics(projectId: String): RuntimeProcessDiagnostics? {
+        return stateLock.withLock {
+            val running = processes[projectId] ?: return@withLock null
+            val handle = running.handle
+            RuntimeProcessDiagnostics(
+                processId = handle.id,
+                command = running.command,
+                isAlive = handle.isAlive(),
+                startupOutput = handle.startupOutput(),
+                stdoutOutput = handle.stdoutOutput(),
+                stderrOutput = handle.stderrOutput(),
+                exitCode = handle.exitCodeOrNull(),
+            )
+        }
     }
 
     /**

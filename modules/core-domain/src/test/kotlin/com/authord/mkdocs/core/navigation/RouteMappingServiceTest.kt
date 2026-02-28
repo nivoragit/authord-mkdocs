@@ -61,4 +61,14 @@ class RouteMappingServiceTest {
     fun `maps nested index route to html when use directory urls is disabled`() {
         assertEquals("/guide/setup/index.html", service.mapToRoute("docs/guide/setup/index.md", useDirectoryUrls = false))
     }
+
+    @Test
+    fun `maps root index route to slash when use directory urls is disabled`() {
+        assertEquals("/", service.mapToRoute("docs/index.md", useDirectoryUrls = false))
+    }
+
+    @Test
+    fun `maps blank markdown stem to slash when use directory urls is disabled`() {
+        assertEquals("/", service.mapToRoute("docs/.md", useDirectoryUrls = false))
+    }
 }

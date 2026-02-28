@@ -53,8 +53,6 @@ internal fun isAuthordPreviewEligible(
 class AuthordMarkdownSplitEditorProvider : TextEditorWithPreviewProvider, DumbAware {
     constructor() : super(AuthordMarkdownPreviewFileEditorProvider())
 
-    internal constructor(previewProvider: FileEditorProvider) : super(previewProvider)
-
     override fun createSplitEditor(firstEditor: TextEditor, secondEditor: FileEditor): FileEditor {
         require(secondEditor is AuthordMarkdownPreviewFileEditor) {
             "Secondary editor should be AuthordMarkdownPreviewFileEditor"
@@ -198,7 +196,7 @@ internal class AuthordMarkdownPreviewFileEditor(
                 Thread.currentThread().interrupt()
                 return@executeOnPooledThread
             }
-            app.invokeLater(task, ModalityState.any())
+            app.invokeLater(task, ModalityState.defaultModalityState())
         }
     },
 ) : UserDataHolderBase(), FileEditor {
@@ -279,7 +277,7 @@ internal class AuthordMarkdownPreviewFileEditor(
             resultPresenter(project, missingConfigMessage(), false)
             return
         }
-        runtimeService.restartPreviewAsync(PreviewStartTrigger.ACTION) { restartResult ->
+        runtimeService.restartPreviewWithProgress(PreviewStartTrigger.ACTION) { restartResult ->
             if (!restartResult.success) {
                 startupFailureHandler.handleFailure(
                     project = project,
@@ -287,7 +285,7 @@ internal class AuthordMarkdownPreviewFileEditor(
                     selectedPath = file.path,
                     onRetry = ::restartPreviewAndRefresh,
                 )
-                return@restartPreviewAsync
+                return@restartPreviewWithProgress
             }
             clearFailureBypassForCurrentFile()
             resultPresenter(project, formatPreviewResultMessage(restartResult), true)
@@ -341,7 +339,7 @@ internal class AuthordMarkdownPreviewFileEditor(
                 }
                 return true
             } else {
-                runtimeService.startPreviewAsync(trigger) { startResult ->
+                runtimeService.startPreviewWithProgress(trigger) { startResult ->
                     if (!startResult.success) {
                         startupFailureHandler.handleFailure(
                             project = project,
@@ -351,7 +349,7 @@ internal class AuthordMarkdownPreviewFileEditor(
                                 refreshForSelectedFile(autoStart = true, trigger = trigger)
                             },
                         )
-                        return@startPreviewAsync
+                        return@startPreviewWithProgress
                     }
                     clearFailureBypassForCurrentFile()
                     val dispatched = dispatchPreviewForCurrentFile(PreviewRouteIntentSource.SPLIT_EDITOR)

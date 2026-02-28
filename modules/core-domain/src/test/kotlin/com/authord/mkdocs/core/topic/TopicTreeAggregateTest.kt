@@ -125,6 +125,48 @@ class TopicTreeAggregateTest {
     }
 
     @Test
+    fun `move node within same parent keeps expected relative order and contiguous indices`() {
+        val aggregate = TopicTreeAggregate("tree-1")
+        aggregate.apply(AddTopicNodeCommand("add-1", "tree-1", "root", "a", "A", 0))
+        aggregate.apply(AddTopicNodeCommand("add-2", "tree-1", "root", "b", "B", 1))
+        aggregate.apply(AddTopicNodeCommand("add-3", "tree-1", "root", "c", "C", 2))
+
+        val result = aggregate.apply(MoveTopicNodeCommand("move-same-parent", "tree-1", "a", "root", 2))
+
+        assertEquals(TopicTreeCommandStatus.SUCCESS, result.status)
+        val rootChildren = aggregate.snapshot()
+            .filter { it.parentNodeId == "root" && it.status == TopicNodeStatus.ACTIVE }
+            .sortedBy { it.orderIndex }
+        assertEquals(listOf("b", "a", "c"), rootChildren.map { it.nodeId })
+        assertEquals(listOf(0, 1, 2), rootChildren.map { it.orderIndex })
+    }
+
+    @Test
+    fun `reparent appends to new parent and normalizes both sibling groups`() {
+        val aggregate = TopicTreeAggregate("tree-1")
+        aggregate.apply(AddTopicNodeCommand("add-1", "tree-1", "root", "a", "A", 0))
+        aggregate.apply(AddTopicNodeCommand("add-2", "tree-1", "root", "b", "B", 1))
+        aggregate.apply(AddTopicNodeCommand("add-3", "tree-1", "root", "c", "C", 2))
+        aggregate.apply(AddTopicNodeCommand("add-4", "tree-1", "a", "a1", "A1", 0))
+        aggregate.apply(AddTopicNodeCommand("add-5", "tree-1", "a", "a2", "A2", 1))
+
+        val result = aggregate.apply(ReparentTopicNodeCommand("reparent-normalize", "tree-1", "c", "a"))
+
+        assertEquals(TopicTreeCommandStatus.SUCCESS, result.status)
+        val rootChildren = aggregate.snapshot()
+            .filter { it.parentNodeId == "root" && it.status == TopicNodeStatus.ACTIVE }
+            .sortedBy { it.orderIndex }
+        assertEquals(listOf("a", "b"), rootChildren.map { it.nodeId })
+        assertEquals(listOf(0, 1), rootChildren.map { it.orderIndex })
+
+        val aChildren = aggregate.snapshot()
+            .filter { it.parentNodeId == "a" && it.status == TopicNodeStatus.ACTIVE }
+            .sortedBy { it.orderIndex }
+        assertEquals(listOf("a1", "a2", "c"), aChildren.map { it.nodeId })
+        assertEquals(listOf(0, 1, 2), aChildren.map { it.orderIndex })
+    }
+
+    @Test
     fun `move node rejects missing node`() {
         val aggregate = TopicTreeAggregate("tree-1")
 

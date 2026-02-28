@@ -1,5 +1,7 @@
 package com.authord.mkdocs.ui
 
+import java.util.concurrent.ConcurrentHashMap
+
 /**
  * Preview session state per project.
  */
@@ -14,7 +16,7 @@ data class PreviewPaneState(
  * Tracks and updates preview pane routing state for each project.
  */
 open class PreviewPaneCoordinator {
-    private val sessions = mutableMapOf<String, PreviewPaneState>()
+    private val sessions = ConcurrentHashMap<String, PreviewPaneState>()
 
     /** Opens preview state for a project with a resolved deterministic base URL. */
     open fun open(projectId: String, baseUrl: String): PreviewPaneState {

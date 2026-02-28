@@ -111,14 +111,37 @@ class SystemRuntimeAdaptersTest {
 
     @Test
     fun `command runner returns failure envelope when process start throws`() {
-        val runner = ProcessBuilderCommandRunner { _, _, _ ->
-            throw IllegalStateException("cannot start process")
-        }
+        val runner = ProcessBuilderCommandRunner(
+            processFactory = SystemProcessFactory { _, _, _ ->
+                throw IllegalStateException("cannot start process")
+            },
+        )
 
         val result = runner.run(command = listOf("uv", "--version"), workingDir = "/tmp/project")
 
         assertEquals(1, result.exitCode)
         assertTrue(result.stderr.contains("cannot start process"))
+    }
+
+    @Test
+    fun `command runner times out long-running command and terminates process`() {
+        val process = FakeProcess(
+            output = "still running",
+            exitCodeValue = 0,
+            initiallyAlive = true,
+            waitForTimeoutResult = false,
+        )
+        val factory = RecordingProcessFactory(process)
+        val runner = ProcessBuilderCommandRunner(
+            processFactory = factory,
+            waitTimeoutMillis = 1L,
+        )
+
+        val result = runner.run(command = listOf("uv", "pip", "install"), workingDir = "/tmp/project")
+
+        assertEquals(1, result.exitCode)
+        assertTrue(result.stderr.contains("timed out"))
+        assertTrue(process.destroyCalls >= 1 || process.destroyForciblyCalls >= 1)
     }
 
     @Test
