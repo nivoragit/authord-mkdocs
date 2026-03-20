@@ -35,7 +35,6 @@ import java.beans.PropertyChangeListener
 import java.util.concurrent.atomic.AtomicInteger
 import javax.swing.JComponent
 import javax.swing.JPanel
-import kotlin.math.abs
 
 internal const val AUTHORD_PREVIEW_EDITOR_TYPE_ID = "authord-preview-editor"
 
@@ -212,14 +211,13 @@ internal class AuthordMarkdownPreviewFileEditor(
     @Volatile
     private var sourceEditor: Editor? = null
     @Volatile
-    private var previewScrollLatchedByUser: Boolean = false
-    @Volatile
-    private var lastSyncedEditorTopPx: Double = Double.NaN
-    @Volatile
     private var lastTypingTimestampMs: Long = 0L
+    @Volatile
+    private var lastManualPreviewScrollMs: Long = 0L
     private val typingGeneration = AtomicInteger(0)
     private val typingRefreshDelaysMs = listOf(2000L)
     private val typingScrollGuardMs: Long = 800L
+    private val manualPreviewPriorityMs: Long = 1200L
 
     init {
         registerEditorListeners()
@@ -466,7 +464,7 @@ internal class AuthordMarkdownPreviewFileEditor(
             triggerScrollRestorationAfterReload()
         }
         previewContent.setManualScrollListener {
-            previewScrollLatchedByUser = true
+            lastManualPreviewScrollMs = System.currentTimeMillis()
         }
         (previewContent.component as? JPanel ?: previewContent.component).addComponentListener(
             object : ComponentAdapter() {
@@ -519,15 +517,10 @@ internal class AuthordMarkdownPreviewFileEditor(
             return false
         }
 
-        if (previewScrollLatchedByUser) {
-            val thresholdPx = (lineHeightPx * 3).toDouble()
-            if (!lastSyncedEditorTopPx.isNaN() && abs(editorTopPx - lastSyncedEditorTopPx) < thresholdPx) {
-                return false
-            }
-            previewScrollLatchedByUser = false
+        if (System.currentTimeMillis() - lastManualPreviewScrollMs < manualPreviewPriorityMs) {
+            return false
         }
 
-        lastSyncedEditorTopPx = editorTopPx
         if (System.currentTimeMillis() - lastTypingTimestampMs < typingScrollGuardMs) {
             return false
         }

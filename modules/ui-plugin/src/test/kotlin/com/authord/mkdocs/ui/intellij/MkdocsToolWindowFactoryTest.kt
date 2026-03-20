@@ -28,6 +28,7 @@ private class RecordingPreviewContent : PreviewContent {
     private val syncTokens = mutableListOf<Long?>()
     private var setupPageLoads: Int = 0
     private var setupProjectCreateHandler: ((String) -> Unit)? = null
+    private var manualScrollListener: ((Double) -> Unit)? = null
     var domSnapshot: PreviewDomSnapshot? = null
 
     override val component: JComponent = JPanel()
@@ -52,6 +53,10 @@ private class RecordingPreviewContent : PreviewContent {
 
     override fun requestDomSnapshot(callback: (PreviewDomSnapshot?) -> Unit) {
         callback(domSnapshot)
+    }
+
+    override fun setManualScrollListener(listener: ((Double) -> Unit)?) {
+        manualScrollListener = listener
     }
 
     override fun supportsPreviewEditorSync(): Boolean = true
@@ -1235,6 +1240,46 @@ class MkdocsToolWindowFactoryTest {
         assertTrue(previewContent.scrolledYValues().isNotEmpty())
         assertTrue(previewContent.scrolledYValues().first() >= 0.0)
         assertTrue(previewContent.scrollSyncTokens().first() != null)
+    }
+
+    @Test
+    fun `scheduleScrollSync gives priority to recent manual preview scrolling`() {
+        val project = IntellijTestFixtures.project(basePath = "/tmp/project")
+        val service = PluginRuntimeIntegrationService(project)
+        service.setStartupOutputForNextRun("ready at https://preview.example/")
+        assertTrue(service.startPreview().success)
+
+        val previewContent = RecordingPreviewContent()
+        previewContent.domSnapshot = PreviewDomSnapshot(
+            maxScrollY = 1400.0,
+            anchors = listOf(
+                PreviewDomAnchor(id = "header-1", type = AnchorType.H, level = 1, top = 10.0, bottom = 50.0, normText = "header 1"),
+                PreviewDomAnchor(id = "header-2", type = AnchorType.H, level = 2, top = 700.0, bottom = 740.0, normText = "header 2"),
+            ),
+        )
+        val document = DocumentImpl("Header 1\nContent\nHeader 2\nMore Content")
+        val factory = MkdocsToolWindowFactory(
+            runtimeServiceResolver = { service },
+            previewContentFactory = { previewContent },
+            activeEditorPathProvider = { "/tmp/project/docs/guide.md" },
+            delayedInvoker = { _, task -> task() },
+        )
+
+        factory.recordManualPreviewScroll(project)
+        val scheduled = factory.scheduleScrollSync(
+            project = project,
+            runtimeService = service,
+            previewContent = previewContent,
+            selectedPath = "/tmp/project/docs/guide.md",
+            document = document,
+            editorTopPx = 120.0,
+            viewportHeightPx = 500.0,
+            lineHeightPx = 20,
+            rawDelta = 80,
+        )
+
+        assertFalse(scheduled)
+        assertTrue(previewContent.scrolledYValues().isEmpty())
     }
 
     @Test

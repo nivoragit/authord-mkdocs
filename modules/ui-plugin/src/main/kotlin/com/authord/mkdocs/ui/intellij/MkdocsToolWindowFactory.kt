@@ -76,7 +76,6 @@ import javax.swing.JPanel
 import javax.swing.JScrollPane
 import javax.swing.SwingUtilities
 import kotlin.io.path.name
-import kotlin.math.abs
 import kotlin.math.roundToInt
 
 private val LOG = Logger.getInstance(MkdocsToolWindowFactory::class.java)
@@ -189,8 +188,8 @@ class MkdocsToolWindowFactory(
     private val typingGenerationByProject = ConcurrentHashMap<String, AtomicInteger>()
     private val lastTypingTimestampByProject = ConcurrentHashMap<String, Long>()
     private val typingScrollGuardMs: Long = 800L
-    private val userScrollLatchByProject = ConcurrentHashMap<String, Boolean>()
-    private val lastSyncedEditorTopByProject = ConcurrentHashMap<String, Double>()
+    private val manualPreviewScrollAtByProject = ConcurrentHashMap<String, Long>()
+    private val manualPreviewPriorityMs: Long = 1200L
     private val topicTreePanelsByProject = ConcurrentHashMap<String, TopicTreeWorkspacePanel>()
     private val topicTreeControllersByProject = ConcurrentHashMap<String, TopicTreeControllers>()
     private val topicTreeUiServicesByProject = ConcurrentHashMap<String, TopicTreeUiService>()
@@ -241,8 +240,7 @@ class MkdocsToolWindowFactory(
             shellLayoutModeByProject.remove(projectKey)
             typingGenerationByProject.remove(project.locationHash)
             lastTypingTimestampByProject.remove(project.locationHash)
-            userScrollLatchByProject.remove(project.locationHash)
-            lastSyncedEditorTopByProject.remove(project.locationHash)
+            manualPreviewScrollAtByProject.remove(project.locationHash)
             topicTreePanelsByProject.remove(project.locationHash)
             topicTreeControllersByProject.remove(project.locationHash)
             topicTreeUiServicesByProject.remove(project.locationHash)
@@ -1343,7 +1341,7 @@ class MkdocsToolWindowFactory(
         lifecycleDisposable: Disposable,
     ) {
         previewContent.setManualScrollListener {
-            userScrollLatchByProject[project.locationHash] = true
+            recordManualPreviewScroll(project)
         }
         Disposer.register(lifecycleDisposable, Disposable {
             previewContent.setManualScrollListener(null)
@@ -1619,20 +1617,9 @@ class MkdocsToolWindowFactory(
             return false
         }
         val projectKey = project.locationHash
-        val userActive = userScrollLatchByProject[projectKey] ?: false
-        val lastTop = lastSyncedEditorTopByProject[projectKey] ?: Double.NaN
-
-        if (userActive) {
-            // Latch Logic: If user is interacting with preview, only break the latch if editor moves significantly (> 3 lines)
-            val threshold = (lineHeightPx * 3).toDouble()
-            if (!lastTop.isNaN() && abs(editorTopPx - lastTop) < threshold) {
-                 return false
-            }
-            // Editor moved significantly, reset latch
-            userScrollLatchByProject[projectKey] = false
+        if (isManualPreviewScrollActive(projectKey)) {
+            return false
         }
-
-        lastSyncedEditorTopByProject[projectKey] = editorTopPx
 
         val lastTyping = lastTypingTimestampByProject[project.locationHash] ?: 0L
         if (System.currentTimeMillis() - lastTyping < typingScrollGuardMs) {
@@ -1654,6 +1641,26 @@ class MkdocsToolWindowFactory(
         }
 
         return true
+    }
+
+    internal fun recordManualPreviewScroll(project: Project) {
+        val projectKey = project.locationHash
+        val timestamp = System.currentTimeMillis()
+        manualPreviewScrollAtByProject[projectKey] = timestamp
+        delayedInvoker(manualPreviewPriorityMs) {
+            if (project.isDisposed) {
+                return@delayedInvoker
+            }
+            val lastManual = manualPreviewScrollAtByProject[projectKey] ?: return@delayedInvoker
+            if (System.currentTimeMillis() - lastManual >= manualPreviewPriorityMs) {
+                manualPreviewScrollAtByProject.remove(projectKey, lastManual)
+            }
+        }
+    }
+
+    private fun isManualPreviewScrollActive(projectKey: String): Boolean {
+        val lastManual = manualPreviewScrollAtByProject[projectKey] ?: return false
+        return System.currentTimeMillis() - lastManual < manualPreviewPriorityMs
     }
 
     private fun isSamePath(left: String, right: String): Boolean {
