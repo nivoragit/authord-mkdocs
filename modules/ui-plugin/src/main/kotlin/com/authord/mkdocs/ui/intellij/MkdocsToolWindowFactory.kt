@@ -1304,11 +1304,11 @@ class MkdocsToolWindowFactory(
         visibleAreaListenerRegistrar(
             project,
             /**
-             * Tracks editor viewport movement for percentage-based preview scroll sync.
+             * Tracks editor viewport movement for top-edge preview scroll sync.
              */
             object : VisibleAreaListener {
                 /**
-                 * Applies viewport-derived progress to preview scroll position.
+                 * Applies editor top-edge mapping to preview scroll position.
                  */
                 override fun visibleAreaChanged(event: VisibleAreaEvent) {
                     val virtualFile = FileDocumentManager.getInstance().getFile(event.editor.document) ?: return
@@ -1593,7 +1593,7 @@ class MkdocsToolWindowFactory(
 
     /**
      * Schedules smooth preview scroll from editor-visible area events.
-     * Mapping rule: editor viewport center progress percentage is applied directly to preview.
+     * Mapping rule: editor top-edge position maps directly to preview top-edge position.
      */
     internal fun scheduleScrollSync(
         project: Project,
@@ -2412,12 +2412,8 @@ private class JcefPreviewContent(
                 // Calculate total scrollable height
                 const totalHeight = Math.max(0, root.scrollHeight - window.innerHeight);
                 
-                // Ratio-matched sync:
-                // We want to map the editor's 35% focus line to the preview's 35% line.
-                // However, 'progress' here is usually a raw percentage of the total document.
-                // For 'scrollToProgress', we typically just map 0..1 to 0..maxScroll.
-                // The ratio matching is more critical in 'scrollToY' which deals with pixel anchors.
-                // But for pure percentage scrolling (fallback), we should also respect the viewport.
+                // Fallback normalized sync:
+                // `progress` is a top-edge ratio in [0..1], so map it directly to scrollable height.
                 
                 const target = totalHeight * targetProgress;
                 
@@ -2447,15 +2443,9 @@ private class JcefPreviewContent(
                 const token = Number(${token});
                 const root = document.scrollingElement || document.documentElement || document.body;
                 if (!root) return;
-                
-                // Ratio-Matched Sync:
-                // The editor calculates 'rawTarget' as the Y position of the element at the 35% focus line.
-                // To align that element to the *preview's* 35% line, we must subtract 35% of the viewport height.
-                const viewportOffset = window.innerHeight * 0.35;
-                const effectiveTarget = rawTarget - viewportOffset;
-                
+
                 const maxScroll = Math.max(0, root.scrollHeight - window.innerHeight);
-                const safeTarget = Math.min(Math.max(effectiveTarget, 0), maxScroll);
+                const safeTarget = Math.min(Math.max(rawTarget, 0), maxScroll);
                 
                 window.__authordIsSyncing = true;
                 if (window.__authordSyncResetTimer) {

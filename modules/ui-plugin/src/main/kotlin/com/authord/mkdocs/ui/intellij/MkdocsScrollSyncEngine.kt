@@ -128,7 +128,7 @@ private data class FenceRegion(
 internal class MkdocsScrollSyncEngine(
     private val delayedInvoker: (delayMillis: Long, task: () -> Unit) -> Unit,
     private val mapRebuildDebounceMs: Long = 120L,
-    private val editorFocusRatio: Double = 0.35,
+    private val editorFocusRatio: Double = 0.0,
     private val pixelHysteresisPx: Double = 16.0,
     private val syncTokenTtlMs: Long = 120L,
     private val minAnchorConfidence: Double = 0.82,
@@ -320,8 +320,8 @@ internal class MkdocsScrollSyncEngine(
             return coarseFallback(source, editorScrollTopPx, editorViewportHeightPx, lineHeightPx)
         }
 
-        val editorFocusY = editorScrollTopPx + editorViewportHeightPx * editorFocusRatio
-        val mappedPreviewY = interpolate(activeState.knots, editorFocusY)
+        val editorReferenceY = editorScrollTopPx + editorViewportHeightPx * editorFocusRatio
+        val mappedPreviewY = interpolate(activeState.knots, editorReferenceY)
             .coerceIn(0.0, activeState.maxPreviewScrollY.coerceAtLeast(0.0))
 
         val lastSent = activeState.lastSentPreviewY
@@ -356,8 +356,8 @@ internal class MkdocsScrollSyncEngine(
             return null
         }
 
-        val editorFocusY = editorScrollTopPx + editorViewportHeightPx * editorFocusRatio
-        val ratio = (editorFocusY / totalEditorHeight).coerceIn(0.0, 1.0)
+        val editorReferenceY = editorScrollTopPx + editorViewportHeightPx * editorFocusRatio
+        val ratio = (editorReferenceY / totalEditorHeight).coerceIn(0.0, 1.0)
         val mappedPreviewY = (ratio * current.maxPreviewScrollY).coerceIn(0.0, current.maxPreviewScrollY.coerceAtLeast(0.0))
         val lastSent = current.lastSentPreviewY
         if (lastSent.isFinite() && abs(mappedPreviewY - lastSent) < pixelHysteresisPx) {
