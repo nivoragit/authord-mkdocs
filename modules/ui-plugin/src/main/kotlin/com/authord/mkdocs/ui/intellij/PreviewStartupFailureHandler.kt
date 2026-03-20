@@ -21,6 +21,7 @@ internal class PreviewStartupFailureHandler(
         selectedPath: String?,
         onRetry: (() -> Unit)? = null,
     ) {
+        val exactErrorExcerpt = extractExactErrorExcerpt(result.message)
         val failure = PreviewStartupFailureClassifier.classify(
             result.message.ifBlank { "Preview start failed." },
         )
@@ -51,6 +52,7 @@ internal class PreviewStartupFailureHandler(
             project = project,
             failure = failure,
             configPath = configPath,
+            exactErrorExcerpt = exactErrorExcerpt,
             onRetry = wrappedRetry,
         )
     }

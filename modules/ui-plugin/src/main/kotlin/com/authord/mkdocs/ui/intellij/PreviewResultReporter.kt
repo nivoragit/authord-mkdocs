@@ -60,6 +60,7 @@ internal fun formatPreviewResultMessage(result: ActivationResult): String {
         val failure = PreviewStartupFailureClassifier.classify(
             result.message.ifBlank { "Preview start failed." },
         )
+        val exactErrorExcerpt = extractExactErrorExcerpt(result.message)
         return buildString {
             append("Authord preview failed to start. ")
             append("Reason: ")
@@ -67,6 +68,14 @@ internal fun formatPreviewResultMessage(result: ActivationResult): String {
             append(" ")
             append("Next step: ")
             append(failure.nextStep)
+            if (exactErrorExcerpt.isNotBlank()) {
+                append("\n")
+                append("Exact error (truncated):")
+                append("\n")
+                append(exactErrorExcerpt)
+            }
+            append("\n")
+            append("For full details, open runtime logs (idea.log).")
         }
     }
 

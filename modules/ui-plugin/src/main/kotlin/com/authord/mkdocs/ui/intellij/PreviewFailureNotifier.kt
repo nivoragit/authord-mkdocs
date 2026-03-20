@@ -20,6 +20,7 @@ internal class PreviewFailureNotifier(
         project: Project,
         failure: PreviewStartupFailure,
         configPath: String?,
+        exactErrorExcerpt: String? = null,
         onRetry: (() -> Unit)? = null,
     ) {
         val fingerprint = fingerprint(failure, configPath)
@@ -32,6 +33,7 @@ internal class PreviewFailureNotifier(
             PreviewFailureNotificationPayload(
                 failure = failure,
                 configPath = configPath,
+                exactErrorExcerpt = exactErrorExcerpt?.trim().orEmpty().ifBlank { null },
                 onRetry = onRetry,
             ),
         )
@@ -66,6 +68,7 @@ internal class PreviewFailureNotifier(
 internal data class PreviewFailureNotificationPayload(
     val failure: PreviewStartupFailure,
     val configPath: String?,
+    val exactErrorExcerpt: String?,
     val onRetry: (() -> Unit)?,
 )
 
@@ -78,6 +81,13 @@ private fun emitFailureNotification(project: Project, payload: PreviewFailureNot
         append("\n")
         append("Next step: ")
         append(failure.nextStep)
+        payload.exactErrorExcerpt?.let { excerpt ->
+            append("\n")
+            append("Exact error (truncated):\n")
+            append(excerpt)
+        }
+        append("\n")
+        append("For full details, open runtime logs (idea.log).")
     }
 
     println("[Authord][ERROR][${project.name}] $message")
@@ -136,4 +146,3 @@ private fun openRuntimeLog(project: Project) {
     val logPath = Path.of(PathManager.getLogPath()).resolve("idea.log")
     openPathInEditor(project, logPath.toString())
 }
-

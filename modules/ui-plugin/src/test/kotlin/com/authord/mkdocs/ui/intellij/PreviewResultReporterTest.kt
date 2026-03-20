@@ -49,6 +49,26 @@ class PreviewResultReporterTest {
     }
 
     @Test
+    fun `formats failure message with truncated exact error excerpt`() {
+        val result = ActivationResult(
+            success = false,
+            reason = ActivationFailureReason.START_FAILED,
+            message = """
+                Preview server failed to start. Details: Authord process exited before readiness probe succeeded.
+                stderr tail:
+                Traceback (most recent call last):
+                ModuleNotFoundError: No module named 'material'
+            """.trimIndent(),
+        )
+
+        val formatted = formatPreviewResultMessage(result)
+
+        assertTrue(formatted.contains("Exact error (truncated):"))
+        assertTrue(formatted.contains("ModuleNotFoundError"))
+        assertTrue(formatted.contains("idea.log"))
+    }
+
+    @Test
     fun `formats fallback failure message when activation message is blank`() {
         val result = ActivationResult(
             success = false,
