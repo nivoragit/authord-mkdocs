@@ -507,7 +507,7 @@ internal class TopicTreeWorkspacePanel(
     }
 
     private fun collapseAllTopics() {
-        for (row in tree.rowCount - 1 downTo 1) {
+        for (row in tree.rowCount - 1 downTo 0) {
             tree.collapseRow(row)
         }
         publishStatus(uiMessage("topicTree.status.collapsedAll"))
@@ -1467,6 +1467,11 @@ internal class TopicTreeWorkspacePanel(
     internal fun selectedTreeNodeIdForTest(): String? {
         val selectedNode = tree.selectionPath?.lastPathComponent as? DefaultMutableTreeNode ?: return null
         return (selectedNode.userObject as? TopicTreeNodeView)?.nodeId
+    }
+
+    internal fun isTreeNodeExpandedForTest(nodeId: String): Boolean {
+        val node = findNode(nodeId) ?: return false
+        return tree.isExpanded(TreePath(node.path))
     }
 
     internal fun childNodeIdsForTest(parentNodeId: String): List<String> {

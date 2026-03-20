@@ -85,6 +85,20 @@ class TopicTreeWorkspacePanelUiContractTest {
     }
 
     @Test
+    fun `collapse all header action collapses first visible toc node`() {
+        val panel = panelWithDefaults()
+        panel.render(sampleNavConvertedSectionState())
+        assertTrue(panel.triggerHeaderActionForTest("Expand All"))
+        assertTrue(panel.isTreeNodeExpandedForTest("child"))
+
+        val triggered = panel.triggerHeaderActionForTest("Collapse All")
+
+        assertTrue(triggered)
+        assertFalse(panel.isTreeNodeExpandedForTest("child"))
+        assertEquals("Collapsed all topics", panel.statusTextForTest())
+    }
+
+    @Test
     fun `sync toc and editor header action reports unavailable without project`() {
         val panel = panelWithDefaults()
 
