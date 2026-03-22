@@ -17,7 +17,7 @@ Validate plugin-shell cycle delivery for R-01..R-06: build setup, descriptor wir
 ## 2) Build and plugin setup checks (R-01)
 
 1. Verify `build.gradle.kts` declares IntelliJ Gradle plugin dependency.
-2. Verify `modules/ui-plugin/build.gradle.kts` includes IntelliJ target configuration.
+2. Verify `build.gradle.kts` includes IntelliJ target configuration.
 3. Verify `gradle.properties` includes:
 - `platformType`
 - `platformVersion`
@@ -26,7 +26,7 @@ Validate plugin-shell cycle delivery for R-01..R-06: build setup, descriptor wir
 
 ## 3) Descriptor checks (R-02)
 
-Verify `modules/ui-plugin/src/main/resources/META-INF/plugin.xml` contains:
+Verify `src/main/resources/META-INF/plugin.xml` contains:
 1. `<depends>com.intellij.modules.platform</depends>`
 2. tool-window registration for `MkdocsToolWindowFactory`
 3. action registration for `StartMkdocsAction`
@@ -42,7 +42,7 @@ GRADLE_USER_HOME=$PWD/.gradle-user ./gradlew test jacocoTestCoverageVerification
 2. Launch plugin sandbox IDE:
 
 ```bash
-GRADLE_USER_HOME=$PWD/.gradle-user ./gradlew :modules:ui-plugin:runIde --no-daemon
+GRADLE_USER_HOME=$PWD/.gradle-user ./gradlew runIde --no-daemon
 ```
 
 3. In launched IDE, verify smoke checklist:
