@@ -12,6 +12,46 @@ import kotlin.test.fail
 
 class MkDocsYamlGatewayRoundTripTest {
     @Test
+    fun `load and write preserve python-tagged scalars`() {
+        val projectRoot = Files.createTempDirectory("mkdocs-python-tagged-scalars")
+        val configPath = projectRoot.resolve("mkdocs.yml")
+        Files.writeString(
+            configPath,
+            """
+            site_name: Demo Site
+            docs_dir: docs
+            nav:
+              - Home: index.md
+            markdown_extensions:
+              - pymdownx.emoji:
+                  emoji_index: !!python/name:materialx.emoji.twemoji
+                  emoji_generator: !!python/name:materialx.emoji.to_svg
+            extra:
+              module_ref: !!python/module:materialx.emoji
+            """.trimIndent() + "\n",
+        )
+
+        val instance = TopicInstanceRef(
+            instanceId = "default",
+            configPath = configPath.toString(),
+            docsDirPath = projectRoot.resolve("docs").toString(),
+        )
+        val gateway = MkDocsYamlGateway()
+        val loaded = requireSuccess(gateway.loadConfig(instance))
+
+        val updated = loaded.copy(
+            nav = loaded.nav + TopicNavNode(nodeId = "n1", title = "Guide", path = "guide.md"),
+        )
+        requireSuccess(gateway.writeConfig(instance, updated))
+
+        val written = Files.readString(configPath)
+        assertTrue(written.contains("python/name:materialx.emoji.twemoji"))
+        assertTrue(written.contains("python/name:materialx.emoji.to_svg"))
+        assertTrue(written.contains("python/module:materialx.emoji"))
+        assertTrue(written.contains("- Guide: guide.md"))
+    }
+
+    @Test
     fun `roundtrip parse and deterministic serialization keeps site_name docs_dir nav and not_in_nav`() {
         val projectRoot = Files.createTempDirectory("mkdocs-roundtrip")
         val configPath = projectRoot.resolve("mkdocs.yml")

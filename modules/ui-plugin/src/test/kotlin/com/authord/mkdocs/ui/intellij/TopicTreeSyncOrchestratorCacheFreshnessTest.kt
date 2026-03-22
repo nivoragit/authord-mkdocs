@@ -20,6 +20,80 @@ import kotlin.test.fail
 
 class TopicTreeSyncOrchestratorCacheFreshnessTest {
     @Test
+    fun `no-nav cache reloads after external config gains nav section`() {
+        val root = Files.createTempDirectory("orchestrator-freshness-no-nav-to-nav")
+        val configPath = root.resolve("mkdocs.yml")
+        val docsDir = Files.createDirectories(root.resolve("docs"))
+        try {
+            Files.writeString(
+                docsDir.resolve("index.md"),
+                "# Home\n",
+            )
+            Files.writeString(
+                configPath,
+                """
+                docs_dir: docs
+                """.trimIndent() + "\n",
+            )
+            val instance = TopicInstanceRef(
+                instanceId = "default",
+                configPath = configPath.toString(),
+                docsDirPath = docsDir.toString(),
+            )
+            val orchestrator = TopicTreeSyncOrchestratorService(
+                topicTreePort = AlwaysSuccessTopicTreePort(),
+                mkDocsConfigGateway = MkDocsYamlGateway(),
+                docsFileGateway = NoopDocsGateway(),
+            )
+
+            requireSuccess(
+                orchestrator.apply(
+                    TopicSyncTransaction(
+                        transactionId = "tx-prime-no-nav-cache",
+                        instance = instance,
+                        command = ValidateTopicTreeCommand("cmd-prime-no-nav-cache", "tree"),
+                    ),
+                ),
+            )
+
+            Thread.sleep(20L)
+            Files.writeString(
+                configPath,
+                """
+                docs_dir: docs
+                nav:
+                  - Home: index.md
+                """.trimIndent() + "\n",
+            )
+
+            val outcome = requireSuccess(
+                orchestrator.apply(
+                    TopicSyncTransaction(
+                        transactionId = "tx-no-nav-to-nav-reload",
+                        instance = instance,
+                        command = AddChildTopicNodeCommand(
+                            commandId = "cmd-no-nav-to-nav-reload",
+                            treeId = "tree",
+                            targetNodeId = "n-0",
+                            childNodeId = "child",
+                            childTitle = "Child",
+                            childOrderIndex = 1,
+                            childSourcePath = "home/child.md",
+                        ),
+                    ),
+                ),
+            )
+
+            assertTrue(outcome.applied)
+            val persisted = Files.readString(configPath)
+            assertTrue(persisted.contains("nav:"))
+            assertTrue(persisted.contains("home/child.md"))
+        } finally {
+            root.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `nav-present cache reloads after external config file change`() {
         val root = Files.createTempDirectory("orchestrator-freshness")
         val configPath = root.resolve("mkdocs.yml")

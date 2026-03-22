@@ -11,6 +11,14 @@ import org.yaml.snakeyaml.DumperOptions
 import org.yaml.snakeyaml.LoaderOptions
 import org.yaml.snakeyaml.Yaml
 import org.yaml.snakeyaml.constructor.SafeConstructor
+import org.yaml.snakeyaml.nodes.MappingNode
+import org.yaml.snakeyaml.nodes.Node
+import org.yaml.snakeyaml.nodes.ScalarNode
+import org.yaml.snakeyaml.nodes.SequenceNode
+import org.yaml.snakeyaml.nodes.Tag
+import org.yaml.snakeyaml.inspector.TagInspector
+import org.yaml.snakeyaml.representer.Represent
+import org.yaml.snakeyaml.representer.Representer
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
@@ -21,6 +29,33 @@ import java.nio.file.StandardCopyOption
  * YAML-backed implementation of [MkDocsConfigGateway] with deterministic serialization.
  */
 class MkDocsYamlGateway : MkDocsConfigGateway {
+    private data class TaggedYamlValue(
+        val tag: String,
+        val value: Any?,
+    )
+
+    private class TaggedYamlRepresenter(options: DumperOptions) : Representer(options) {
+        init {
+            representers[TaggedYamlValue::class.java] = RepresentTaggedYamlValue()
+        }
+
+        private inner class RepresentTaggedYamlValue : Represent {
+            override fun representData(data: Any?): Node {
+                val tagged = data as TaggedYamlValue
+                val tag = Tag(tagged.tag)
+                return when (val value = tagged.value) {
+                    is Map<*, *> -> representMapping(tag, value, DumperOptions.FlowStyle.BLOCK)
+                    is Iterable<*> -> representSequence(tag, value, DumperOptions.FlowStyle.BLOCK)
+                    else -> representScalar(tag, value?.toString() ?: "")
+                }
+            }
+        }
+    }
+
+    private class StandardScalarConstructor(loaderOptions: LoaderOptions) : SafeConstructor(loaderOptions) {
+        fun constructStandardScalar(node: ScalarNode): Any? = constructObject(node)
+    }
+
     /**
      * Loads and normalizes MkDocs config content for the active instance.
      */
@@ -33,19 +68,23 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
         }
 
         return runCatching {
+            val loaderOptions = LoaderOptions().apply {
+                tagInspector = TagInspector { true }
+            }
+            val scalarConstructor = StandardScalarConstructor(loaderOptions)
             val root = Files.newBufferedReader(configPath).use { reader ->
-                Yaml(SafeConstructor(LoaderOptions())).load<Any?>(reader)
+                Yaml(loaderOptions).compose(reader)
             }
 
-            val map = (root as? Map<*, *>) ?: emptyMap<String, Any>()
+            val map = (root?.let { convertNode(it, scalarConstructor) } as? Map<*, *>) ?: emptyMap<String, Any>()
             val rawYaml = linkedMapOf<String, Any?>()
             map.forEach { (key, value) ->
                 key?.toString()?.let { normalizedKey ->
                     rawYaml[normalizedKey] = value
                 }
             }
-            val docsDir = map["docs_dir"]?.toString()?.trim().orEmpty().ifBlank { "docs" }
-            val siteName = map["site_name"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+            val docsDir = unwrapTaggedScalar(map["docs_dir"])?.toString()?.trim().orEmpty().ifBlank { "docs" }
+            val siteName = unwrapTaggedScalar(map["site_name"])?.toString()?.trim()?.takeIf { it.isNotEmpty() }
             val navPresent = map.containsKey("nav")
             val nav = parseNav(map["nav"], "n")
             val notInNav = parseStringList(map["not_in_nav"])
@@ -159,7 +198,8 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
                 width = 160
             }
 
-            Yaml(options).dump(root).trimEnd() + "\n"
+            val representer = TaggedYamlRepresenter(options)
+            Yaml(representer, options).dump(root).trimEnd() + "\n"
         }.fold(
             onSuccess = { TopicGatewayResult.Success(it) },
             onFailure = {
@@ -185,7 +225,7 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
             is Map<*, *> -> {
                 val first = rawEntry.entries.firstOrNull() ?: return null
                 val title = first.key?.toString()?.trim().orEmpty().ifBlank { return null }
-                when (val value = first.value) {
+                when (val value = unwrapTaggedScalar(first.value)) {
                     is String -> {
                         val normalized = normalizePath(value)
                         val external = normalized.takeIf { isExternalUrl(it) }
@@ -229,7 +269,7 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
     private fun parseStringList(raw: Any?): List<String> {
         val values = raw as? List<*> ?: return emptyList()
         return values.mapNotNull { value ->
-            value?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::normalizePath)
+            unwrapTaggedScalar(value)?.toString()?.trim()?.takeIf { it.isNotEmpty() }?.let(::normalizePath)
         }
     }
 
@@ -256,5 +296,58 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
 
     private fun normalizePath(path: String): String {
         return path.replace('\\', '/').trim()
+    }
+
+    private fun convertNode(node: Node, scalarConstructor: StandardScalarConstructor): Any? {
+        return when (node) {
+            is MappingNode -> {
+                val map = linkedMapOf<String, Any?>()
+                node.value.forEach { tuple ->
+                    val key = convertNodeKey(tuple.keyNode, scalarConstructor) ?: return@forEach
+                    map[key] = convertNode(tuple.valueNode, scalarConstructor)
+                }
+                if (Tag.standardTags.contains(node.tag)) {
+                    map
+                } else {
+                    TaggedYamlValue(node.tag.value, map)
+                }
+            }
+
+            is SequenceNode -> {
+                val sequence = node.value.map { child -> convertNode(child, scalarConstructor) }
+                if (Tag.standardTags.contains(node.tag)) {
+                    sequence
+                } else {
+                    TaggedYamlValue(node.tag.value, sequence)
+                }
+            }
+
+            is ScalarNode -> {
+                if (!Tag.standardTags.contains(node.tag)) {
+                    TaggedYamlValue(node.tag.value, node.value)
+                } else {
+                    scalarConstructor.constructStandardScalar(node)
+                }
+            }
+
+            else -> null
+        }
+    }
+
+    private fun convertNodeKey(node: Node, scalarConstructor: StandardScalarConstructor): String? {
+        return when (node) {
+            is ScalarNode -> node.value.trim().takeIf { it.isNotEmpty() }
+            else -> convertNode(node, scalarConstructor)?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        }
+    }
+
+    private fun unwrapTaggedScalar(value: Any?): Any? {
+        val tagged = value as? TaggedYamlValue ?: return value
+        return when (val wrapped = tagged.value) {
+            is Map<*, *>,
+            is Iterable<*>,
+            -> value
+            else -> wrapped
+        }
     }
 }

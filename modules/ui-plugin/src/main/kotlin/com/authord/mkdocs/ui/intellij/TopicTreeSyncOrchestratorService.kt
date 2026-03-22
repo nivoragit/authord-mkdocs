@@ -209,13 +209,14 @@ class TopicTreeSyncOrchestratorService(
         val instanceId = transaction.instance.instanceId
         val cached = configStateByInstanceId[instanceId]
         if (cached != null) {
-            if (cached.navPresent) {
-                val cachedTimestamp = configFileTimestampByInstanceId[instanceId]
-                val currentTimestamp = currentConfigTimestamp(transaction.instance)
-                if (cachedTimestamp == null || currentTimestamp == null || cachedTimestamp == currentTimestamp) {
-                    return TopicGatewayResult.Success(cached)
-                }
-            } else {
+            val cachedTimestamp = configFileTimestampByInstanceId[instanceId]
+            val currentTimestamp = currentConfigTimestamp(transaction.instance)
+            val configTimestampChanged = cachedTimestamp != null &&
+                currentTimestamp != null &&
+                cachedTimestamp != currentTimestamp
+            if (cached.navPresent && !configTimestampChanged) {
+                return TopicGatewayResult.Success(cached)
+            } else if (!cached.navPresent && !configTimestampChanged) {
                 val refreshed = hydrateNoNavConfigFromDocs(
                     instance = transaction.instance,
                     loadedConfig = cached,
@@ -229,7 +230,7 @@ class TopicTreeSyncOrchestratorService(
                 rememberConfigState(
                     instanceId = instanceId,
                     document = rebased,
-                    configTimestampMillis = currentConfigTimestamp(transaction.instance),
+                    configTimestampMillis = currentTimestamp,
                 )
                 return TopicGatewayResult.Success(rebased)
             }
