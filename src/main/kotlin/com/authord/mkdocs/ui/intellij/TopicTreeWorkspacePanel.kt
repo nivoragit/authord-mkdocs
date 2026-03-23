@@ -1217,18 +1217,11 @@ internal class TopicTreeWorkspacePanel(
             return ""
         }
 
-        val noNavFolderHierarchy = currentState?.source == StartupTreeSource.FALLBACK
-        if (noNavFolderHierarchy) {
-            sectionDirectoryFromNodeId(parentView.nodeId)?.let { return it }
-        }
+        sectionDirectoryFromNodeId(parentView.nodeId)?.let { return it }
 
         val directPath = normalizeOptionalPath(parentView.path)
         if (directPath != null) {
-            return if (noNavFolderHierarchy) {
-                deriveNoNavDirectoryFromPagePath(directPath)
-            } else {
-                directPath.substringBeforeLast('/', "")
-            }
+            return deriveNoNavDirectoryFromPagePath(directPath)
         }
 
         val childPath = firstPathInSubtree(parentNode)

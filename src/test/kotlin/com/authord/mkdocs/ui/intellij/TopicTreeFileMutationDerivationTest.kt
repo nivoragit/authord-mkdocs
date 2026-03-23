@@ -18,6 +18,7 @@ import com.authord.mkdocs.ports.topic.TopicSyncTransaction
 import com.authord.mkdocs.ports.topic.TopicTreeCommand
 import com.authord.mkdocs.ports.topic.TopicTreeCommandResult
 import com.authord.mkdocs.ports.topic.TopicTreeCommandStatus
+import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
@@ -180,6 +181,77 @@ class TopicTreeFileMutationDerivationTest {
     }
 
     @Test
+    fun `nav child then child-of-child creates folder hierarchy and persists config`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(
+                        nodeId = "home",
+                        title = "Home",
+                        path = "index.md",
+                    ),
+                ),
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val firstOutcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-nav-child-1",
+                    instance = instance,
+                    command = AddChildTopicNodeCommand(
+                        commandId = "cmd-nav-child-1",
+                        treeId = "default",
+                        targetNodeId = "home",
+                        childNodeId = "install",
+                        childTitle = "Install",
+                        childOrderIndex = 1,
+                        childSourcePath = null,
+                    ),
+                ),
+            ),
+        )
+        assertTrue(firstOutcome.applied)
+
+        val secondOutcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-nav-child-2",
+                    instance = instance,
+                    command = AddChildTopicNodeCommand(
+                        commandId = "cmd-nav-child-2",
+                        treeId = "default",
+                        targetNodeId = "install",
+                        childNodeId = "advanced",
+                        childTitle = "Advanced",
+                        childOrderIndex = 1,
+                        childSourcePath = null,
+                    ),
+                ),
+            ),
+        )
+        assertTrue(secondOutcome.applied)
+
+        assertEquals(
+            listOf(
+                "create:install.md",
+                "move:install.md->install/index.md",
+                "rewrite:install.md->install/index.md",
+                "create:install/advanced.md",
+            ),
+            docsGateway.calls,
+        )
+        assertEquals(2, configGateway.writes.size)
+        val home = configGateway.writes.last().nav.single { it.nodeId == "home" }
+        val install = home.children.single { it.nodeId == "install" }
+        assertEquals(null, install.path)
+        assertEquals(listOf("install/index.md", "install/advanced.md"), install.children.map { it.path })
+    }
+
+    @Test
     fun `no-nav child-of-child after fallback-style rehydrate preserves folder hierarchy without config writes`() {
         val configGateway = MutableConfigGatewayForDerivation(
             MkDocsConfigDocument(
@@ -268,7 +340,61 @@ class TopicTreeFileMutationDerivationTest {
     }
 
     @Test
-    fun `no-nav rename section alias rewrites folder markdown paths without config writes and without heading sync`() {
+    fun `nav add child succeeds when parent markdown source is missing on disk`() {
+        val projectRoot = Files.createTempDirectory("nav-add-child-missing-source-")
+        try {
+            val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
+            val instance = TopicInstanceRef(
+                instanceId = "default",
+                configPath = projectRoot.resolve("mkdocs.yml").toString(),
+                docsDirPath = docsDir.toString(),
+            )
+            val configGateway = MutableConfigGatewayForDerivation(
+                MkDocsConfigDocument(
+                    docsDir = "docs",
+                    nav = listOf(
+                        TopicNavNode(
+                            nodeId = "missing-node",
+                            title = "Missing",
+                            path = "missing.md",
+                        ),
+                    ),
+                ),
+            )
+            val docsGateway = RecordingDocsGatewayForDerivation()
+            val orchestrator = orchestrator(configGateway, docsGateway)
+
+            val outcome = requireSuccess(
+                orchestrator.apply(
+                    TopicSyncTransaction(
+                        transactionId = "tx-nav-missing-source-add-child",
+                        instance = instance,
+                        command = AddChildTopicNodeCommand(
+                            commandId = "cmd-nav-missing-source-add-child",
+                            treeId = "default",
+                            targetNodeId = "missing-node",
+                            childNodeId = "missing-child",
+                            childTitle = "Child",
+                            childOrderIndex = 1,
+                            childSourcePath = null,
+                        ),
+                    ),
+                ),
+            )
+
+            assertTrue(outcome.applied)
+            assertEquals(listOf("create:missing/child.md"), docsGateway.calls)
+            val writtenRoot = configGateway.writes.last().nav.single()
+            assertEquals("Missing", writtenRoot.title)
+            assertEquals(null, writtenRoot.path)
+            assertEquals(listOf("missing/index.md", "missing/child.md"), writtenRoot.children.map { it.path })
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `no-nav rename section alias updates title without renaming files or syncing heading`() {
         val configGateway = MutableConfigGatewayForDerivation(
             MkDocsConfigDocument(
                 docsDir = "docs",
@@ -304,21 +430,13 @@ class TopicTreeFileMutationDerivationTest {
         )
 
         assertTrue(outcome.applied)
-        assertEquals(
-            setOf(
-                "rename:install/index.md->guides/index.md",
-                "rewrite:install/index.md->guides/index.md",
-                "rename:install/a1.md->guides/a1.md",
-                "rewrite:install/a1.md->guides/a1.md",
-            ),
-            docsGateway.calls.toSet(),
-        )
+        assertTrue(docsGateway.calls.isEmpty())
         assertTrue(docsGateway.headingUpdates.isEmpty())
         assertTrue(configGateway.writes.isEmpty())
     }
 
     @Test
-    fun `rename section in nav mode updates nav title without renaming file or syncing heading`() {
+    fun `rename section in nav mode updates nav title without renaming files or syncing heading`() {
         val configGateway = MutableConfigGatewayForDerivation(
             MkDocsConfigDocument(
                 docsDir = "docs",
@@ -363,7 +481,9 @@ class TopicTreeFileMutationDerivationTest {
         assertTrue(outcome.applied)
         assertTrue(docsGateway.calls.isEmpty())
         assertTrue(docsGateway.headingUpdates.isEmpty())
-        assertEquals("How To", configGateway.writes.last().nav.single().title)
+        val written = configGateway.writes.last().nav.single()
+        assertEquals("How To", written.title)
+        assertEquals(listOf("guides/index.md", "guides/install.md"), written.children.map { it.path })
     }
 
     @Test

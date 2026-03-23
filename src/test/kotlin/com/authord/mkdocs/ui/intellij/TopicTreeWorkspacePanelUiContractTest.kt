@@ -157,6 +157,25 @@ class TopicTreeWorkspacePanelUiContractTest {
     }
 
     @Test
+    fun `nav child topic under non-index page auto-generates folder hierarchy path`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Install Guide", ""))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+            reconcileStateProvider = { sampleNavFlatPageState() },
+        )
+        panel.render(sampleNavFlatPageState())
+        assertTrue(panel.selectTreeNodeForTest("n2"))
+
+        val triggered = panel.triggerTocContextActionForTest("New Child Topic")
+
+        assertTrue(triggered)
+        val command = uiService.dispatched.filterIsInstance<AddChildTopicNodeCommand>().last()
+        assertEquals("guide/install-guide.md", command.childSourcePath)
+    }
+
+    @Test
     fun `new root child topic auto-generates markdown path when input left blank`() {
         val uiService = RecordingUiService()
         val prompts = ArrayDeque(listOf("Getting Started", ""))
@@ -421,6 +440,29 @@ class TopicTreeWorkspacePanelUiContractTest {
                 ),
             ),
             navOrderedPaths = listOf("index.md", "install.md"),
+            unlinkedPaths = emptyList(),
+            validationIssues = emptyList(),
+            destructiveChangesApplied = false,
+            instanceId = "default",
+        )
+    }
+
+    private fun sampleNavFlatPageState(): StartupTreeState {
+        return StartupTreeState(
+            source = StartupTreeSource.NAV,
+            nodes = listOf(
+                com.authord.mkdocs.ports.topic.TopicNavNode(
+                    nodeId = "n1",
+                    title = "Intro",
+                    path = "index.md",
+                ),
+                com.authord.mkdocs.ports.topic.TopicNavNode(
+                    nodeId = "n2",
+                    title = "Guide",
+                    path = "guide.md",
+                ),
+            ),
+            navOrderedPaths = listOf("index.md", "guide.md"),
             unlinkedPaths = emptyList(),
             validationIssues = emptyList(),
             destructiveChangesApplied = false,
