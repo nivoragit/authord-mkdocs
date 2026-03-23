@@ -1007,6 +1007,94 @@ class TopicTreeFileMutationDerivationTest {
         assertEquals(listOf("guides/install/index.md", "guides/install/a1.md"), moved.children.map { it.path })
     }
 
+    @Test
+    fun `move section into page parent preserves parent page as hidden child`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(
+                        nodeId = "deployment",
+                        title = "Deployment",
+                        path = "deployment.md",
+                    ),
+                    TopicNavNode(
+                        nodeId = "g2",
+                        title = "g2",
+                        children = listOf(
+                            TopicNavNode(
+                                nodeId = "g2-page",
+                                title = "g",
+                                path = "g2/index.md",
+                            ),
+                            TopicNavNode(
+                                nodeId = "g2-h",
+                                title = "h",
+                                children = listOf(
+                                    TopicNavNode(
+                                        nodeId = "g2-h-page",
+                                        title = "h",
+                                        path = "g2/h/index.md",
+                                    ),
+                                    TopicNavNode(
+                                        nodeId = "g2-h-a",
+                                        title = "a",
+                                        path = "g2/h/a.md",
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-move-section-into-page-parent",
+                    instance = instance,
+                    command = MoveTopicNodeCommand(
+                        commandId = "cmd-move-section-into-page-parent",
+                        treeId = "default",
+                        nodeId = "g2",
+                        newParentNodeId = "deployment",
+                        newOrderIndex = 0,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertEquals(
+            setOf(
+                "move:deployment.md->deployment/index.md",
+                "rewrite:deployment.md->deployment/index.md",
+                "move:g2/index.md->deployment/g2/index.md",
+                "rewrite:g2/index.md->deployment/g2/index.md",
+                "move:g2/h/index.md->deployment/g2/h/index.md",
+                "rewrite:g2/h/index.md->deployment/g2/h/index.md",
+                "move:g2/h/a.md->deployment/g2/h/a.md",
+                "rewrite:g2/h/a.md->deployment/g2/h/a.md",
+            ),
+            docsGateway.calls.toSet(),
+        )
+
+        val deployment = configGateway.writes.last().nav.single()
+        assertEquals("deployment", deployment.nodeId)
+        assertEquals(null, deployment.path)
+        assertEquals("deployment__page", deployment.children.first().nodeId)
+        assertEquals("deployment/index.md", deployment.children.first().path)
+
+        val moved = deployment.children.first { it.nodeId == "g2" }
+        assertEquals("deployment/g2/index.md", moved.children.first { it.nodeId == "g2-page" }.path)
+        val movedNested = moved.children.first { it.nodeId == "g2-h" }
+        assertEquals("deployment/g2/h/index.md", movedNested.children.first { it.nodeId == "g2-h-page" }.path)
+        assertEquals("deployment/g2/h/a.md", movedNested.children.first { it.nodeId == "g2-h-a" }.path)
+    }
+
     private fun orchestrator(
         configGateway: MutableConfigGatewayForDerivation,
         docsGateway: RecordingDocsGatewayForDerivation,

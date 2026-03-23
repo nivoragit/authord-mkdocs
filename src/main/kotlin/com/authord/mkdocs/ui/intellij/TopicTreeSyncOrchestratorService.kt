@@ -55,6 +55,12 @@ class TopicTreeSyncOrchestratorService(
         val parentNodeId: String?,
     )
 
+    private data class ParentInsertPreparationResult(
+        val document: MkDocsConfigDocument,
+        val orderIndex: Int,
+        val fileOperations: List<TopicFileOperation>,
+    )
+
     private val transactionOutcomes = ConcurrentHashMap<String, TopicSyncOutcome>()
     private val configStateByInstanceId = ConcurrentHashMap<String, MkDocsConfigDocument>()
     private val configFileTimestampByInstanceId = ConcurrentHashMap<String, Long>()
@@ -578,11 +584,97 @@ class TopicTreeSyncOrchestratorService(
             movingNode
         }
         val sourceDocument = document.copy(nav = effectiveWithoutSource)
-        return when (val inserted = insertNode(sourceDocument, newParentNodeId, nodeToInsert, adjustedOrderIndex)) {
+        val parentPreparation = when (
+            val prepared = prepareParentForChildInsert(
+                document = sourceDocument,
+                parentNodeId = newParentNodeId,
+                requestedOrderIndex = adjustedOrderIndex,
+            )
+        ) {
+            is TopicGatewayResult.Success -> prepared.value
+            is TopicGatewayResult.Failure -> return prepared
+        }
+        fileOperations += parentPreparation.fileOperations
+
+        return when (
+            val inserted = insertNode(
+                document = parentPreparation.document,
+                parentNodeId = newParentNodeId,
+                node = nodeToInsert,
+                orderIndex = parentPreparation.orderIndex,
+            )
+        ) {
             is TopicGatewayResult.Success -> {
                 successMutation(inserted.value, fileOperations)
             }
             is TopicGatewayResult.Failure -> inserted
+        }
+    }
+
+    private fun prepareParentForChildInsert(
+        document: MkDocsConfigDocument,
+        parentNodeId: String,
+        requestedOrderIndex: Int,
+    ): TopicGatewayResult<ParentInsertPreparationResult> {
+        if (parentNodeId == ROOT_NODE_ID) {
+            return TopicGatewayResult.Success(
+                ParentInsertPreparationResult(
+                    document = document,
+                    orderIndex = requestedOrderIndex,
+                    fileOperations = emptyList(),
+                ),
+            )
+        }
+
+        val parentContext = resolveNodeContext(document.nav, parentNodeId)
+            ?: return configFailure("Cannot locate parent node '$parentNodeId' in config nav")
+        val parent = parentContext.node
+        if (parent.path == null || parent.children.isNotEmpty()) {
+            return TopicGatewayResult.Success(
+                ParentInsertPreparationResult(
+                    document = document,
+                    orderIndex = requestedOrderIndex,
+                    fileOperations = emptyList(),
+                ),
+            )
+        }
+
+        val extraOps = mutableListOf<TopicFileOperation>()
+        val originalParentPath = normalizePath(parent.path)
+        val preservedPagePath = if (originalParentPath != null) {
+            val sectionIndexPath = ensureUniquePath(
+                basePath = joinPath(deriveNoNavDirectoryFromPagePath(originalParentPath), "index.md"),
+                existingPaths = collectAllPaths(document.nav) - originalParentPath,
+            )
+            if (sectionIndexPath != originalParentPath) {
+                extraOps += TopicFileOperation(TopicFileOperationKind.MOVE, originalParentPath, sectionIndexPath)
+                extraOps += TopicFileOperation(TopicFileOperationKind.REWRITE_LINKS, originalParentPath, sectionIndexPath)
+            }
+            sectionIndexPath
+        } else {
+            parent.path
+        }
+        val preservedPage = TopicNavNode(
+            nodeId = nextPreservedPageNodeId(parent),
+            title = parent.title,
+            path = preservedPagePath,
+        )
+        val convertedParent = parent.copy(
+            path = null,
+            externalUrl = null,
+            children = listOf(preservedPage),
+        )
+
+        return when (val replaced = replaceNode(document, convertedParent)) {
+            is TopicGatewayResult.Success -> TopicGatewayResult.Success(
+                ParentInsertPreparationResult(
+                    document = replaced.value,
+                    orderIndex = requestedOrderIndex.coerceAtLeast(1),
+                    fileOperations = extraOps,
+                ),
+            )
+
+            is TopicGatewayResult.Failure -> replaced
         }
     }
 
