@@ -656,6 +656,77 @@ class TopicTreeFileMutationDerivationTest {
     }
 
     @Test
+    fun `remove nested branch deletes all descendant markdown files`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(
+                        nodeId = "guides",
+                        title = "Guides",
+                        children = listOf(
+                            TopicNavNode(
+                                nodeId = "guides__home",
+                                title = "Guides Home",
+                                path = "guides/index.md",
+                            ),
+                            TopicNavNode(
+                                nodeId = "install",
+                                title = "Install",
+                                children = listOf(
+                                    TopicNavNode(
+                                        nodeId = "install__home",
+                                        title = "Install Home",
+                                        path = "guides/install/index.md",
+                                    ),
+                                    TopicNavNode(
+                                        nodeId = "install-linux",
+                                        title = "Linux",
+                                        path = "guides/install/linux.md",
+                                    ),
+                                ),
+                            ),
+                            TopicNavNode(
+                                nodeId = "faq",
+                                title = "FAQ",
+                                path = "guides/faq.md",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-remove-nested-branch",
+                    instance = instance,
+                    command = RemoveTopicNodeCommand(
+                        commandId = "cmd-remove-nested-branch",
+                        treeId = "default",
+                        nodeId = "guides",
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertEquals(
+            setOf(
+                "delete:guides/index.md:RECOVERABLE",
+                "delete:guides/install/index.md:RECOVERABLE",
+                "delete:guides/install/linux.md:RECOVERABLE",
+                "delete:guides/faq.md:RECOVERABLE",
+            ),
+            docsGateway.calls.toSet(),
+        )
+        assertTrue(configGateway.writes.last().nav.isEmpty())
+    }
+
+    @Test
     fun `remove child collapses empty parent section in nav mode`() {
         val configGateway = MutableConfigGatewayForDerivation(
             MkDocsConfigDocument(

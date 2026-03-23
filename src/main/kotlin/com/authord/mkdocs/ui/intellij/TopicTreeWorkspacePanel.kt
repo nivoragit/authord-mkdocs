@@ -158,6 +158,16 @@ internal class TopicTreeWorkspacePanel(
                 Messages.getWarningIcon(),
             ) == Messages.OK
         },
+    private val removeTopicConfirmationPrompt: (title: String, message: String) -> Boolean =
+        { title, message ->
+            Messages.showOkCancelDialog(
+                message,
+                title,
+                uiMessage("topicTree.prompt.removeTopic.ok"),
+                uiMessage("topicTree.prompt.removeTopic.cancel"),
+                Messages.getWarningIcon(),
+            ) == Messages.OK
+        },
     private val runtimeServiceResolver: (com.intellij.openapi.project.Project) -> PluginRuntimeIntegrationService = {
         PluginCompositionRoot().runtimeIntegration(it)
     },
@@ -682,6 +692,11 @@ internal class TopicTreeWorkspacePanel(
             return
         }
         val selected = selectedNode.userObject as? TopicTreeNodeView ?: return
+        val markdownPaths = markdownPathsInSubtree(selectedNode)
+        if (!confirmTopicRemoval(selected.title, markdownPaths)) {
+            publishStatus(uiMessage("topicTree.status.removeTopicCancelled"))
+            return
+        }
         val controllers = controllersOrNull() ?: return
         val result = controllers.actionController.removeTopic(
             treeId = activeTreeId(),
@@ -814,6 +829,35 @@ internal class TopicTreeWorkspacePanel(
 
     private fun publishStatus(message: String) {
         status.text = message
+    }
+
+    private fun confirmTopicRemoval(topicTitle: String, markdownPaths: List<String>): Boolean {
+        val promptTitle = uiMessage("topicTree.prompt.removeTopic.title")
+        val promptMessage = when (markdownPaths.size) {
+            0 -> uiMessage("topicTree.prompt.removeTopic.message.none", topicTitle)
+            1 -> uiMessage("topicTree.prompt.removeTopic.message.single", topicTitle, markdownPaths.first())
+            else -> uiMessage(
+                "topicTree.prompt.removeTopic.message.multiple",
+                topicTitle,
+                markdownPaths.size,
+                markdownPaths.first(),
+            )
+        }
+        return removeTopicConfirmationPrompt(promptTitle, promptMessage)
+    }
+
+    private fun markdownPathsInSubtree(node: DefaultMutableTreeNode): List<String> {
+        val paths = linkedSetOf<String>()
+        fun visit(current: DefaultMutableTreeNode) {
+            val view = current.userObject as? TopicTreeNodeView
+            normalizeOptionalPath(view?.path)?.let(paths::add)
+            for (index in 0 until current.childCount) {
+                val child = current.getChildAt(index) as? DefaultMutableTreeNode ?: continue
+                visit(child)
+            }
+        }
+        visit(node)
+        return paths.toList()
     }
 
     private fun prompt(title: String, message: String, initial: String = ""): String? {

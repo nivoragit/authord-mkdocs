@@ -122,6 +122,23 @@ class TopicTreeWorkspacePanelUiContractTest {
     }
 
     @Test
+    fun `toc remove action cancellation skips dispatch`() {
+        val uiService = RecordingUiService()
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            removeTopicConfirmationPrompt = { _, _ -> false },
+        )
+        panel.render(sampleState())
+        assertTrue(panel.selectTreeNodeForTest("n1"))
+
+        val triggered = panel.triggerTocContextActionForTest("Remove TOC Element")
+
+        assertTrue(triggered)
+        assertTrue(uiService.dispatched.none { it is RemoveTopicNodeCommand })
+        assertEquals("Deletion cancelled", panel.statusTextForTest())
+    }
+
+    @Test
     fun `new child topic auto-generates markdown path when input left blank`() {
         val uiService = RecordingUiService()
         val prompts = ArrayDeque(listOf("Install Guide", ""))
@@ -324,6 +341,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         uiService: TopicTreeUiService = RecordingUiService(),
         promptInputProvider: (title: String, message: String, initial: String?) -> String? = { _, _, _ -> null },
         duplicatePathPrompt: (requestedPath: String, suggestedPath: String) -> Boolean = { _, _ -> true },
+        removeTopicConfirmationPrompt: (title: String, message: String) -> Boolean = { _, _ -> true },
         reconcileStateProvider: () -> StartupTreeState? = { sampleState() },
     ): TopicTreeWorkspacePanel {
         val registry = RecordingInstanceRegistryPort(
@@ -360,6 +378,7 @@ class TopicTreeWorkspacePanelUiContractTest {
             reconcileStateProvider = reconcileStateProvider,
             promptInputProvider = promptInputProvider,
             duplicatePathPrompt = duplicatePathPrompt,
+            removeTopicConfirmationPrompt = removeTopicConfirmationPrompt,
         )
     }
 
