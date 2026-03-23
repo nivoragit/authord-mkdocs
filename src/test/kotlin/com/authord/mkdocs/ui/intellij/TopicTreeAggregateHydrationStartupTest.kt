@@ -165,15 +165,10 @@ class TopicTreeAggregateHydrationStartupTest {
         )
 
         assertTrue(outcome.applied)
-        assertEquals(
-            listOf(
-                "rename:guide.md->guide-updated.md",
-                "rewrite:guide.md->guide-updated.md",
-            ),
-            docsGateway.calls,
-        )
+        assertTrue(docsGateway.calls.isEmpty())
         val persistedPath = configGateway.current.nav.single().path
-        assertEquals("guide-updated.md", persistedPath)
+        assertEquals("guide.md", persistedPath)
+        assertEquals("Guide Updated", configGateway.current.nav.single().title)
     }
 
     @Test
@@ -219,13 +214,7 @@ class TopicTreeAggregateHydrationStartupTest {
             )
 
             assertTrue(outcome.applied)
-            assertEquals(
-                listOf(
-                    "rename:index.md->home-updated.md",
-                    "rewrite:index.md->home-updated.md",
-                ),
-                docsGateway.calls,
-            )
+            assertTrue(docsGateway.calls.isEmpty())
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -343,13 +332,7 @@ class TopicTreeAggregateHydrationStartupTest {
         )
 
         assertTrue(outcome.applied)
-        assertEquals(
-            listOf(
-                "rename:guide.md->guide-updated.md",
-                "rewrite:guide.md->guide-updated.md",
-            ),
-            docsGateway.calls,
-        )
+        assertTrue(docsGateway.calls.isEmpty())
     }
 
     @Test
@@ -422,13 +405,7 @@ class TopicTreeAggregateHydrationStartupTest {
         )
 
         assertTrue(outcome.applied)
-        assertEquals(
-            listOf(
-                "rename:fresh.md->fresh-updated.md",
-                "rewrite:fresh.md->fresh-updated.md",
-            ),
-            docsGateway.calls,
-        )
+        assertTrue(docsGateway.calls.isEmpty())
     }
 
     private fun uiService(

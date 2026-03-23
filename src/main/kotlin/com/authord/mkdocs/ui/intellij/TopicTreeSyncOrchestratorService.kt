@@ -115,22 +115,6 @@ class TopicTreeSyncOrchestratorService(
             }
         }
 
-        when (val titleSync = synchronizeMarkdownHeadingForCommand(transaction, config, mutation.document)) {
-            is TopicGatewayResult.Success -> Unit
-            is TopicGatewayResult.Failure -> {
-                val compensationSucceeded = runCompensationStack(compensationStack)
-                val outcome = TopicSyncOutcome(
-                    transactionId = transaction.transactionId,
-                    applied = false,
-                    rolledBack = true,
-                    compensated = compensationSucceeded,
-                    message = "Heading synchronization failed: ${titleSync.error.detail}",
-                )
-                rememberTransactionOutcome(outcome)
-                return TopicGatewayResult.Success(outcome)
-            }
-        }
-
         // In no-nav mode we treat filesystem hierarchy as the source of truth and avoid writing
         // synthetic nav content into mkdocs.yml.
         if (config.navPresent) {
@@ -499,23 +483,12 @@ class TopicTreeSyncOrchestratorService(
             }
         }
 
-        val renamedPath = currentPath?.let { deriveRenamedPath(document, it, command.newTitle) }
         val updatedNode = node.copy(
             title = command.newTitle,
-            path = renamedPath ?: node.path,
+            path = node.path,
         )
         return when (val replaced = replaceNode(document, updatedNode)) {
-            is TopicGatewayResult.Success -> {
-                val operations = if (currentPath != null && renamedPath != null && currentPath != renamedPath) {
-                    listOf(
-                        TopicFileOperation(TopicFileOperationKind.RENAME, currentPath, renamedPath),
-                        TopicFileOperation(TopicFileOperationKind.REWRITE_LINKS, currentPath, renamedPath),
-                    )
-                } else {
-                    emptyList()
-                }
-                successMutation(replaced.value, operations)
-            }
+            is TopicGatewayResult.Success -> successMutation(replaced.value)
             is TopicGatewayResult.Failure -> replaced
         }
     }
@@ -980,17 +953,6 @@ class TopicTreeSyncOrchestratorService(
         return ensureUniquePath(candidate, collectAllPaths(document.nav))
     }
 
-    private fun deriveRenamedPath(
-        document: MkDocsConfigDocument,
-        currentPath: String,
-        title: String,
-    ): String {
-        val currentDirectory = currentPath.substringBeforeLast('/', "")
-        val renamedCandidate = joinPath(currentDirectory, "${slugifyTitle(title)}.md")
-        val existing = collectAllPaths(document.nav) - currentPath
-        return ensureUniquePath(renamedCandidate, existing)
-    }
-
     private fun resolveDirectoryForParent(
         nodes: List<TopicNavNode>,
         parentNodeId: String,
@@ -1243,34 +1205,6 @@ class TopicTreeSyncOrchestratorService(
                 )
             }
         }
-    }
-
-    private fun synchronizeMarkdownHeadingForCommand(
-        transaction: TopicSyncTransaction,
-        beforeMutation: MkDocsConfigDocument,
-        afterMutation: MkDocsConfigDocument,
-    ): TopicGatewayResult<String> {
-        val renameCommand = transaction.command as? RenameTopicNodeCommand
-            ?: return TopicGatewayResult.Success("")
-        val resolved = resolveNodeContext(afterMutation.nav, renameCommand.nodeId)?.node ?: run {
-            val nodeBeforeMutation = resolveNodeContext(beforeMutation.nav, renameCommand.nodeId)?.node
-                ?: return TopicGatewayResult.Success("")
-            resolveNodeContext(afterMutation.nav, nodeBeforeMutation.nodeId)?.node
-        }
-            ?: return TopicGatewayResult.Success("")
-        val normalizedPath = resolveHeadingTargetPath(resolved) ?: return TopicGatewayResult.Success("")
-        return docsFileGateway.upsertMarkdownTitleHeading(
-            instance = transaction.instance,
-            relativePath = normalizedPath,
-            title = resolved.title,
-        )
-    }
-
-    private fun resolveHeadingTargetPath(node: TopicNavNode): String? {
-        normalizePath(node.path)?.let { return it }
-        val subtreePaths = collectPaths(node).mapNotNull(::normalizePath)
-        val indexPath = subtreePaths.firstOrNull(::isIndexMarkdownPath)
-        return indexPath ?: subtreePaths.firstOrNull()
     }
 
     private fun initialContentForCreate(document: MkDocsConfigDocument, sourcePath: String): String {

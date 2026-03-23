@@ -268,7 +268,7 @@ class TopicTreeFileMutationDerivationTest {
     }
 
     @Test
-    fun `no-nav rename section alias rewrites folder markdown paths without config writes`() {
+    fun `no-nav rename section alias rewrites folder markdown paths without config writes and without heading sync`() {
         val configGateway = MutableConfigGatewayForDerivation(
             MkDocsConfigDocument(
                 docsDir = "docs",
@@ -313,12 +313,12 @@ class TopicTreeFileMutationDerivationTest {
             ),
             docsGateway.calls.toSet(),
         )
-        assertEquals(listOf("heading:guides/index.md=Guides"), docsGateway.headingUpdates)
+        assertTrue(docsGateway.headingUpdates.isEmpty())
         assertTrue(configGateway.writes.isEmpty())
     }
 
     @Test
-    fun `rename section in nav mode updates section index heading without renaming file`() {
+    fun `rename section in nav mode updates nav title without renaming file or syncing heading`() {
         val configGateway = MutableConfigGatewayForDerivation(
             MkDocsConfigDocument(
                 docsDir = "docs",
@@ -362,7 +362,7 @@ class TopicTreeFileMutationDerivationTest {
 
         assertTrue(outcome.applied)
         assertTrue(docsGateway.calls.isEmpty())
-        assertEquals(listOf("heading:guides/index.md=How To"), docsGateway.headingUpdates)
+        assertTrue(docsGateway.headingUpdates.isEmpty())
         assertEquals("How To", configGateway.writes.last().nav.single().title)
     }
 
@@ -504,7 +504,7 @@ class TopicTreeFileMutationDerivationTest {
     }
 
     @Test
-    fun `rename topic updates nav path and performs rename plus link rewrite`() {
+    fun `rename topic updates title without renaming markdown path`() {
         val configGateway = MutableConfigGatewayForDerivation(
             MkDocsConfigDocument(
                 docsDir = "docs",
@@ -536,16 +536,11 @@ class TopicTreeFileMutationDerivationTest {
         )
 
         assertTrue(outcome.applied)
-        assertEquals(
-            listOf(
-                "rename:guide/old.md->guide/new-name.md",
-                "rewrite:guide/old.md->guide/new-name.md",
-            ),
-            docsGateway.calls,
-        )
-        assertEquals(listOf("heading:guide/new-name.md=New Name"), docsGateway.headingUpdates)
+        assertTrue(docsGateway.calls.isEmpty())
+        assertTrue(docsGateway.headingUpdates.isEmpty())
         val written = configGateway.writes.last()
-        assertEquals("guide/new-name.md", written.nav.single().path)
+        assertEquals("guide/old.md", written.nav.single().path)
+        assertEquals("New Name", written.nav.single().title)
     }
 
     @Test

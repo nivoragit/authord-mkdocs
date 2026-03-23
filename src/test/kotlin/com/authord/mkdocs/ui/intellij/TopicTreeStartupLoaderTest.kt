@@ -104,7 +104,7 @@ class TopicTreeStartupLoaderTest {
     }
 
     @Test
-    fun `resolves nav display title from markdown h1 when present`() {
+    fun `keeps nav display title from yaml when nav is present`() {
         val root = Files.createTempDirectory("startup-loader-h1-nav")
         val docs = Files.createDirectories(root.resolve("docs"))
         val page = docs.resolve("index.md")
@@ -121,11 +121,11 @@ class TopicTreeStartupLoaderTest {
             docsMarkdownPaths = listOf(page.toString()),
         )
 
-        assertEquals("Welcome Home", state.nodes.single().title)
+        assertEquals("Fallback Title", state.nodes.single().title)
     }
 
     @Test
-    fun `reloading startup state reflects updated markdown h1 title`() {
+    fun `reloading startup state keeps nav yaml title even when markdown h1 changes`() {
         val root = Files.createTempDirectory("startup-loader-h1-refresh")
         val docs = Files.createDirectories(root.resolve("docs"))
         val page = docs.resolve("guide.md")
@@ -138,10 +138,33 @@ class TopicTreeStartupLoaderTest {
         )
 
         val first = loader.load(config = config, docsMarkdownPaths = listOf(page.toString()))
-        assertEquals("First Title", first.nodes.single().title)
+        assertEquals("Config Title", first.nodes.single().title)
 
         Files.writeString(page, "# Updated Title\n")
         val second = loader.load(config = config, docsMarkdownPaths = listOf(page.toString()))
-        assertEquals("Updated Title", second.nodes.single().title)
+        assertEquals("Config Title", second.nodes.single().title)
+    }
+
+    @Test
+    fun `fallback mode keeps deterministic title and does not sync from markdown h1`() {
+        val root = Files.createTempDirectory("startup-loader-h1-fallback")
+        val docs = Files.createDirectories(root.resolve("docs"))
+        val page = docs.resolve("guide.md")
+        Files.writeString(page, "# Fallback Heading\n")
+
+        val loader = TopicTreeStartupLoader()
+        val config = MkDocsConfigDocument(
+            docsDir = docs.toString(),
+            nav = emptyList(),
+            navPresent = false,
+        )
+
+        val state = loader.load(
+            config = config,
+            docsMarkdownPaths = listOf(page.toString()),
+        )
+
+        assertEquals(StartupTreeSource.FALLBACK, state.source)
+        assertEquals("Guide", state.nodes.single().title)
     }
 }
