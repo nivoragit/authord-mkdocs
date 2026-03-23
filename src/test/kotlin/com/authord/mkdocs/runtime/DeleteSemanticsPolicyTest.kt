@@ -78,6 +78,50 @@ class DeleteSemanticsPolicyTest {
     }
 
     @Test
+    fun `recoverable delete prunes empty branch directories`() {
+        val projectRoot = Files.createTempDirectory("delete-policy")
+        val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
+        val filePath = docsDir.resolve("guide/install/page.md")
+        Files.createDirectories(filePath.parent)
+        Files.writeString(filePath, "# page")
+
+        val instance = TopicInstanceRef("default", projectRoot.resolve("mkdocs.yml").toString(), docsDir.toString())
+        val gateway = DocsFileGatewayAdapter(trashMover = { false })
+
+        val recoveryPath = requireSuccess(
+            gateway.deleteMarkdownFile(instance, "guide/install/page.md", TopicDeleteMode.RECOVERABLE),
+        )
+
+        assertFalse(Files.exists(filePath))
+        assertFalse(Files.exists(docsDir.resolve("guide/install")))
+        assertFalse(Files.exists(docsDir.resolve("guide")))
+        assertTrue(recoveryPath.startsWith(".recovery/"))
+    }
+
+    @Test
+    fun `recoverable delete keeps non-empty ancestor directories`() {
+        val projectRoot = Files.createTempDirectory("delete-policy")
+        val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
+        val deletedPath = docsDir.resolve("guide/install/page.md")
+        val siblingPath = docsDir.resolve("guide/overview.md")
+        Files.createDirectories(deletedPath.parent)
+        Files.writeString(deletedPath, "# page")
+        Files.writeString(siblingPath, "# overview")
+
+        val instance = TopicInstanceRef("default", projectRoot.resolve("mkdocs.yml").toString(), docsDir.toString())
+        val gateway = DocsFileGatewayAdapter(trashMover = { false })
+
+        requireSuccess(
+            gateway.deleteMarkdownFile(instance, "guide/install/page.md", TopicDeleteMode.RECOVERABLE),
+        )
+
+        assertFalse(Files.exists(deletedPath))
+        assertFalse(Files.exists(docsDir.resolve("guide/install")))
+        assertTrue(Files.exists(docsDir.resolve("guide")))
+        assertTrue(Files.exists(siblingPath))
+    }
+
+    @Test
     fun `nav-only delete leaves underlying markdown file untouched`() {
         val projectRoot = Files.createTempDirectory("delete-policy")
         val docsDir = Files.createDirectories(projectRoot.resolve("docs"))

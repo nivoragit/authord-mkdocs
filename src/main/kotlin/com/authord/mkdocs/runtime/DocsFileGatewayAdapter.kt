@@ -66,11 +66,18 @@ class DocsFileGatewayAdapter(
         }
 
         return runCatching {
+            val docsDir = docsDir(instance)
             if (trashMover(absolutePath)) {
                 toRelative(instance, absolutePath)
             } else {
                 moveToRecovery(instance, absolutePath)
             }
+                .also {
+                    pruneEmptyAncestorDirectories(
+                        docsDir = docsDir,
+                        startDirectory = absolutePath.parent,
+                    )
+                }
         }.fold(
             onSuccess = { TopicGatewayResult.Success(it) },
             onFailure = {
@@ -195,6 +202,32 @@ class DocsFileGatewayAdapter(
         val recoveryPath = recoveryDir.resolve("${absolutePath.fileName}-${System.currentTimeMillis()}")
         Files.move(absolutePath, recoveryPath, StandardCopyOption.REPLACE_EXISTING)
         return toRelative(instance, recoveryPath)
+    }
+
+    private fun pruneEmptyAncestorDirectories(docsDir: Path, startDirectory: Path?) {
+        var current = startDirectory ?: return
+        while (current != docsDir && current.startsWith(docsDir)) {
+            if (!Files.isDirectory(current)) {
+                break
+            }
+
+            val isEmpty = try {
+                Files.newDirectoryStream(current).use { stream ->
+                    !stream.iterator().hasNext()
+                }
+            } catch (_: Exception) {
+                break
+            }
+            if (!isEmpty) {
+                break
+            }
+
+            val deleted = runCatching { Files.deleteIfExists(current) }.getOrDefault(false)
+            if (!deleted) {
+                break
+            }
+            current = current.parent ?: break
+        }
     }
 
     private fun normalizeRelative(path: String): String {
