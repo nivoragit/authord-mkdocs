@@ -36,6 +36,8 @@ java {
 intellij {
     version.set(providers.gradleProperty("platformVersion"))
     type.set(providers.gradleProperty("platformType"))
+    updateSinceUntilBuild.set(false)
+    sameSinceUntilBuild.set(false)
     plugins.set(
         providers.gradleProperty("platformPlugins").map { raw ->
             raw.split(',')
@@ -48,7 +50,12 @@ intellij {
 tasks {
     patchPluginXml {
         sinceBuild.set(providers.gradleProperty("sinceBuild"))
-        untilBuild.set(providers.gradleProperty("untilBuild"))
+        providers.gradleProperty("untilBuild")
+            .orNull
+            ?.takeIf { it.isNotBlank() }
+            ?.let { configuredUntilBuild ->
+                untilBuild.set(configuredUntilBuild)
+            }
     }
 
     instrumentCode {
