@@ -38,8 +38,11 @@ class UvBootstrapServiceTest {
         assertEquals("uv", result.uvExecutablePath)
         // Step 1: create venv
         assertEquals(listOf("uv", "venv", expectedRuntimePath), commands[0])
-        // Step 2: install mkdocs base
-        assertEquals(listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs"), commands[1])
+        // Step 2: install runtime base packages
+        assertEquals(
+            listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs", "mkdocs-material"),
+            commands[1],
+        )
         // Step 3: mkdocs get-deps
         assertTrue(commands[2].contains("get-deps"))
         assertEquals(expectedRuntimePath, result.runtimePath)
@@ -64,7 +67,10 @@ class UvBootstrapServiceTest {
         assertTrue(result.success)
         assertEquals(customUv, result.uvExecutablePath)
         assertEquals(listOf(customUv, "venv", expectedRuntimePath), commands[0])
-        assertEquals(listOf(customUv, "pip", "install", "--python", expectedRuntimePath, "mkdocs"), commands[1])
+        assertEquals(
+            listOf(customUv, "pip", "install", "--python", expectedRuntimePath, "mkdocs", "mkdocs-material"),
+            commands[1],
+        )
     }
 
     @Test
@@ -106,7 +112,10 @@ class UvBootstrapServiceTest {
             assertTrue(result.success)
             assertFalse(result.skipped)
             // No venv command, just install + get-deps
-            assertEquals(listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs"), commands[0])
+            assertEquals(
+                listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs", "mkdocs-material"),
+                commands[0],
+            )
             assertTrue(commands[1].contains("get-deps"))
             assertEquals(existingRuntime.toString(), result.runtimePath)
         } finally {
@@ -115,7 +124,7 @@ class UvBootstrapServiceTest {
     }
 
     @Test
-    fun `continues when setup reports existing virtual environment and installs mkdocs`() {
+    fun `continues when setup reports existing virtual environment and installs runtime base packages`() {
         val commands = mutableListOf<List<String>>()
         val projectPath = "/tmp/project-existing-race"
         val expectedRuntimePath = Path.of(projectPath).resolve(".mkdocs-plugin-venv").toString()
@@ -137,7 +146,10 @@ class UvBootstrapServiceTest {
         assertFalse(result.skipped)
         assertEquals("venv", commands[0][1])
         assertEquals("pip", commands[1][1])
-        assertEquals(listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs"), commands[1])
+        assertEquals(
+            listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs", "mkdocs-material"),
+            commands[1],
+        )
     }
 
     @Test
@@ -162,7 +174,10 @@ class UvBootstrapServiceTest {
 
         assertTrue(result.success)
         assertFalse(result.skipped)
-        assertEquals(listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs"), commands[1])
+        assertEquals(
+            listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs", "mkdocs-material"),
+            commands[1],
+        )
     }
 
     @Test
@@ -195,8 +210,11 @@ class UvBootstrapServiceTest {
             assertFalse(result.skipped)
             // Step 1: venv
             assertEquals(listOf("uv", "venv", runtimePath), commands[0])
-            // Step 2: install mkdocs base
-            assertEquals(listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs"), commands[1])
+            // Step 2: install runtime base packages
+            assertEquals(
+                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs", "mkdocs-material"),
+                commands[1],
+            )
             // Step 3: get-deps
             assertTrue(commands[2].contains("get-deps"))
             // Step 4: install discovered deps
@@ -290,6 +308,7 @@ class UvBootstrapServiceTest {
                     "--python",
                     runtimePath,
                     "mkdocs",
+                    "mkdocs-material",
                     "-r",
                     requirementsPath.toString(),
                 ),

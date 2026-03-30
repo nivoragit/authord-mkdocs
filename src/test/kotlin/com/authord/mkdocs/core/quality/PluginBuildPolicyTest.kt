@@ -13,9 +13,15 @@ class PluginBuildPolicyTest {
         val gradleProperties = Files.readString(root.resolve("gradle.properties"))
         val quickstart = Files.readString(root.resolve("specs/002-intellij-mkdocs-mvp/quickstart.md"))
 
-        assertTrue(rootBuild.contains("id(\"org.jetbrains.intellij\")"), "Root build must declare IntelliJ plugin dependency")
-        assertTrue(rootBuild.contains("intellij {"), "Root build must configure IntelliJ plugin target")
-        assertTrue(rootBuild.contains("patchPluginXml"), "Root build must configure plugin.xml compatibility range")
+        assertTrue(
+            rootBuild.contains("id(\"org.jetbrains.intellij.platform\")"),
+            "Root build must declare IntelliJ Platform Gradle Plugin dependency",
+        )
+        assertTrue(rootBuild.contains("intellijPlatform {"), "Root build must configure IntelliJ platform target")
+        assertTrue(
+            rootBuild.contains("pluginConfiguration"),
+            "Root build must configure plugin.xml compatibility range",
+        )
         assertTrue(gradleProperties.contains("platformVersion="), "Gradle properties must define IntelliJ platform version")
         assertTrue(quickstart.contains("runIde"), "Quickstart must document runIde workflow")
     }

@@ -79,8 +79,8 @@ private class AuthordMarkdownPreviewFileEditorProvider : FileEditorProvider, Dum
 }
 
 private class AuthordMarkdownEditorWithPreview(
-    private val textEditor: TextEditor,
-    private val previewEditor: AuthordMarkdownPreviewFileEditor,
+    override val textEditor: TextEditor,
+    override val previewEditor: AuthordMarkdownPreviewFileEditor,
 ) : TextEditorWithPreview(
     textEditor,
     previewEditor,

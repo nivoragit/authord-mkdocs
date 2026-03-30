@@ -76,7 +76,15 @@ class MkDocsProjectCreator(
             )
         }
 
-        val installMkdocsCommand = listOf(uvExecutable, "pip", "install", "--python", runtimePath, "mkdocs")
+        val installMkdocsCommand = listOf(
+            uvExecutable,
+            "pip",
+            "install",
+            "--python",
+            runtimePath,
+            "mkdocs",
+            "mkdocs-material",
+        )
         val installMkdocsResult = commandRunner.run(installMkdocsCommand, projectRoot.toString())
         if (installMkdocsResult.exitCode != 0) {
             val details = installMkdocsResult.stderr.ifBlank { installMkdocsResult.stdout }
@@ -85,7 +93,7 @@ class MkDocsProjectCreator(
                 message = if (looksLikeUvMissing(details)) {
                     uvMissingMessage(details)
                 } else {
-                    details.ifBlank { "Failed to install mkdocs into project runtime." }
+                    details.ifBlank { "Failed to install mkdocs runtime packages into project runtime." }
                 },
             )
         }

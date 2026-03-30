@@ -1,21 +1,61 @@
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
+import org.jetbrains.intellij.platform.gradle.TestFrameworkType
 import org.gradle.testing.jacoco.plugins.JacocoTaskExtension
 import org.gradle.testing.jacoco.tasks.JacocoCoverageVerification
 import org.gradle.testing.jacoco.tasks.JacocoReport
+import java.io.File
 import java.math.BigDecimal
 
 plugins {
-    kotlin("jvm") version "1.9.24"
-    id("org.jetbrains.intellij") version "1.17.4"
+    kotlin("jvm") version "2.3.0"
+    id("org.jetbrains.intellij.platform") version "2.13.1"
     jacoco
 }
 
 group = "com.authord.mkdocs"
 version = "0.1.0"
 
+val platformType = providers.gradleProperty("platformType").get()
+val platformVersion = providers.gradleProperty("platformVersion").get()
+val platformPlugins = providers.gradleProperty("platformPlugins")
+    .orNull
+    ?.split(',')
+    ?.map(String::trim)
+    ?.filter(String::isNotEmpty)
+    ?: emptyList()
+val platformBundledPlugins = providers.gradleProperty("platformBundledPlugins")
+    .orNull
+    ?.split(',')
+    ?.map(String::trim)
+    ?.filter(String::isNotEmpty)
+    ?: emptyList()
+val platformArtifactId = when (platformType) {
+    "IU" -> "ideaIU"
+    "IC" -> "ideaIC"
+    else -> null
+}
+val configuredLocalPlatformPath = providers.gradleProperty("platformLocalPath")
+    .orNull
+    ?.takeIf { it.isNotBlank() }
+val cachedLocalPlatformPath = platformArtifactId
+    ?.let { artifactId ->
+        val versionRoot = File(
+            gradle.gradleUserHomeDir,
+            "caches/modules-2/files-2.1/com.jetbrains.intellij.idea/$artifactId/$platformVersion",
+        )
+        versionRoot.listFiles()
+            ?.map { File(it, "$artifactId-$platformVersion") }
+            ?.firstOrNull { candidate -> candidate.isDirectory && File(candidate, "product-info.json").isFile }
+            ?.absolutePath
+    }
+val localPlatformPath = configuredLocalPlatformPath ?: cachedLocalPlatformPath
+
 repositories {
     mavenCentral()
+    intellijPlatform {
+        defaultRepositories()
+    }
 }
 
 dependencies {
@@ -24,7 +64,22 @@ dependencies {
 
     testImplementation(kotlin("test"))
     testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
+    testRuntimeOnly("junit:junit:4.13.2")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+
+    intellijPlatform {
+        if (localPlatformPath != null) {
+            local(localPlatformPath)
+        } else {
+            create(platformType, platformVersion)
+        }
+
+        plugins(platformPlugins)
+
+        bundledPlugins(platformBundledPlugins)
+
+        testFramework(TestFrameworkType.Platform)
+    }
 }
 
 java {
@@ -33,37 +88,14 @@ java {
     }
 }
 
-intellij {
-    version.set(providers.gradleProperty("platformVersion"))
-    type.set(providers.gradleProperty("platformType"))
-    updateSinceUntilBuild.set(false)
-    sameSinceUntilBuild.set(false)
-    plugins.set(
-        providers.gradleProperty("platformPlugins").map { raw ->
-            raw.split(',')
-                .map { it.trim() }
-                .filter { it.isNotEmpty() }
-        },
-    )
-}
-
-tasks {
-    patchPluginXml {
-        sinceBuild.set(providers.gradleProperty("sinceBuild"))
-        providers.gradleProperty("untilBuild")
-            .orNull
-            ?.takeIf { it.isNotBlank() }
-            ?.let { configuredUntilBuild ->
-                untilBuild.set(configuredUntilBuild)
-            }
-    }
-
-    instrumentCode {
-        enabled = false
-    }
-
-    instrumentTestCode {
-        enabled = false
+intellijPlatform {
+    pluginConfiguration {
+        ideaVersion {
+            sinceBuild = providers.gradleProperty("sinceBuild").get()
+            untilBuild = providers.gradleProperty("untilBuild")
+                .orNull
+                ?.takeIf { it.isNotBlank() }
+        }
     }
 }
 
@@ -79,11 +111,11 @@ tasks.withType<Test>().configureEach {
 }
 
 tasks.withType<JavaCompile>().configureEach {
-    options.release.set(17)
+    options.release.set(21)
 }
 
 tasks.withType<KotlinCompile>().configureEach {
-    compilerOptions.jvmTarget.set(JvmTarget.JVM_17)
+    compilerOptions.jvmTarget.set(JvmTarget.JVM_21)
 }
 
 val hasFilteredTestSelection = gradle.startParameter.taskRequests

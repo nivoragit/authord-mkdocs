@@ -191,7 +191,7 @@ class RuntimeAdapterCoverageEdgeCasesTest {
             assertTrue(result.success)
             // Verify base install
             assertEquals(
-                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs"),
+                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs", "mkdocs-material"),
                 commands[1],
             )
             // Verify get-deps was called

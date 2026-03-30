@@ -75,7 +75,7 @@ object IntellijTestFixtures {
             now: Boolean,
         ): ActionCallback = ActionCallback.DONE
 
-        override fun addAnActionListener(listener: AnActionListener) = Unit
+        override fun addAnActionListener(listener: AnActionListener, parentDisposable: Disposable) = Unit
 
         override fun getKeyboardShortcut(actionId: String): KeyboardShortcut? = null
     }

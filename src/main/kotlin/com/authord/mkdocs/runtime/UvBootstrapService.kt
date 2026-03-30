@@ -35,7 +35,7 @@ data class BootstrapResult(
 )
 
 /**
- * Bootstraps a plugin-managed runtime using `uv` and installs `mkdocs`.
+ * Bootstraps a plugin-managed runtime using `uv` and installs runtime base packages.
  *
  * Uses `mkdocs get-deps` to automatically discover and install all
  * dependencies declared in the project's `mkdocs.yml`, eliminating
@@ -59,13 +59,14 @@ open class UvBootstrapService(
 
     private val bootstrappedProjectHashes = ConcurrentHashMap<String, String>()
     private val bootstrapLockStripes = Array(64) { Any() }
+    private val baseRuntimePackages = listOf("mkdocs", "mkdocs-material")
 
     /**
      * Ensures project runtime exists and required packages are installed.
      *
      * The bootstrap process:
      * 1. Creates a virtual environment (if needed).
-     * 2. Installs `mkdocs` (base package) and any `requirements.txt`.
+     * 2. Installs runtime base packages (`mkdocs`, `mkdocs-material`) and any `requirements.txt`.
      * 3. Runs `mkdocs get-deps` to discover all dependencies from `mkdocs.yml`.
      * 4. Installs the discovered dependencies.
      *
@@ -123,9 +124,10 @@ open class UvBootstrapService(
                 }
             }
 
-            // Step 2: Install mkdocs base package (+ requirements.txt if present)
+            // Step 2: Install runtime base packages (+ requirements.txt if present)
             val baseInstallCommand = buildList {
-                addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath, "mkdocs"))
+                addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath))
+                addAll(baseRuntimePackages)
                 val requirementsFile = resolveRequirementsPath(projectPath)
                 if (requirementsFile != null) {
                     add("-r")
@@ -141,7 +143,7 @@ open class UvBootstrapService(
                     uvExecutablePath = uvExecutable,
                     executedCommands = executed,
                     skipped = false,
-                    errorMessage = baseInstallResult.stderr.ifBlank { "Failed to install mkdocs" },
+                    errorMessage = baseInstallResult.stderr.ifBlank { "Failed to install mkdocs runtime packages" },
                 )
             }
 
@@ -178,7 +180,7 @@ open class UvBootstrapService(
                     }
                 }
             }
-            // If get-deps fails (e.g., bad config), we still succeed with just mkdocs installed.
+            // If get-deps fails (e.g., bad config), we still succeed with base packages installed.
             // The user will see the MkDocs error when they try to serve.
 
             bootstrappedProjectHashes[projectKey] = currentHash

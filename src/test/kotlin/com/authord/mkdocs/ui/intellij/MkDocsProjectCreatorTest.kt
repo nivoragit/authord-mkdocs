@@ -51,7 +51,7 @@ class MkDocsProjectCreatorTest {
             assertEquals(
                 listOf(
                     listOf("/tmp/uv", "venv", runtimePath),
-                    listOf("/tmp/uv", "pip", "install", "--python", runtimePath, "mkdocs"),
+                    listOf("/tmp/uv", "pip", "install", "--python", runtimePath, "mkdocs", "mkdocs-material"),
                 ),
                 runner.commands,
             )
