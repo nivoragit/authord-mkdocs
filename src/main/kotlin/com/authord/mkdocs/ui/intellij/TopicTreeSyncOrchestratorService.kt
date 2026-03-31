@@ -1198,8 +1198,7 @@ class TopicTreeSyncOrchestratorService(
     ): Boolean {
         if (
             operation.kind != TopicFileOperationKind.MOVE &&
-            operation.kind != TopicFileOperationKind.RENAME &&
-            operation.kind != TopicFileOperationKind.REWRITE_LINKS
+            operation.kind != TopicFileOperationKind.RENAME
         ) {
             return false
         }

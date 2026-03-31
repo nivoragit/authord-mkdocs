@@ -83,7 +83,6 @@ private val TOC_TREE_SELECTION_FOREGROUND_INACTIVE: Color = JBColor.namedColor(
     "Tree.selectionInactiveForeground",
     JBColor(Color(0x1E1F22), Color(0xDFE1E5)),
 )
-
 private fun uiMessage(key: String, vararg params: Any): String = AuthordUiBundle.message(key, *params)
 
 internal enum class TopicTreeNodeKind {
@@ -633,11 +632,12 @@ internal class TopicTreeWorkspacePanel(
         val sourcePath = resolveSourcePathWithDuplicatePrompt(requestedSourcePath) ?: return
         val nodeId = "ui-node-${UUID.randomUUID()}"
         val controllers = controllersOrNull() ?: return
+        val actualOrderIndex = toActualChildOrderIndex(target.nodeId, targetNode.childCount)
         val result = controllers.actionController.addChildTopic(
             treeId = activeTreeId(),
             targetNodeId = target.nodeId,
             title = title,
-            orderIndex = toActualChildOrderIndex(target.nodeId, targetNode.childCount),
+            orderIndex = actualOrderIndex,
             sourcePath = sourcePath,
             childNodeId = nodeId,
         )
@@ -1119,7 +1119,9 @@ internal class TopicTreeWorkspacePanel(
         val currentProject = project ?: return
         val fileSystem = LocalFileSystem.getInstance()
         val virtualFile = fileSystem.findFileByPath(filePath)
-            ?: fileSystem.refreshAndFindFileByPath(filePath)
+            ?: ApplicationManager.getApplication().runWriteAction<com.intellij.openapi.vfs.VirtualFile?> {
+                fileSystem.refreshAndFindFileByPath(filePath)
+            }
             ?: return
         val fileEditorManager = FileEditorManager.getInstance(currentProject)
         storeAuthordSplitLayout(
