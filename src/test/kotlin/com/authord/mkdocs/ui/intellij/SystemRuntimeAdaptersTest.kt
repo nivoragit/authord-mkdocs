@@ -12,12 +12,13 @@ import kotlin.test.assertTrue
 
 private class FakeProcess(
     output: String,
+    errorOutput: String = "",
     private val exitCodeValue: Int,
     initiallyAlive: Boolean = true,
     private val waitForTimeoutResult: Boolean = true,
 ) : Process() {
     private val stdout = ByteArrayInputStream(output.toByteArray())
-    private val stderr = ByteArrayInputStream(ByteArray(0))
+    private val stderr = ByteArrayInputStream(errorOutput.toByteArray())
     private val stdin = ByteArrayOutputStream()
     private var alive = initiallyAlive
     var destroyCalls: Int = 0
@@ -94,7 +95,7 @@ private class RecordingShutdownHookRegistrar : ShutdownHookRegistrar {
 
 class SystemRuntimeAdaptersTest {
     @Test
-    fun `command runner executes command and captures merged output`() {
+    fun `command runner executes command and captures stdout output`() {
         val process = FakeProcess(output = "uv ok", exitCodeValue = 0)
         val factory = RecordingProcessFactory(process)
         val runner = ProcessBuilderCommandRunner(factory)
@@ -106,7 +107,18 @@ class SystemRuntimeAdaptersTest {
         assertEquals("", result.stderr)
         assertEquals(listOf("uv", "--version"), factory.command)
         assertEquals("/tmp/project", factory.workingDir)
-        assertTrue(factory.mergeErrorStream)
+        assertFalse(factory.mergeErrorStream)
+    }
+
+    @Test
+    fun `command runner captures stderr separately from stdout`() {
+        val process = FakeProcess(output = "out line", errorOutput = "err line", exitCodeValue = 0)
+        val runner = ProcessBuilderCommandRunner(RecordingProcessFactory(process))
+
+        val result = runner.run(command = listOf("uv", "pip", "install"), workingDir = "/tmp/project")
+
+        assertTrue(result.stdout.contains("out line"))
+        assertTrue(result.stderr.contains("err line"))
     }
 
     @Test

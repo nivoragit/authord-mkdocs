@@ -255,6 +255,49 @@ class UvBootstrapServiceTest {
     }
 
     @Test
+    fun `filters non requirement lines from mkdocs get-deps output`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-filter-deps-")
+        try {
+            projectRoot.resolve("mkdocs.yml").writeText("site_name: Demo\n")
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                when {
+                    command.contains("get-deps") ->
+                        CommandResult(
+                            exitCode = 0,
+                            stdout = """
+                            WARNING - ignored diagnostic
+                            mkdocs-glightbox
+                            invalid dependency line with spaces
+                            """.trimIndent() + "\n",
+                        )
+
+                    command[1] == "pip" && command.contains("mkdocs-glightbox") ->
+                        CommandResult(exitCode = 0)
+
+                    command[1] == "pip" && command.contains("invalid") ->
+                        CommandResult(exitCode = 1, stderr = "invalid package")
+
+                    else ->
+                        CommandResult(exitCode = 0)
+                }
+            }
+
+            val result = service.bootstrap(projectRoot.toString())
+            val runtimePath = projectRoot.resolve(".mkdocs-plugin-venv").toString()
+            assertTrue(result.success)
+            assertEquals(
+                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs-glightbox"),
+                commands[3],
+            )
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `succeeds even when mkdocs get-deps fails`() {
         val projectRoot = createTempDirectory(prefix = "uv-bootstrap-get-deps-fail-")
         try {
@@ -276,6 +319,33 @@ class UvBootstrapServiceTest {
             assertFalse(result.skipped)
             // Only 3 commands: venv + base install + get-deps (failed, no deps install)
             assertEquals(3, commands.size)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `does not cache when mkdocs get-deps fails`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-get-deps-fail-cache-")
+        try {
+            projectRoot.resolve("mkdocs.yml").writeText("site_name: Demo\n")
+            projectRoot.resolve(".mkdocs-plugin-venv").createDirectories()
+
+            val service = UvBootstrapService { command, _ ->
+                if (command.contains("get-deps")) {
+                    CommandResult(exitCode = 1, stderr = "temporary dependency probe failure")
+                } else {
+                    CommandResult(exitCode = 0)
+                }
+            }
+
+            val first = service.bootstrap(projectRoot.toString())
+            val second = service.bootstrap(projectRoot.toString())
+
+            assertTrue(first.success)
+            assertFalse(first.skipped)
+            assertTrue(second.success)
+            assertFalse(second.skipped)
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -311,6 +381,54 @@ class UvBootstrapServiceTest {
             assertTrue(result.errorMessage.contains("Declared plugins: search, glightbox"))
             assertTrue(result.errorMessage.contains("unsupported config"))
             assertEquals(3, commands.size)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `falls back to plugin package install when get-deps output is empty`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-empty-get-deps-fallback-")
+        try {
+            projectRoot.resolve("mkdocs.yml").writeText(
+                """
+                site_name: Demo
+                plugins:
+                  - search
+                  - glightbox
+                """.trimIndent() + "\n",
+            )
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                when {
+                    command.contains("get-deps") ->
+                        CommandResult(exitCode = 0, stdout = "")
+
+                    command[1] == "pip" && command.lastOrNull() == "mkdocs-search" ->
+                        CommandResult(exitCode = 1, stderr = "No matching distribution found for mkdocs-search")
+
+                    command[1] == "pip" && command.lastOrNull() == "mkdocs-glightbox" ->
+                        CommandResult(exitCode = 0)
+
+                    else ->
+                        CommandResult(exitCode = 0)
+                }
+            }
+
+            val first = service.bootstrap(projectRoot.toString())
+            val second = service.bootstrap(projectRoot.toString())
+            val fallbackCommands = commands.filter { command ->
+                command.size >= 6 && command[1] == "pip" && command[2] == "install" && command[5].startsWith("mkdocs-")
+            }
+
+            assertTrue(first.success)
+            assertFalse(first.skipped)
+            assertTrue(fallbackCommands.any { it.lastOrNull() == "mkdocs-search" })
+            assertTrue(fallbackCommands.any { it.lastOrNull() == "mkdocs-glightbox" })
+            assertTrue(second.success)
+            assertFalse(second.skipped)
         } finally {
             projectRoot.toFile().deleteRecursively()
         }

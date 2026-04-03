@@ -166,21 +166,33 @@ class ProcessBuilderCommandRunner(
     private val waitTimeoutMillis: Long = COMMAND_RUNNER_TIMEOUT_MILLIS,
 ) : CommandRunner {
     /**
-     * Runs command tokens and returns merged output + exit code.
+     * Runs command tokens and returns captured stdout/stderr + exit code.
      */
     override fun run(command: List<String>, workingDir: String): CommandResult {
         return try {
-            val process = processFactory.start(command, workingDir, mergeErrorStream = true)
-            val outputBuffer = CappedOutputBuffer(PROCESS_OUTPUT_BUFFER_MAX_CHARS)
+            val process = processFactory.start(command, workingDir, mergeErrorStream = false)
+            val stdoutBuffer = CappedOutputBuffer(PROCESS_OUTPUT_BUFFER_MAX_CHARS)
+            val stderrBuffer = CappedOutputBuffer(PROCESS_OUTPUT_BUFFER_MAX_CHARS)
             val outputLock = Any()
-            val outputReader = thread(
+            val stdoutReader = thread(
                 start = true,
                 isDaemon = true,
-                name = "authord-command-runner-output",
+                name = "authord-command-runner-stdout",
             ) {
                 process.inputStream.bufferedReader().forEachLine { line ->
                     synchronized(outputLock) {
-                        outputBuffer.appendLine(line)
+                        stdoutBuffer.appendLine(line)
+                    }
+                }
+            }
+            val stderrReader = thread(
+                start = true,
+                isDaemon = true,
+                name = "authord-command-runner-stderr",
+            ) {
+                process.errorStream.bufferedReader().forEachLine { line ->
+                    synchronized(outputLock) {
+                        stderrBuffer.appendLine(line)
                     }
                 }
             }
@@ -191,22 +203,32 @@ class ProcessBuilderCommandRunner(
                     destroyProcessTree(process, forcibly = true)
                 }
             }
-            outputReader.join(1_000L)
-            val mergedOutput = synchronized(outputLock) { outputBuffer.snapshot() }
+            stdoutReader.join(1_000L)
+            stderrReader.join(1_000L)
+            val (stdoutOutput, stderrOutput) = synchronized(outputLock) {
+                stdoutBuffer.snapshot() to stderrBuffer.snapshot()
+            }
             if (!completed) {
                 val timeoutMessage = "Command timed out after ${waitTimeoutMillis}ms"
-                val stderr = if (mergedOutput.isBlank()) timeoutMessage else "$mergedOutput\n$timeoutMessage"
+                val base = buildString {
+                    if (stderrOutput.isNotBlank()) {
+                        append(stderrOutput.trimEnd())
+                    } else if (stdoutOutput.isNotBlank()) {
+                        append(stdoutOutput.trimEnd())
+                    }
+                }
+                val stderr = if (base.isBlank()) timeoutMessage else "$base\n$timeoutMessage"
                 return CommandResult(
                     exitCode = 1,
-                    stdout = mergedOutput,
+                    stdout = stdoutOutput,
                     stderr = stderr,
                 )
             }
             val exitCode = runCatching { process.exitValue() }.getOrDefault(1)
             CommandResult(
                 exitCode = exitCode,
-                stdout = mergedOutput,
-                stderr = if (exitCode == 0) "" else mergedOutput,
+                stdout = stdoutOutput,
+                stderr = if (exitCode == 0) stderrOutput else stderrOutput.ifBlank { stdoutOutput },
             )
         } catch (exception: Exception) {
             if (exception is InterruptedException) {

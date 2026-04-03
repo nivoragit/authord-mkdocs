@@ -58,6 +58,11 @@ open class UvBootstrapService(
         val parseError: String? = null,
     )
 
+    private data class FallbackInstallResult(
+        val installedPackages: List<String>,
+        val failedPackages: List<String>,
+    )
+
     /**
      * Backward-compatible constructor that defaults to shell `uv` resolution.
      */
@@ -69,6 +74,9 @@ open class UvBootstrapService(
     private val bootstrappedProjectHashes = ConcurrentHashMap<String, String>()
     private val bootstrapLockStripes = Array(64) { Any() }
     private val baseRuntimePackages = listOf("mkdocs<2", "mkdocs-material==9.*")
+    private val requirementSpecRegex = Regex(
+        """^[A-Za-z0-9][A-Za-z0-9._-]*(\[[A-Za-z0-9_,.-]+])?([<>=!~]{1,2}[^;\s]+)?(\s*;\s*.+)?$""",
+    )
 
     /**
      * Ensures project runtime exists and required packages are installed.
@@ -115,6 +123,7 @@ open class UvBootstrapService(
             }
 
             val executed = mutableListOf<List<String>>()
+            var cacheEligible = true
 
             // Step 1: Create venv if needed
             if (!runtimeDirectory.exists()) {
@@ -164,28 +173,41 @@ open class UvBootstrapService(
 
             // Step 4: Install discovered dependencies (if any)
             if (getDepsResult.exitCode == 0) {
-                val discoveredDeps = getDepsResult.stdout
-                    .lines()
-                    .map { it.trim() }
-                    .filter { it.isNotBlank() }
-                    .distinct()
-
+                val discoveredDeps = parseDependencySpecs(getDepsResult.stdout)
                 if (discoveredDeps.isNotEmpty()) {
-                    val depsInstallCommand = buildList {
-                        addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath))
-                        addAll(discoveredDeps)
+                    val depsInstallResult = installDependencyBatch(
+                        dependencies = discoveredDeps,
+                        uvExecutable = uvExecutable,
+                        runtimePath = runtimePath,
+                        projectPath = projectPath,
+                        executed = executed,
+                        failureMessage = "Failed to install mkdocs dependencies",
+                    )
+                    if (depsInstallResult != null) {
+                        return depsInstallResult
                     }
-                    val depsInstallResult = commandRunner.run(depsInstallCommand, projectPath)
-                    executed += depsInstallCommand
-                    if (depsInstallResult.exitCode != 0) {
-                        return BootstrapResult(
-                            success = false,
+                } else {
+                    val inspection = inspectDeclaredPlugins(projectPath)
+                    if (inspection.parseError != null) {
+                        cacheEligible = false
+                    }
+                    if (inspection.declaredPluginIds.isNotEmpty()) {
+                        val fallbackPackages = inspection.declaredPluginIds
+                            .mapNotNull(MkDocsPluginDependencyResolver::packageForPlugin)
+                            .distinct()
+                        val fallbackInstallResult = installDependenciesBestEffort(
+                            dependencies = fallbackPackages,
+                            uvExecutable = uvExecutable,
                             runtimePath = runtimePath,
-                            uvExecutablePath = uvExecutable,
-                            executedCommands = executed,
-                            skipped = false,
-                            errorMessage = depsInstallResult.stderr.ifBlank { "Failed to install mkdocs dependencies" },
+                            projectPath = projectPath,
+                            executed = executed,
                         )
+                        if (fallbackInstallResult.failedPackages.isNotEmpty()) {
+                            cacheEligible = false
+                        }
+                        if (fallbackInstallResult.installedPackages.isEmpty()) {
+                            cacheEligible = false
+                        }
                     }
                 }
             } else {
@@ -205,9 +227,12 @@ open class UvBootstrapService(
                         ),
                     )
                 }
+                cacheEligible = false
             }
 
-            bootstrappedProjectHashes[projectKey] = currentHash
+            if (cacheEligible) {
+                bootstrappedProjectHashes[projectKey] = currentHash
+            }
             return BootstrapResult(
                 success = true,
                 runtimePath = runtimePath,
@@ -382,6 +407,75 @@ open class UvBootstrapService(
             append(" mkdocs get-deps stderr: ")
             append(stderrSummary)
         }
+    }
+
+    private fun parseDependencySpecs(rawStdout: String): List<String> {
+        return rawStdout
+            .lineSequence()
+            .map(String::trim)
+            .filter { it.isNotBlank() }
+            .filter { line -> requirementSpecRegex.matches(line) }
+            .distinct()
+            .toList()
+    }
+
+    private fun installDependencyBatch(
+        dependencies: List<String>,
+        uvExecutable: String,
+        runtimePath: String,
+        projectPath: String,
+        executed: MutableList<List<String>>,
+        failureMessage: String,
+    ): BootstrapResult? {
+        val depsInstallCommand = buildList {
+            addAll(listOf(uvExecutable, "pip", "install", "--python", runtimePath))
+            addAll(dependencies)
+        }
+        val depsInstallResult = commandRunner.run(depsInstallCommand, projectPath)
+        executed += depsInstallCommand
+        if (depsInstallResult.exitCode == 0) {
+            return null
+        }
+        return BootstrapResult(
+            success = false,
+            runtimePath = runtimePath,
+            uvExecutablePath = uvExecutable,
+            executedCommands = executed,
+            skipped = false,
+            errorMessage = depsInstallResult.stderr.ifBlank { failureMessage },
+        )
+    }
+
+    private fun installDependenciesBestEffort(
+        dependencies: List<String>,
+        uvExecutable: String,
+        runtimePath: String,
+        projectPath: String,
+        executed: MutableList<List<String>>,
+    ): FallbackInstallResult {
+        if (dependencies.isEmpty()) {
+            return FallbackInstallResult(
+                installedPackages = emptyList(),
+                failedPackages = emptyList(),
+            )
+        }
+
+        val installed = mutableListOf<String>()
+        val failed = mutableListOf<String>()
+        dependencies.forEach { dependency ->
+            val installCommand = listOf(uvExecutable, "pip", "install", "--python", runtimePath, dependency)
+            val installResult = commandRunner.run(installCommand, projectPath)
+            executed += installCommand
+            if (installResult.exitCode == 0) {
+                installed += dependency
+            } else {
+                failed += dependency
+            }
+        }
+        return FallbackInstallResult(
+            installedPackages = installed,
+            failedPackages = failed,
+        )
     }
 
     private fun lockFor(projectKey: String): Any {

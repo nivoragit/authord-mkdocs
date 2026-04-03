@@ -331,10 +331,11 @@ class RuntimeAdapterCoverageEdgeCasesTest {
             assertTrue(result.success)
             assertFalse(result.skipped)
 
-            // Second call should skip (hash is stable even with unreadable files)
+            // Second call should re-run because dependency discovery confidence is low
+            // when config inspection cannot reliably parse plugin declarations.
             val second = service.bootstrap(root.toString())
             assertTrue(second.success)
-            assertTrue(second.skipped)
+            assertFalse(second.skipped)
         } finally {
             root.toFile().deleteRecursively()
         }
