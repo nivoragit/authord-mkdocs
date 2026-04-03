@@ -79,4 +79,5 @@ data class TopicSyncOutcome(
     val rolledBack: Boolean,
     val compensated: Boolean,
     val message: String,
+    val appliedFileOperations: List<TopicFileOperation> = emptyList(),
 )

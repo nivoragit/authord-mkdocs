@@ -383,7 +383,13 @@ class TopicTreeFileMutationDerivationTest {
             )
 
             assertTrue(outcome.applied)
-            assertEquals(listOf("create:missing/child.md"), docsGateway.calls)
+            assertEquals(
+                listOf(
+                    "rewrite:missing.md->missing/index.md",
+                    "create:missing/child.md",
+                ),
+                docsGateway.calls,
+            )
             val writtenRoot = configGateway.writes.last().nav.single()
             assertEquals("Missing", writtenRoot.title)
             assertEquals(null, writtenRoot.path)

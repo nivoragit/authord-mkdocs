@@ -5,6 +5,7 @@ import com.intellij.openapi.fileEditor.FileEditorManager
 import com.intellij.openapi.fileEditor.FileEditorManagerListener
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.util.Key
 import com.intellij.openapi.util.SystemInfoRt
 import com.intellij.openapi.vfs.VirtualFile
 
@@ -37,6 +38,9 @@ internal class AuthordMarkdownOpenPreviewListener(
         if (project.isDisposed) {
             return
         }
+        if (isPreviewDispatchSuppressed(project, selectedPath)) {
+            return
+        }
         val decision = routerResolver().decide(project, selectedPath)
         if (decision.target != PreviewRouteTarget.AUTHORD) {
             return
@@ -55,7 +59,7 @@ internal class AuthordMarkdownOpenPreviewListener(
             runtimeService.dispatchPreviewForSelectedFileWithRetry(
                 selectedPath = selectedPath,
                 source = PreviewRouteIntentSource.MARKDOWN_OPEN,
-                forceReload = true,
+                forceReload = false,
                 loadUrl = { url, forceReload -> browserService.loadUrl(url, forceReload) },
                 shouldRetry = { isFileSelectedForPreview(project, selectedPath) },
             )
@@ -78,7 +82,7 @@ internal class AuthordMarkdownOpenPreviewListener(
             val applied = runtimeService.dispatchPreviewForSelectedFileWithRetry(
                 selectedPath = selectedPath,
                 source = PreviewRouteIntentSource.MARKDOWN_OPEN,
-                forceReload = true,
+                forceReload = false,
                 loadUrl = { url, forceReload -> browserService.loadUrl(url, forceReload) },
                 shouldRetry = { isFileSelectedForPreview(project, selectedPath) },
             )
@@ -106,5 +110,36 @@ internal class AuthordMarkdownOpenPreviewListener(
     private fun comparablePath(path: String): String {
         val normalized = path.replace('\\', '/')
         return if (SystemInfoRt.isFileSystemCaseSensitive) normalized else normalized.lowercase()
+    }
+
+    private fun isPreviewDispatchSuppressed(project: Project, selectedPath: String): Boolean {
+        val suppression = project.getUserData(SUPPRESSED_SELECTION_KEY) ?: return false
+        val now = System.currentTimeMillis()
+        if (now > suppression.expiresAtMillis) {
+            project.putUserData(SUPPRESSED_SELECTION_KEY, null)
+            return false
+        }
+        return suppression.comparablePath == comparablePath(selectedPath)
+    }
+
+    private data class PreviewSelectionSuppression(
+        val comparablePath: String,
+        val expiresAtMillis: Long,
+    )
+
+    companion object {
+        private val SUPPRESSED_SELECTION_KEY: Key<PreviewSelectionSuppression> =
+            Key.create("authord.preview.suppressed.selection")
+        private const val SUPPRESSION_WINDOW_MILLIS: Long = 1_500L
+
+        internal fun suppressNextSelectionDrivenDispatch(project: Project, filePath: String) {
+            val normalized = filePath.replace('\\', '/')
+            val comparable = if (SystemInfoRt.isFileSystemCaseSensitive) normalized else normalized.lowercase()
+            val expiresAt = System.currentTimeMillis() + SUPPRESSION_WINDOW_MILLIS
+            project.putUserData(
+                SUPPRESSED_SELECTION_KEY,
+                PreviewSelectionSuppression(comparablePath = comparable, expiresAtMillis = expiresAt),
+            )
+        }
     }
 }

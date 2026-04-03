@@ -82,8 +82,8 @@ class MkDocsProjectCreator(
             "install",
             "--python",
             runtimePath,
-            "mkdocs",
-            "mkdocs-material",
+            "mkdocs<2",
+            "mkdocs-material==9.*",
         )
         val installMkdocsResult = commandRunner.run(installMkdocsCommand, projectRoot.toString())
         if (installMkdocsResult.exitCode != 0) {

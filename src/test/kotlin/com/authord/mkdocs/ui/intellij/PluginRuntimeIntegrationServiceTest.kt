@@ -7,6 +7,8 @@ import com.authord.mkdocs.runtime.ManagedProcessHandle
 import com.authord.mkdocs.runtime.MkdocsProcessManager
 import com.authord.mkdocs.runtime.ProcessLauncher
 import com.authord.mkdocs.runtime.UvBootstrapService
+import com.authord.mkdocs.ports.topic.TopicFileOperation
+import com.authord.mkdocs.ports.topic.TopicFileOperationKind
 import com.authord.mkdocs.ui.ActivationErrorPresenter
 import com.authord.mkdocs.ui.FeatureFlagPolicyService
 import com.authord.mkdocs.ui.NavigationCoordinator
@@ -837,7 +839,7 @@ class PluginRuntimeIntegrationServiceTest {
     }
 
     @Test
-    fun `on topic mutation commit rebuilds verified preview url cache list from disk`() {
+    fun `on topic mutation commit updates verified preview url cache from mutation file operations`() {
         val projectRoot = createTempDirectory(prefix = "runtime-dispatch-cache-rebuild-")
         try {
             val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
@@ -900,7 +902,13 @@ class PluginRuntimeIntegrationServiceTest {
             service.overrideDependenciesForTesting(dependencies)
 
             assertTrue(cachedPreviewTargetUrls(service).isEmpty())
-            service.onTopicMutationCommitted()
+            service.onTopicMutationCommitted(
+                fileOperations = listOf(
+                    TopicFileOperation(TopicFileOperationKind.CREATE, "guide/index.md"),
+                    TopicFileOperation(TopicFileOperationKind.CREATE, "tutorials/setup.md"),
+                    TopicFileOperation(TopicFileOperationKind.CREATE, "nested/deep/page.md"),
+                ),
+            )
 
             val cachedUrls = cachedPreviewTargetUrls(service)
             assertEquals(
@@ -1195,7 +1203,11 @@ class PluginRuntimeIntegrationServiceTest {
             val loaded = mutableListOf<Pair<String, Boolean>>()
             val expectedUrl = "http://127.0.0.1:65530/guides/new-page/"
 
-            service.onTopicMutationCommitted()
+            service.onTopicMutationCommitted(
+                fileOperations = listOf(
+                    TopicFileOperation(TopicFileOperationKind.CREATE, "guides/new-page.md"),
+                ),
+            )
             assertTrue(cachedPreviewTargetUrls(service).contains(expectedUrl))
 
             val dispatched = service.dispatchPreviewForSelectedFileWithRetry(

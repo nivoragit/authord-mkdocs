@@ -5,6 +5,9 @@ import java.nio.file.Path
 import java.security.MessageDigest
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.io.path.exists
+import org.yaml.snakeyaml.LoaderOptions
+import org.yaml.snakeyaml.Yaml
+import org.yaml.snakeyaml.inspector.TagInspector
 
 /**
  * Runs a process command in a given working directory.
@@ -49,6 +52,12 @@ open class UvBootstrapService(
     private val commandRunner: CommandRunner,
     private val uvExecutableProvider: UvExecutableProvider,
 ) {
+    private data class DeclaredPluginsInspection(
+        val configPath: Path?,
+        val declaredPluginIds: List<String>,
+        val parseError: String? = null,
+    )
+
     /**
      * Backward-compatible constructor that defaults to shell `uv` resolution.
      */
@@ -59,14 +68,14 @@ open class UvBootstrapService(
 
     private val bootstrappedProjectHashes = ConcurrentHashMap<String, String>()
     private val bootstrapLockStripes = Array(64) { Any() }
-    private val baseRuntimePackages = listOf("mkdocs", "mkdocs-material")
+    private val baseRuntimePackages = listOf("mkdocs<2", "mkdocs-material==9.*")
 
     /**
      * Ensures project runtime exists and required packages are installed.
      *
      * The bootstrap process:
      * 1. Creates a virtual environment (if needed).
-     * 2. Installs runtime base packages (`mkdocs`, `mkdocs-material`) and any `requirements.txt`.
+     * 2. Installs runtime base packages (`mkdocs<2`, `mkdocs-material==9.*`) and any `requirements.txt`.
      * 3. Runs `mkdocs get-deps` to discover all dependencies from `mkdocs.yml`.
      * 4. Installs the discovered dependencies.
      *
@@ -179,9 +188,24 @@ open class UvBootstrapService(
                         )
                     }
                 }
+            } else {
+                val inspection = inspectDeclaredPlugins(projectPath)
+                if (inspection.parseError != null || inspection.declaredPluginIds.isNotEmpty()) {
+                    return BootstrapResult(
+                        success = false,
+                        runtimePath = runtimePath,
+                        uvExecutablePath = uvExecutable,
+                        executedCommands = executed,
+                        skipped = false,
+                        errorMessage = buildGetDepsFailureMessage(
+                            configPath = inspection.configPath,
+                            declaredPlugins = inspection.declaredPluginIds,
+                            getDepsStderr = getDepsResult.stderr,
+                            parseError = inspection.parseError,
+                        ),
+                    )
+                }
             }
-            // If get-deps fails (e.g., bad config), we still succeed with base packages installed.
-            // The user will see the MkDocs error when they try to serve.
 
             bootstrappedProjectHashes[projectKey] = currentHash
             return BootstrapResult(
@@ -257,6 +281,107 @@ open class UvBootstrapService(
     private fun normalizeProjectPath(projectPath: String): String {
         return runCatching { Path.of(projectPath).toAbsolutePath().normalize().toString() }
             .getOrDefault(projectPath)
+    }
+
+    private fun inspectDeclaredPlugins(projectPath: String): DeclaredPluginsInspection {
+        val configPath = resolveMkdocsConfigPath(projectPath)
+        if (configPath == null) {
+            return DeclaredPluginsInspection(
+                configPath = null,
+                declaredPluginIds = emptyList(),
+            )
+        }
+
+        return runCatching {
+            val loaderOptions = LoaderOptions().apply {
+                tagInspector = TagInspector { true }
+            }
+            val root = Files.newBufferedReader(configPath).use { reader ->
+                Yaml(loaderOptions).load<Any?>(reader)
+            }
+            val rootMap = root as? Map<*, *> ?: emptyMap<String, Any?>()
+            val pluginsValue = rootMap.entries
+                .firstOrNull { (rawKey, _) -> normalizeYamlKey(rawKey?.toString().orEmpty()) == "plugins" }
+                ?.value
+            DeclaredPluginsInspection(
+                configPath = configPath,
+                declaredPluginIds = extractDeclaredPluginIds(pluginsValue),
+            )
+        }.getOrElse { error ->
+            DeclaredPluginsInspection(
+                configPath = configPath,
+                declaredPluginIds = emptyList(),
+                parseError = error.message ?: "Unknown parse error",
+            )
+        }
+    }
+
+    private fun extractDeclaredPluginIds(rawPlugins: Any?): List<String> {
+        val pluginIds = when (rawPlugins) {
+            is List<*> -> rawPlugins.mapNotNull(::extractDeclaredPluginId)
+            is Map<*, *> -> rawPlugins.keys.mapNotNull { key -> key?.toString() }
+            else -> listOfNotNull(extractDeclaredPluginId(rawPlugins))
+        }
+        return pluginIds
+            .map(::normalizePluginId)
+            .filter { it.isNotEmpty() }
+            .distinct()
+    }
+
+    private fun extractDeclaredPluginId(rawPlugin: Any?): String? {
+        return when (rawPlugin) {
+            is String -> rawPlugin
+            is Map<*, *> -> rawPlugin.entries.firstOrNull()?.key?.toString()
+            else -> null
+        }
+    }
+
+    private fun normalizePluginId(pluginId: String): String {
+        return pluginId
+            .trim()
+            .removePrefix("'")
+            .removeSuffix("'")
+            .removePrefix("\"")
+            .removeSuffix("\"")
+            .lowercase()
+            .replace('_', '-')
+    }
+
+    private fun normalizeYamlKey(rawKey: String): String {
+        return rawKey
+            .trim()
+            .removePrefix("'")
+            .removeSuffix("'")
+            .removePrefix("\"")
+            .removeSuffix("\"")
+            .lowercase()
+    }
+
+    private fun buildGetDepsFailureMessage(
+        configPath: Path?,
+        declaredPlugins: List<String>,
+        getDepsStderr: String,
+        parseError: String?,
+    ): String {
+        val configFileName = configPath?.fileName?.toString() ?: "mkdocs.yml"
+        val pluginSummary = declaredPlugins.joinToString(", ")
+        val stderrSummary = getDepsStderr.trim().ifBlank { "No stderr captured from `mkdocs get-deps`." }
+        return buildString {
+            append("Failed to resolve MkDocs plugin dependencies from `$configFileName`.")
+            if (pluginSummary.isNotBlank()) {
+                append(" Declared plugins: ")
+                append(pluginSummary)
+                append(".")
+            }
+            append(" This commonly happens when the runtime has an incompatible MkDocs version.")
+            parseError?.let { detail ->
+                append(" Config inspection error: ")
+                append(detail)
+                append(".")
+            }
+            append(" mkdocs get-deps stderr: ")
+            append(stderrSummary)
+        }
     }
 
     private fun lockFor(projectKey: String): Any {

@@ -40,7 +40,7 @@ class UvBootstrapServiceTest {
         assertEquals(listOf("uv", "venv", expectedRuntimePath), commands[0])
         // Step 2: install runtime base packages
         assertEquals(
-            listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs", "mkdocs-material"),
+            listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs<2", "mkdocs-material==9.*"),
             commands[1],
         )
         // Step 3: mkdocs get-deps
@@ -68,7 +68,7 @@ class UvBootstrapServiceTest {
         assertEquals(customUv, result.uvExecutablePath)
         assertEquals(listOf(customUv, "venv", expectedRuntimePath), commands[0])
         assertEquals(
-            listOf(customUv, "pip", "install", "--python", expectedRuntimePath, "mkdocs", "mkdocs-material"),
+            listOf(customUv, "pip", "install", "--python", expectedRuntimePath, "mkdocs<2", "mkdocs-material==9.*"),
             commands[1],
         )
     }
@@ -113,7 +113,7 @@ class UvBootstrapServiceTest {
             assertFalse(result.skipped)
             // No venv command, just install + get-deps
             assertEquals(
-                listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs", "mkdocs-material"),
+                listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs<2", "mkdocs-material==9.*"),
                 commands[0],
             )
             assertTrue(commands[1].contains("get-deps"))
@@ -147,7 +147,7 @@ class UvBootstrapServiceTest {
         assertEquals("venv", commands[0][1])
         assertEquals("pip", commands[1][1])
         assertEquals(
-            listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs", "mkdocs-material"),
+            listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs<2", "mkdocs-material==9.*"),
             commands[1],
         )
     }
@@ -175,7 +175,7 @@ class UvBootstrapServiceTest {
         assertTrue(result.success)
         assertFalse(result.skipped)
         assertEquals(
-            listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs", "mkdocs-material"),
+            listOf("uv", "pip", "install", "--python", expectedRuntimePath, "mkdocs<2", "mkdocs-material==9.*"),
             commands[1],
         )
     }
@@ -212,7 +212,7 @@ class UvBootstrapServiceTest {
             assertEquals(listOf("uv", "venv", runtimePath), commands[0])
             // Step 2: install runtime base packages
             assertEquals(
-                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs", "mkdocs-material"),
+                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs<2", "mkdocs-material==9.*"),
                 commands[1],
             )
             // Step 3: get-deps
@@ -282,6 +282,41 @@ class UvBootstrapServiceTest {
     }
 
     @Test
+    fun `fails when mkdocs get-deps fails and plugins are declared`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-get-deps-fail-with-plugins-")
+        try {
+            projectRoot.resolve("mkdocs.yml").writeText(
+                """
+                site_name: Demo
+                plugins:
+                  - search
+                  - glightbox
+                """.trimIndent() + "\n",
+            )
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                if (command.contains("get-deps")) {
+                    CommandResult(exitCode = 1, stderr = "unsupported config")
+                } else {
+                    CommandResult(exitCode = 0)
+                }
+            }
+
+            val result = service.bootstrap(projectRoot.toString())
+
+            assertFalse(result.success)
+            assertTrue(result.errorMessage.contains("Failed to resolve MkDocs plugin dependencies"))
+            assertTrue(result.errorMessage.contains("Declared plugins: search, glightbox"))
+            assertTrue(result.errorMessage.contains("unsupported config"))
+            assertEquals(3, commands.size)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `includes requirements file in base install command`() {
         val projectRoot = createTempDirectory(prefix = "uv-bootstrap-requirements-")
         try {
@@ -307,8 +342,8 @@ class UvBootstrapServiceTest {
                     "install",
                     "--python",
                     runtimePath,
-                    "mkdocs",
-                    "mkdocs-material",
+                    "mkdocs<2",
+                    "mkdocs-material==9.*",
                     "-r",
                     requirementsPath.toString(),
                 ),

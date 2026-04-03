@@ -156,6 +156,7 @@ class TopicTreeSyncOrchestratorService(
             rolledBack = false,
             compensated = false,
             message = "Applied",
+            appliedFileOperations = allFileOperations,
         )
         rememberTransactionOutcome(outcome)
         return TopicGatewayResult.Success(outcome)

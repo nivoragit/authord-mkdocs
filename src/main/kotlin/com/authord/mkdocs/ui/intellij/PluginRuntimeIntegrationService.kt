@@ -18,6 +18,8 @@ import com.authord.mkdocs.ui.PluginActivationService
 import com.authord.mkdocs.ui.PreviewNavigationFailureHandler
 import com.authord.mkdocs.ui.PreviewPaneCoordinator
 import com.authord.mkdocs.core.navigation.RouteMappingService
+import com.authord.mkdocs.ports.topic.TopicFileOperation
+import com.authord.mkdocs.ports.topic.TopicFileOperationKind
 import com.intellij.ui.JBColor
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ModalityState
@@ -46,6 +48,8 @@ private const val DEFAULT_PREVIEW_DISPATCH_RETRY_ATTEMPTS: Int = 2
 private const val DEFAULT_PREVIEW_DISPATCH_RETRY_DELAY_MS: Long = 1_200L
 private const val TOPIC_MUTATION_VERIFICATION_HOLD_DELAY_MS: Long = 150L
 private const val MAX_DOCS_ROUTE_SCAN_DEPTH: Int = 20
+private const val TOC_ROUTE_READY_CACHE_TTL_MS: Long = 10_000L
+private const val MAX_READY_ROUTE_CACHE_ENTRIES: Int = 256
 
 /**
  * Trigger source used to start plugin preview runtime flow.
@@ -184,6 +188,7 @@ class PluginRuntimeIntegrationService(
     private var topicMutationConfigVerificationPending: Boolean = false
     private var lastVerifiedTopicMutationConfigFingerprint: String? = null
     private var navPresentFromParsedConfigState: Boolean = false
+    private val recentlyReadyRouteExpiryByUrl = linkedMapOf<String, Long>()
     private val previewOperationExecutor = Executors.newSingleThreadExecutor { runnable ->
         Thread(runnable, "authord-preview-operation-${project.locationHash}").apply { isDaemon = true }
     }
@@ -336,6 +341,7 @@ class PluginRuntimeIntegrationService(
      */
     fun stopPreview(): Boolean {
         clearVerifiedPreviewRouteCache()
+        clearReadyRouteCacheForFastPath()
         clearTopicMutationConfigVerification()
         return previewRuntimeService.stopServer()
     }
@@ -549,6 +555,25 @@ class PluginRuntimeIntegrationService(
         }
 
         val generation = previewRouteIntentGeneration.incrementAndGet()
+        val normalizedTargetUrl = intent.targetUrl.trim()
+        val fastPathHit = intent.source == PreviewRouteIntentSource.TOOL_WINDOW_SELECTION &&
+            !forceReload &&
+            isKnownReadyRouteForFastPath(normalizedTargetUrl)
+        if (fastPathHit) {
+            notifyRouteState(onStateChanged, PreviewRouteFlowState.INTENT_ACCEPTED, normalizedTargetUrl)
+            notifyRouteState(onStateChanged, PreviewRouteFlowState.ROUTE_READY, normalizedTargetUrl)
+            loadUrl(normalizedTargetUrl, forceReload)
+            rememberReadyRouteForFastPath(normalizedTargetUrl)
+            notifyRouteState(onStateChanged, PreviewRouteFlowState.LOADED, normalizedTargetUrl)
+            return true
+        }
+
+        val stateBridge: (PreviewRouteFlowState, String) -> Unit = { state, url ->
+            if (state == PreviewRouteFlowState.LOADED) {
+                rememberReadyRouteForFastPath(url)
+            }
+            onStateChanged?.invoke(state, url)
+        }
         loadPreviewRouteWithReadinessGuard(
             project = project,
             targetUrl = intent.targetUrl,
@@ -563,7 +588,7 @@ class PluginRuntimeIntegrationService(
             } else {
                 null
             },
-            onStateChanged = onStateChanged,
+            onStateChanged = stateBridge,
             onRouteUnavailable = onRouteUnavailable,
         )
         return true
@@ -597,10 +622,14 @@ class PluginRuntimeIntegrationService(
      * The latest parsed config nav-state is supplied by topic-tree UI flows and persisted so each
      * mutation can decide whether a stabilization hold is needed before livereload is nudged.
      *
-     * Each invocation is treated as a mutation batch boundary and rebuilds the verified preview
-     * URL cache from disk before any follow-up navigation.
+     * Route-cache entries are updated from mutation operation deltas when available, with
+     * full-scan fallback when delta application is unsafe.
      */
-    fun onTopicMutationCommitted(navPresent: Boolean? = null): Boolean {
+    fun onTopicMutationCommitted(
+        navPresent: Boolean? = null,
+        fileOperations: List<TopicFileOperation> = emptyList(),
+    ): Boolean {
+        clearReadyRouteCacheForFastPath()
         val effectiveNavPresent = withStateLock {
             val resolved = navPresent ?: navPresentFromParsedConfigState
             navPresentFromParsedConfigState = resolved
@@ -610,7 +639,10 @@ class PluginRuntimeIntegrationService(
         val browserService = runCatching {
             project.getService(MkDocsPreviewBrowserService::class.java)
         }.getOrNull()
-        rebuildVerifiedPreviewRouteCacheFromDisk()
+        val cacheDeltaApplied = applyTopicMutationRouteCacheDelta(fileOperations)
+        if (!cacheDeltaApplied) {
+            rebuildVerifiedPreviewRouteCacheFromDisk()
+        }
         browserService?.resetLastLoadedUrl()
         if (!isRuntimeRunning() || !usesDirtyLivereloadServeMode()) {
             return false
@@ -631,17 +663,18 @@ class PluginRuntimeIntegrationService(
      */
     fun onTopicMutationCommittedAsync(
         navPresent: Boolean? = null,
+        fileOperations: List<TopicFileOperation> = emptyList(),
         onComplete: ((Boolean) -> Unit)? = null,
     ) {
         val application = ApplicationManager.getApplication()
         if (application == null) {
-            val result = onTopicMutationCommitted(navPresent)
+            val result = onTopicMutationCommitted(navPresent, fileOperations)
             onComplete?.invoke(result)
             return
         }
 
         application.executeOnPooledThread {
-            val result = onTopicMutationCommitted(navPresent)
+            val result = onTopicMutationCommitted(navPresent, fileOperations)
             application.invokeLater(
                 {
                     if (!project.isDisposed) {
@@ -726,6 +759,7 @@ class PluginRuntimeIntegrationService(
             lastConfigFingerprint = null
         }
         clearVerifiedPreviewRouteCache()
+        clearReadyRouteCacheForFastPath()
         clearTopicMutationConfigVerification()
     }
 
@@ -1028,6 +1062,176 @@ class PluginRuntimeIntegrationService(
         }
     }
 
+    private fun applyTopicMutationRouteCacheDelta(fileOperations: List<TopicFileOperation>): Boolean {
+        if (fileOperations.isEmpty()) {
+            return true
+        }
+        val baseUrl = ensureVerifiedPreviewRouteCacheBaseUrl() ?: return true
+        val scope = resolveActiveRuntimeScope()
+        val docsDirPath = scope.docsDirPath
+        if (docsDirPath == null || !runCatching { Files.isDirectory(docsDirPath) }.getOrDefault(false)) {
+            return false
+        }
+        val orderedOperations = fileOperations
+            .withIndex()
+            .sortedWith(
+                compareBy<IndexedValue<TopicFileOperation>>(
+                    { indexed -> previewRouteCacheDeltaPriority(indexed.value.kind) },
+                    { indexed -> indexed.index },
+                ),
+            )
+            .map { indexed -> indexed.value }
+        val updatedEntries = withStateLock {
+            val state = verifiedPreviewRouteCacheState
+            if (state.baseUrl != baseUrl) {
+                null
+            } else {
+                LinkedHashMap(state.entries)
+            }
+        } ?: run {
+            return false
+        }
+        for (operation in orderedOperations) {
+            val applied = applyTopicMutationRouteCacheOperation(
+                operation = operation,
+                docsDirPath = docsDirPath,
+                baseUrl = baseUrl,
+                useDirectoryUrls = scope.useDirectoryUrls,
+                entries = updatedEntries,
+            )
+            if (!applied) {
+                return false
+            }
+        }
+        val committed = withStateLock {
+            val state = verifiedPreviewRouteCacheState
+            if (state.baseUrl != baseUrl) {
+                false
+            } else {
+                verifiedPreviewRouteCacheState = state.copy(entries = updatedEntries)
+                true
+            }
+        }
+        return committed
+    }
+
+    private fun applyTopicMutationRouteCacheOperation(
+        operation: TopicFileOperation,
+        docsDirPath: Path,
+        baseUrl: String,
+        useDirectoryUrls: Boolean,
+        entries: MutableMap<String, VerifiedPreviewRouteEntry>,
+    ): Boolean {
+        when (operation.kind) {
+            TopicFileOperationKind.REWRITE_LINKS -> return true
+
+            TopicFileOperationKind.DELETE -> {
+                val sourceRelative = normalizeOperationRelativePath(operation.sourcePath) ?: return false
+                val sourceAbsolute = resolveOperationPathWithinDocs(sourceRelative, docsDirPath) ?: return false
+                val sourceMarkdown = normalizeMarkdownRelativePath(sourceRelative)
+                    ?.trimStart('/')
+                    ?.takeIf { it.isNotBlank() }
+                if (sourceMarkdown == null) {
+                    return true
+                }
+                entries.remove(previewRouteCacheKey(sourceAbsolute))
+                return true
+            }
+
+            TopicFileOperationKind.CREATE -> {
+                val sourceRelative = normalizeOperationRelativePath(operation.sourcePath) ?: return false
+                val sourceAbsolute = resolveOperationPathWithinDocs(sourceRelative, docsDirPath) ?: return false
+                val sourceMarkdown = normalizeMarkdownRelativePath(sourceRelative)
+                    ?.trimStart('/')
+                    ?.takeIf { it.isNotBlank() }
+                if (sourceMarkdown == null) {
+                    return true
+                }
+                val entry = composeVerifiedPreviewRouteEntry(
+                    markdownRelativePath = sourceMarkdown,
+                    baseUrl = baseUrl,
+                    useDirectoryUrls = useDirectoryUrls,
+                ) ?: return false
+                entries[previewRouteCacheKey(sourceAbsolute)] = entry
+                return true
+            }
+
+            TopicFileOperationKind.MOVE,
+            TopicFileOperationKind.RENAME,
+            -> {
+                val sourceRelative = normalizeOperationRelativePath(operation.sourcePath) ?: return false
+                val targetRelative = normalizeOperationRelativePath(operation.targetPath) ?: return false
+                val sourceAbsolute = resolveOperationPathWithinDocs(sourceRelative, docsDirPath) ?: return false
+                val targetAbsolute = resolveOperationPathWithinDocs(targetRelative, docsDirPath) ?: return false
+                val sourceMarkdown = normalizeMarkdownRelativePath(sourceRelative)
+                    ?.trimStart('/')
+                    ?.takeIf { it.isNotBlank() }
+                val targetMarkdown = normalizeMarkdownRelativePath(targetRelative)
+                    ?.trimStart('/')
+                    ?.takeIf { it.isNotBlank() }
+                if (sourceMarkdown == null && targetMarkdown == null) {
+                    return true
+                }
+                if (sourceMarkdown != null) {
+                    entries.remove(previewRouteCacheKey(sourceAbsolute))
+                }
+                if (targetMarkdown == null) {
+                    return true
+                }
+                val entry = composeVerifiedPreviewRouteEntry(
+                    markdownRelativePath = targetMarkdown,
+                    baseUrl = baseUrl,
+                    useDirectoryUrls = useDirectoryUrls,
+                ) ?: return false
+                entries[previewRouteCacheKey(targetAbsolute)] = entry
+                return true
+            }
+        }
+    }
+
+    private fun previewRouteCacheDeltaPriority(kind: TopicFileOperationKind): Int {
+        return when (kind) {
+            TopicFileOperationKind.MOVE -> 0
+            TopicFileOperationKind.RENAME -> 1
+            TopicFileOperationKind.DELETE -> 2
+            TopicFileOperationKind.CREATE -> 3
+            TopicFileOperationKind.REWRITE_LINKS -> 4
+        }
+    }
+
+    private fun normalizeOperationRelativePath(path: String?): String? {
+        return path
+            ?.trim()
+            ?.takeIf { it.isNotEmpty() }
+            ?.replace('\\', '/')
+            ?.trimStart('/')
+            ?.takeIf { it.isNotEmpty() }
+    }
+
+    private fun resolveOperationPathWithinDocs(relativePath: String, docsDirPath: Path): Path? {
+        val resolved = runCatching { docsDirPath.resolve(relativePath).normalize() }.getOrNull() ?: return null
+        return if (resolved.startsWith(docsDirPath)) {
+            resolved
+        } else {
+            null
+        }
+    }
+
+    private fun composeVerifiedPreviewRouteEntry(
+        markdownRelativePath: String,
+        baseUrl: String,
+        useDirectoryUrls: Boolean,
+    ): VerifiedPreviewRouteEntry? {
+        val route = routeMappingService.mapToRoute(
+            selectedPath = "docs/${markdownRelativePath.trimStart('/')}",
+            useDirectoryUrls = useDirectoryUrls,
+        ) ?: return null
+        return VerifiedPreviewRouteEntry(
+            route = route,
+            targetUrl = composePreviewTargetUrl(baseUrl, route),
+        )
+    }
+
     private fun resolvePreviewRouteEntry(
         selectedPath: String,
         scope: RuntimeScope,
@@ -1143,6 +1347,7 @@ class PluginRuntimeIntegrationService(
                     baseUrl = baseUrl,
                     entries = emptyMap(),
                 )
+                recentlyReadyRouteExpiryByUrl.clear()
             }
         }
         return baseUrl
@@ -1159,6 +1364,61 @@ class PluginRuntimeIntegrationService(
         withStateLock {
             verifiedPreviewRouteCacheState = VerifiedPreviewRouteCacheState()
         }
+    }
+
+    private fun rememberReadyRouteForFastPath(url: String) {
+        val normalized = url.trim()
+        if (normalized.isEmpty()) {
+            return
+        }
+        val now = System.currentTimeMillis()
+        val expiresAt = now + TOC_ROUTE_READY_CACHE_TTL_MS
+        withStateLock {
+            purgeExpiredReadyRoutesLocked(now)
+            recentlyReadyRouteExpiryByUrl[normalized] = expiresAt
+            while (recentlyReadyRouteExpiryByUrl.size > MAX_READY_ROUTE_CACHE_ENTRIES) {
+                val evicted = recentlyReadyRouteExpiryByUrl.keys.firstOrNull() ?: break
+                recentlyReadyRouteExpiryByUrl.remove(evicted)
+            }
+        }
+    }
+
+    private fun isKnownReadyRouteForFastPath(url: String): Boolean {
+        val normalized = url.trim()
+        if (normalized.isEmpty()) {
+            return false
+        }
+        val now = System.currentTimeMillis()
+        val hit = withStateLock {
+            purgeExpiredReadyRoutesLocked(now)
+            val expiresAt = recentlyReadyRouteExpiryByUrl[normalized] ?: return@withStateLock false
+            expiresAt > now
+        }
+        return hit
+    }
+
+    private fun clearReadyRouteCacheForFastPath() {
+        withStateLock {
+            recentlyReadyRouteExpiryByUrl.clear()
+        }
+    }
+
+    private fun purgeExpiredReadyRoutesLocked(now: Long) {
+        val iterator = recentlyReadyRouteExpiryByUrl.entries.iterator()
+        while (iterator.hasNext()) {
+            val entry = iterator.next()
+            if (entry.value <= now) {
+                iterator.remove()
+            }
+        }
+    }
+
+    private fun notifyRouteState(
+        listener: ((PreviewRouteFlowState, String) -> Unit)?,
+        state: PreviewRouteFlowState,
+        url: String,
+    ) {
+        runCatching { listener?.invoke(state, url) }
     }
 
     private fun composePreviewTargetUrl(baseUrl: String, route: String): String {

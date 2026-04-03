@@ -19,6 +19,10 @@ internal data class PreviewStartupFailure(
 
 internal object PreviewStartupFailureClassifier {
     private val moduleMissingRegex = Regex("""No module named ['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
+    private val pluginMissingRegex = Regex(
+        """(?:Config value ['"]plugins['"]:\s*)?(?:The\s+)?['"]([^'"]+)['"]\s+plugin\s+is\s+not\s+installed""",
+        RegexOption.IGNORE_CASE,
+    )
 
     fun classify(rawMessage: String): PreviewStartupFailure {
         val normalized = rawMessage.trim()
@@ -66,6 +70,21 @@ internal object PreviewStartupFailureClassifier {
                 reason = "Missing Python dependency module: $moduleMatch.",
                 nextStep = "Install the missing module in the preview runtime and retry.",
                 installPackage = null,
+                primaryLine = primaryLine,
+            )
+        }
+
+        val pluginMatch = pluginMissingRegex.find(normalized)?.groupValues?.getOrNull(1)?.trim()
+        if (!pluginMatch.isNullOrBlank()) {
+            val normalizedPluginId = pluginMatch.lowercase().replace('_', '-')
+            val inferredPackage = "mkdocs-$normalizedPluginId"
+            val nextStep = "Install the matching plugin package, often `$inferredPackage`, in the preview runtime and retry."
+
+            return PreviewStartupFailure(
+                category = PreviewStartupFailureCategory.MISSING_DEPENDENCY,
+                reason = "MkDocs plugin `$normalizedPluginId` is declared in `mkdocs.yml` but is not installed in the preview runtime.",
+                nextStep = nextStep,
+                installPackage = inferredPackage,
                 primaryLine = primaryLine,
             )
         }
@@ -127,4 +146,3 @@ internal object PreviewStartupFailureClassifier {
         )
     }
 }
-

@@ -13,6 +13,30 @@ class PreviewStartupFailureClassifierTest {
     }
 
     @Test
+    fun `classifies missing plugin dependency from config error line`() {
+        val failure = PreviewStartupFailureClassifier.classify(
+            "Config value 'plugins': The \"glightbox\" plugin is not installed",
+        )
+
+        assertEquals(PreviewStartupFailureCategory.MISSING_DEPENDENCY, failure.category)
+        assertEquals("mkdocs-glightbox", failure.installPackage)
+        assertEquals(
+            "MkDocs plugin `glightbox` is declared in `mkdocs.yml` but is not installed in the preview runtime.",
+            failure.reason,
+        )
+    }
+
+    @Test
+    fun `classifies missing plugin dependency from generic plugin error line`() {
+        val failure = PreviewStartupFailureClassifier.classify(
+            "The 'awesome-pages' plugin is not installed",
+        )
+
+        assertEquals(PreviewStartupFailureCategory.MISSING_DEPENDENCY, failure.category)
+        assertEquals("mkdocs-awesome-pages", failure.installPackage)
+    }
+
+    @Test
     fun `classifies mkdocs config parse errors`() {
         val failure = PreviewStartupFailureClassifier.classify(
             "MkDocs encountered an error parsing the configuration file",

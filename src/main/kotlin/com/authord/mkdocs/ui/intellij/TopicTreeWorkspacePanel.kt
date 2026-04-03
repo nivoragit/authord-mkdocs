@@ -1,12 +1,15 @@
 package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
+import com.authord.mkdocs.ports.topic.TopicFileOperation
 import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
+import com.authord.mkdocs.ports.topic.TopicSyncOutcome
 import com.authord.mkdocs.ui.PluginCompositionRoot
 import com.intellij.icons.AllIcons
 import com.intellij.notification.NotificationType
 import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.application.ApplicationManager
@@ -290,7 +293,7 @@ internal class TopicTreeWorkspacePanel(
             if (project != null && userObject is TopicTreeNodeView && userObject.isNav) {
                 val relativePath = resolveRelativePathForOpen(userObject, selectedNode)
                 if (!relativePath.isNullOrBlank()) {
-                    openRelativePathInEditor(relativePath)
+                    openRelativePathInEditor(relativePath, PreviewRouteIntentSource.TOOL_WINDOW_SELECTION)
                 }
             }
         }
@@ -409,10 +412,7 @@ internal class TopicTreeWorkspacePanel(
                         action.perform()
                     }
 
-                    override fun update(event: AnActionEvent) {
-                        event.presentation.text = action.tooltip
-                        event.presentation.description = action.tooltip
-                    }
+                    override fun getActionUpdateThread(): ActionUpdateThread = ActionUpdateThread.BGT
                 })
             }
         }
@@ -608,6 +608,7 @@ internal class TopicTreeWorkspacePanel(
                 preferredNodeId = nodeId,
                 preferredPath = sourcePath,
                 preferredParentNodeId = parent.nodeId,
+                mutationFileOperations = it.appliedFileOperations,
             )
         }
     }
@@ -650,6 +651,7 @@ internal class TopicTreeWorkspacePanel(
                 preferredNodeId = nodeId,
                 preferredPath = sourcePath,
                 preferredParentNodeId = target.nodeId,
+                mutationFileOperations = it.appliedFileOperations,
             )
         }
     }
@@ -682,6 +684,7 @@ internal class TopicTreeWorkspacePanel(
                 preferredParentNodeId = selected.parentNodeId,
                 preferredTitle = newTitle,
                 openPreferredPathFallback = false,
+                mutationFileOperations = it.appliedFileOperations,
             )
         }
     }
@@ -711,6 +714,7 @@ internal class TopicTreeWorkspacePanel(
                 preferredPath = parentView?.path.orEmpty(),
                 preferredParentNodeId = parentView?.parentNodeId,
                 openPreferredPathFallback = false,
+                mutationFileOperations = it.appliedFileOperations,
             )
         }
     }
@@ -742,6 +746,7 @@ internal class TopicTreeWorkspacePanel(
                     preferredPath = movedView?.path.orEmpty(),
                     preferredParentNodeId = newParentNodeId,
                     openPreferredPathFallback = false,
+                    mutationFileOperations = outcome.appliedFileOperations,
                 )
                 true
             }
@@ -791,7 +796,7 @@ internal class TopicTreeWorkspacePanel(
         dispatch: TopicMutationDispatchResult,
         successMessage: String,
         publishSuccessStatus: Boolean = true,
-        onSuccess: () -> Unit,
+        onSuccess: (TopicSyncOutcome) -> Unit,
     ) {
         when (dispatch.result) {
             is TopicGatewayResult.Success -> {
@@ -802,7 +807,7 @@ internal class TopicTreeWorkspacePanel(
                     publishOperationNotification(summary, NotificationType.WARNING)
                     return
                 }
-                onSuccess()
+                onSuccess(outcome)
                 if (publishSuccessStatus) {
                     publishStatus(successMessage)
                 }
@@ -987,15 +992,30 @@ internal class TopicTreeWorkspacePanel(
         preferredParentNodeId: String?,
         preferredTitle: String? = null,
         openPreferredPathFallback: Boolean = true,
+        mutationFileOperations: List<TopicFileOperation> = emptyList(),
     ) {
+        val normalizedPreferredPath = normalizeOptionalPath(preferredPath)
+        var openedPreferredPathEarly = false
+        if (openPreferredPathFallback && !normalizedPreferredPath.isNullOrBlank()) {
+            openRelativePathInEditor(normalizedPreferredPath, PreviewRouteIntentSource.TOPIC_MUTATION)
+            openedPreferredPathEarly = true
+        }
         reconcileFromDisk()
-        runtimeServiceOrNull()?.onTopicMutationCommittedAsync(navPresent = navPresentFromParsedConfigState)
+        runtimeServiceOrNull()?.onTopicMutationCommittedAsync(
+            navPresent = navPresentFromParsedConfigState,
+            fileOperations = mutationFileOperations,
+        )
         val preferredNode = findNode(preferredNodeId)
             ?: findNodeByRelativePath(preferredPath)
             ?: preferredTitle?.let { findNodeByTitleAndParent(title = it, parentNodeId = preferredParentNodeId) }
         if (preferredNode != null) {
             focusNode(preferredNode)
-            openNodeFileInEditor(preferredNode)
+            val resolvedPath = (preferredNode.userObject as? TopicTreeNodeView)
+                ?.path
+                ?.let(::normalizeOptionalPath)
+            if (!openedPreferredPathEarly || resolvedPath != normalizedPreferredPath) {
+                openNodeFileInEditor(preferredNode, PreviewRouteIntentSource.TOPIC_MUTATION)
+            }
             return
         }
         preferredParentNodeId
@@ -1004,8 +1024,8 @@ internal class TopicTreeWorkspacePanel(
                 tree.expandPath(TreePath(parentNode.path))
                 focusNode(parentNode)
             }
-        if (openPreferredPathFallback) {
-            openRelativePathInEditor(preferredPath)
+        if (openPreferredPathFallback && !openedPreferredPathEarly) {
+            openRelativePathInEditor(preferredPath, PreviewRouteIntentSource.TOPIC_MUTATION)
         }
     }
 
@@ -1103,20 +1123,30 @@ internal class TopicTreeWorkspacePanel(
         }
     }
 
-    private fun openNodeFileInEditor(node: DefaultMutableTreeNode) {
+    private fun openNodeFileInEditor(
+        node: DefaultMutableTreeNode,
+        source: PreviewRouteIntentSource = PreviewRouteIntentSource.TOOL_WINDOW_SELECTION,
+    ) {
         val view = node.userObject as? TopicTreeNodeView ?: return
         val relativePath = resolveRelativePathForOpen(view, node) ?: return
-        openRelativePathInEditor(relativePath)
+        openRelativePathInEditor(relativePath, source)
     }
 
-    private fun openRelativePathInEditor(relativePath: String) {
+    private fun openRelativePathInEditor(
+        relativePath: String,
+        source: PreviewRouteIntentSource = PreviewRouteIntentSource.TOOL_WINDOW_SELECTION,
+    ) {
         val normalized = normalizeOptionalPath(relativePath) ?: return
         val docsDir = activeDocsDirectory() ?: return
-        openFileInEditor(docsDir.resolve(normalized).normalize().toString())
+        openFileInEditor(docsDir.resolve(normalized).normalize().toString(), source)
     }
 
-    private fun openFileInEditor(filePath: String) {
+    private fun openFileInEditor(
+        filePath: String,
+        source: PreviewRouteIntentSource = PreviewRouteIntentSource.TOOL_WINDOW_SELECTION,
+    ) {
         val currentProject = project ?: return
+        AuthordMarkdownOpenPreviewListener.suppressNextSelectionDrivenDispatch(currentProject, filePath)
         val fileSystem = LocalFileSystem.getInstance()
         val virtualFile = fileSystem.findFileByPath(filePath)
             ?: ApplicationManager.getApplication().runWriteAction<com.intellij.openapi.vfs.VirtualFile?> {
@@ -1132,18 +1162,20 @@ internal class TopicTreeWorkspacePanel(
         runCatching {
             fileEditorManager.setSelectedEditor(virtualFile, AUTHORD_PREVIEW_EDITOR_TYPE_ID)
         }
-        requestPreviewForOpenedFile(currentProject, filePath)
+        requestPreviewForOpenedFile(currentProject, filePath, source)
     }
 
     private fun requestPreviewForOpenedFile(
         currentProject: com.intellij.openapi.project.Project,
         filePath: String,
+        source: PreviewRouteIntentSource,
     ) {
         val runtimeService = runtimeServiceOrNull() ?: return
         val browserService = browserServiceResolver(currentProject) ?: return
         dispatchPreviewForOpenedFile(
             currentProject = currentProject,
             filePath = filePath,
+            source = source,
             runtimeService = runtimeService,
             browserService = browserService,
         )
@@ -1152,13 +1184,15 @@ internal class TopicTreeWorkspacePanel(
     private fun dispatchPreviewForOpenedFile(
         currentProject: com.intellij.openapi.project.Project,
         filePath: String,
+        source: PreviewRouteIntentSource,
         runtimeService: PluginRuntimeIntegrationService,
         browserService: MkDocsPreviewBrowserService,
     ) {
+        val forceReload = source == PreviewRouteIntentSource.TOPIC_MUTATION
         runtimeService.dispatchPreviewForSelectedFileWithRetry(
             selectedPath = filePath,
-            source = PreviewRouteIntentSource.TOPIC_MUTATION,
-            forceReload = true,
+            source = source,
+            forceReload = forceReload,
             loadUrl = { url, forceReload -> browserService.loadUrl(url, forceReload) },
             shouldRetry = {
                 isFileSelectedForPreview(currentProject, filePath)
