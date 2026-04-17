@@ -23,7 +23,7 @@ class MkDocsProjectCreator(
     private val uvExecutableProvider: UvExecutableProvider = ProjectManagedUvExecutableProvider(),
     private val configGateway: MkDocsYamlGateway = MkDocsYamlGateway(),
 ) {
-    private val runtimeVenvDirName: String = ".mkdocs-plugin-venv"
+    private val runtimeVenvDirName: String = ".authord_venv"
     private val uvInstallUrl: String = "https://docs.astral.sh/uv/getting-started/installation/"
     private val defaultDocsDirName: String = "docs"
     private val defaultIndexRelativePath: String = "index.md"

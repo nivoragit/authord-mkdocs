@@ -31,7 +31,7 @@ class UvBootstrapServiceTest {
         )
 
         val result = service.bootstrap("/tmp/project")
-        val expectedRuntimePath = Path.of("/tmp/project").resolve(".mkdocs-plugin-venv").toString()
+        val expectedRuntimePath = Path.of("/tmp/project").resolve(".authord_venv").toString()
 
         assertTrue(result.success)
         assertFalse(result.skipped)
@@ -52,7 +52,7 @@ class UvBootstrapServiceTest {
     fun `uses resolved uv executable path for all commands`() {
         val commands = mutableListOf<List<String>>()
         val projectPath = "/tmp/custom-uv-project"
-        val expectedRuntimePath = Path.of(projectPath).resolve(".mkdocs-plugin-venv").toString()
+        val expectedRuntimePath = Path.of(projectPath).resolve(".authord_venv").toString()
         val customUv = "/tmp/authord-runtime-tools/uv"
         val service = UvBootstrapService(
             commandRunner = { command, _ ->
@@ -97,7 +97,7 @@ class UvBootstrapServiceTest {
     fun `reuses existing runtime directory and skips uv venv command`() {
         val tempProject = createTempDirectory(prefix = "uv-bootstrap-existing-runtime-")
         try {
-            val existingRuntime = tempProject.resolve(".mkdocs-plugin-venv")
+            val existingRuntime = tempProject.resolve(".authord_venv")
             existingRuntime.createDirectories()
 
             val commands = mutableListOf<List<String>>()
@@ -107,7 +107,7 @@ class UvBootstrapServiceTest {
             }
 
             val result = service.bootstrap(tempProject.toString())
-            val expectedRuntimePath = tempProject.resolve(".mkdocs-plugin-venv").toString()
+            val expectedRuntimePath = tempProject.resolve(".authord_venv").toString()
 
             assertTrue(result.success)
             assertFalse(result.skipped)
@@ -127,7 +127,7 @@ class UvBootstrapServiceTest {
     fun `continues when setup reports existing virtual environment and installs runtime base packages`() {
         val commands = mutableListOf<List<String>>()
         val projectPath = "/tmp/project-existing-race"
-        val expectedRuntimePath = Path.of(projectPath).resolve(".mkdocs-plugin-venv").toString()
+        val expectedRuntimePath = Path.of(projectPath).resolve(".authord_venv").toString()
         val service = UvBootstrapService { command, _ ->
             commands += command
             if (command[1] == "venv") {
@@ -156,7 +156,7 @@ class UvBootstrapServiceTest {
     fun `continues when setup reports existing virtual environment in stdout`() {
         val commands = mutableListOf<List<String>>()
         val projectPath = "/tmp/project-existing-race-stdout"
-        val expectedRuntimePath = Path.of(projectPath).resolve(".mkdocs-plugin-venv").toString()
+        val expectedRuntimePath = Path.of(projectPath).resolve(".authord_venv").toString()
         val service = UvBootstrapService { command, _ ->
             commands += command
             if (command[1] == "venv") {
@@ -204,7 +204,7 @@ class UvBootstrapServiceTest {
             }
 
             val result = service.bootstrap(projectRoot.toString())
-            val runtimePath = projectRoot.resolve(".mkdocs-plugin-venv").toString()
+            val runtimePath = projectRoot.resolve(".authord_venv").toString()
 
             assertTrue(result.success)
             assertFalse(result.skipped)
@@ -255,6 +255,44 @@ class UvBootstrapServiceTest {
     }
 
     @Test
+    fun `discovers nested docs local mkdocs config for get deps flow`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-nested-docs-config-")
+        try {
+            val docsRoot = projectRoot.resolve("docs").createDirectories()
+            docsRoot.resolve("mkdocs.yml").writeText(
+                """
+                site_name: Demo
+                plugins:
+                  - search
+                """.trimIndent() + "\n",
+            )
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                if (command.contains("get-deps")) {
+                    CommandResult(exitCode = 0, stdout = "mkdocs-search\n")
+                } else {
+                    CommandResult(exitCode = 0)
+                }
+            }
+
+            val result = service.bootstrap(projectRoot.toString())
+            val runtimePath = projectRoot.resolve(".authord_venv").toString()
+
+            assertTrue(result.success)
+            assertFalse(result.skipped)
+            assertTrue(commands[2].contains("get-deps"))
+            assertEquals(
+                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs-search"),
+                commands[3],
+            )
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `filters non requirement lines from mkdocs get-deps output`() {
         val projectRoot = createTempDirectory(prefix = "uv-bootstrap-filter-deps-")
         try {
@@ -286,7 +324,7 @@ class UvBootstrapServiceTest {
             }
 
             val result = service.bootstrap(projectRoot.toString())
-            val runtimePath = projectRoot.resolve(".mkdocs-plugin-venv").toString()
+            val runtimePath = projectRoot.resolve(".authord_venv").toString()
             assertTrue(result.success)
             assertEquals(
                 listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs-glightbox"),
@@ -329,7 +367,7 @@ class UvBootstrapServiceTest {
         val projectRoot = createTempDirectory(prefix = "uv-bootstrap-get-deps-fail-cache-")
         try {
             projectRoot.resolve("mkdocs.yml").writeText("site_name: Demo\n")
-            projectRoot.resolve(".mkdocs-plugin-venv").createDirectories()
+            projectRoot.resolve(".authord_venv").createDirectories()
 
             val service = UvBootstrapService { command, _ ->
                 if (command.contains("get-deps")) {
@@ -438,7 +476,7 @@ class UvBootstrapServiceTest {
     fun `includes requirements file in base install command`() {
         val projectRoot = createTempDirectory(prefix = "uv-bootstrap-requirements-")
         try {
-            projectRoot.resolve(".mkdocs-plugin-venv").createDirectories()
+            projectRoot.resolve(".authord_venv").createDirectories()
             projectRoot.resolve("mkdocs.yml").writeText("site_name: Demo\n")
             val requirementsPath = projectRoot.resolve("requirements.txt")
             requirementsPath.writeText("mkdocs-minify-plugin==0.8.0\n")
@@ -448,7 +486,7 @@ class UvBootstrapServiceTest {
                 commands += command
                 CommandResult(exitCode = 0)
             }
-            val runtimePath = projectRoot.resolve(".mkdocs-plugin-venv").toString()
+            val runtimePath = projectRoot.resolve(".authord_venv").toString()
 
             val result = service.bootstrap(projectRoot.toString())
             assertTrue(result.success)
@@ -476,7 +514,7 @@ class UvBootstrapServiceTest {
     fun `re-runs bootstrap when config file changes`() {
         val projectRoot = createTempDirectory(prefix = "uv-bootstrap-config-change-")
         try {
-            projectRoot.resolve(".mkdocs-plugin-venv").createDirectories()
+            projectRoot.resolve(".authord_venv").createDirectories()
             val mkdocsConfig = projectRoot.resolve("mkdocs.yml")
             mkdocsConfig.writeText("site_name: Demo\n")
 
@@ -509,7 +547,7 @@ class UvBootstrapServiceTest {
     fun `re-runs bootstrap when requirements file changes`() {
         val projectRoot = createTempDirectory(prefix = "uv-bootstrap-req-change-")
         try {
-            projectRoot.resolve(".mkdocs-plugin-venv").createDirectories()
+            projectRoot.resolve(".authord_venv").createDirectories()
             projectRoot.resolve("mkdocs.yml").writeText("site_name: Demo\n")
             val requirementsPath = projectRoot.resolve("requirements.txt")
             requirementsPath.writeText("mkdocs-minify-plugin==0.8.0\n")
@@ -542,7 +580,7 @@ class UvBootstrapServiceTest {
     fun `skips bootstrap for already prepared project`() {
         val projectRoot = createTempDirectory(prefix = "uv-bootstrap-skip-")
         try {
-            projectRoot.resolve(".mkdocs-plugin-venv").createDirectories()
+            projectRoot.resolve(".authord_venv").createDirectories()
             projectRoot.resolve("mkdocs.yml").writeText("site_name: Demo\n")
 
             val calls = mutableListOf<List<String>>()

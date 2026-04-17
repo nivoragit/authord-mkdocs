@@ -26,6 +26,7 @@ private val ignoredMkdocsConfigSearchDirectories = setOf(
     "build",
     "out",
     "node_modules",
+    ".authord_venv",
     ".venv",
     "venv",
     "__pycache__",

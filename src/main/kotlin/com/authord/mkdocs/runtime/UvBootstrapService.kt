@@ -1,5 +1,6 @@
 package com.authord.mkdocs.runtime
 
+import com.authord.mkdocs.ui.intellij.findMkdocsConfig
 import java.nio.file.Files
 import java.nio.file.Path
 import java.security.MessageDigest
@@ -94,7 +95,7 @@ open class UvBootstrapService(
         val projectKey = normalizeProjectPath(projectPath)
         val projectLock = lockFor(projectKey)
         synchronized(projectLock) {
-            val runtimeDirectory = Path.of(projectPath).resolve(".mkdocs-plugin-venv")
+            val runtimeDirectory = Path.of(projectPath).resolve(".authord_venv")
             val runtimePath = runtimeDirectory.toString()
             val uvResolution = uvExecutableProvider.resolve(projectPath)
             if (!uvResolution.success) {
@@ -293,14 +294,8 @@ open class UvBootstrapService(
     }
 
     private fun resolveMkdocsConfigPath(projectPath: String): Path? {
-        val root = Path.of(projectPath)
-        val yaml = root.resolve("mkdocs.yml")
-        if (yaml.exists()) {
-            return yaml
-        }
-
-        val ymlAlt = root.resolve("mkdocs.yaml")
-        return if (ymlAlt.exists()) ymlAlt else null
+        val root = runCatching { Path.of(projectPath).toAbsolutePath().normalize() }.getOrNull() ?: return null
+        return findMkdocsConfig(root)
     }
 
     private fun normalizeProjectPath(projectPath: String): String {

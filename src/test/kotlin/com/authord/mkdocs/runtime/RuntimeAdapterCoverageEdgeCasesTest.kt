@@ -48,7 +48,7 @@ class RuntimeAdapterCoverageEdgeCasesTest {
                 """.trimIndent() + "\n",
             )
             val parsed = requireSuccess(gateway.loadConfig(malformed))
-            assertEquals("docs", parsed.docsDir)
+            assertTrue(parsed.docsDir.endsWith("/docs") || parsed.docsDir.endsWith("\\docs"))
             assertEquals(3, parsed.nav.size)
             assertEquals("Intro", parsed.nav[0].title)
             assertTrue(parsed.nav[0].children.isEmpty())
@@ -187,7 +187,7 @@ class RuntimeAdapterCoverageEdgeCasesTest {
                 }
             }
             val result = service.bootstrap(root.toString())
-            val runtimePath = root.resolve(".mkdocs-plugin-venv").toString()
+            val runtimePath = root.resolve(".authord_venv").toString()
             assertTrue(result.success)
             // Verify base install
             assertEquals(
@@ -234,7 +234,7 @@ class RuntimeAdapterCoverageEdgeCasesTest {
         try {
             // Use .yaml extension instead of .yml
             Files.writeString(root.resolve("mkdocs.yaml"), "site_name: Demo\n")
-            Files.createDirectories(root.resolve(".mkdocs-plugin-venv"))
+            Files.createDirectories(root.resolve(".authord_venv"))
 
             val commands = mutableListOf<List<String>>()
             val service = UvBootstrapService { command, _ ->
@@ -258,7 +258,7 @@ class RuntimeAdapterCoverageEdgeCasesTest {
     fun `uv bootstrap uses windows python path when unix path does not exist`() {
         val root = Files.createTempDirectory("uv-bootstrap-win-python")
         try {
-            val venv = root.resolve(".mkdocs-plugin-venv")
+            val venv = root.resolve(".authord_venv")
             Files.createDirectories(venv)
             // Create a Windows-style python path instead of Unix-style
             val scriptsDir = venv.resolve("Scripts")
@@ -302,7 +302,7 @@ class RuntimeAdapterCoverageEdgeCasesTest {
             assertTrue(result.success)
             // Verify deps are deduplicated
             val depsCmd = commands.last()
-            val runtimePath = root.resolve(".mkdocs-plugin-venv").toString()
+            val runtimePath = root.resolve(".authord_venv").toString()
             assertEquals(
                 listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs-material", "pymdown-extensions"),
                 depsCmd,
@@ -320,7 +320,7 @@ class RuntimeAdapterCoverageEdgeCasesTest {
             Files.createDirectories(root.resolve("mkdocs.yml"))
             // Also create requirements.txt as a directory
             Files.createDirectories(root.resolve("requirements.txt"))
-            Files.createDirectories(root.resolve(".mkdocs-plugin-venv"))
+            Files.createDirectories(root.resolve(".authord_venv"))
 
             val commands = mutableListOf<List<String>>()
             val service = UvBootstrapService { command, _ ->
@@ -346,7 +346,7 @@ class RuntimeAdapterCoverageEdgeCasesTest {
         val root = Files.createTempDirectory("uv-bootstrap-no-python")
         try {
             // Create venv directory but WITHOUT any python binary inside
-            val venv = root.resolve(".mkdocs-plugin-venv")
+            val venv = root.resolve(".authord_venv")
             Files.createDirectories(venv)
             Files.writeString(root.resolve("mkdocs.yml"), "site_name: Demo\n")
 

@@ -124,6 +124,40 @@ class MkDocsYamlGatewayRoundTripTest {
     }
 
     @Test
+    fun `load and write preserve implicit docs dir for docs local config`() {
+        val projectRoot = Files.createTempDirectory("mkdocs-docs-local-config")
+        val docsRoot = Files.createDirectories(projectRoot.resolve("docs"))
+        val configPath = docsRoot.resolve("mkdocs.yml")
+        Files.writeString(
+            configPath,
+            """
+            site_name: Demo Site
+            nav:
+              - index.md
+            """.trimIndent() + "\n",
+        )
+
+        val instance = TopicInstanceRef(
+            instanceId = "default",
+            configPath = configPath.toString(),
+            docsDirPath = docsRoot.toString(),
+        )
+        val gateway = MkDocsYamlGateway()
+
+        val loaded = requireSuccess(gateway.loadConfig(instance))
+        assertEquals(docsRoot.toAbsolutePath().normalize().toString().replace('\\', '/'), loaded.docsDir)
+
+        val updated = loaded.copy(
+            nav = loaded.nav + TopicNavNode(nodeId = "n1", title = "Guide", path = "guide.md"),
+        )
+        requireSuccess(gateway.writeConfig(instance, updated))
+
+        val written = Files.readString(configPath)
+        assertTrue(!written.contains("\ndocs_dir:"))
+        assertTrue(written.contains("- Guide: guide.md"))
+    }
+
+    @Test
     fun `writeConfig preserves deterministic output for unchanged logical structure`() {
         val projectRoot = Files.createTempDirectory("mkdocs-write")
         val configPath = projectRoot.resolve("mkdocs.yml")

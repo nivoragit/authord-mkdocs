@@ -8,6 +8,7 @@ import kotlin.io.path.writeText
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertTrue
 
 class InstanceRegistryDiscoveryTest {
     @Test
@@ -57,5 +58,23 @@ class InstanceRegistryDiscoveryTest {
         val after = registry.listInstances()
         require(after is TopicGatewayResult.Success)
         assertEquals(setOf("default", "extra"), after.value.map { it.instanceId }.toSet())
+    }
+
+    @Test
+    fun `discovers docs scoped root when project root directory is docs and docs_dir is omitted`() {
+        val workspaceRoot = createTempDirectory("instance-discovery-docs-root")
+        val projectRoot = workspaceRoot.resolve("docs")
+        projectRoot.createDirectories()
+        projectRoot.resolve("mkdocs.yml").writeText("site_name: Demo\n")
+        projectRoot.resolve("index.md").writeText("# Home\n")
+
+        val registry = InstanceRegistryService()
+        val discovered = registry.discoverDefaultInstance(projectRoot.toString())
+
+        require(discovered is TopicGatewayResult.Success)
+        val instance = discovered.value
+        assertNotNull(instance)
+        val normalizedDocsDirPath = Path.of(instance.docsDirPath).toAbsolutePath().normalize().toString().replace('\\', '/')
+        assertTrue(normalizedDocsDirPath.endsWith("/docs"))
     }
 }

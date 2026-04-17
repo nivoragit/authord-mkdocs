@@ -76,7 +76,7 @@ internal class SiteContextResolver(
         val docsDirPath = when {
             docsDirRaw != null -> resolveDocsDirPath(baseConfigPath = normalizedConfig, rawDocsDirValue = docsDirRaw)
             inheritedContext != null -> inheritedContext.docsDirPath
-            else -> normalizedConfig.parent.resolve("docs").toAbsolutePath().normalize()
+            else -> resolveImplicitDocsDirPath(normalizedConfig)
         }
         val useDirectoryUrls = parseYamlBoolean(useDirectoryUrlsRaw)
             ?: inheritedContext?.useDirectoryUrls
@@ -124,11 +124,11 @@ internal class SiteContextResolver(
     private fun resolveDocsDirPath(baseConfigPath: Path, rawDocsDirValue: String): Path {
         val docsDirValue = parseYamlScalar(rawDocsDirValue)
         if (docsDirValue.isBlank()) {
-            return baseConfigPath.parent.resolve("docs").toAbsolutePath().normalize()
+            return resolveImplicitDocsDirPath(baseConfigPath)
         }
 
         val docsDirPath = runCatching { Path.of(docsDirValue) }.getOrNull()
-            ?: return baseConfigPath.parent.resolve("docs").toAbsolutePath().normalize()
+            ?: return resolveImplicitDocsDirPath(baseConfigPath)
         val absolute = if (docsDirPath.isAbsolute) {
             docsDirPath
         } else {

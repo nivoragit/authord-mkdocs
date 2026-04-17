@@ -3,6 +3,7 @@ package com.authord.mkdocs.ui.intellij
 import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class DocsScopeResolverTest {
     @Test
@@ -85,5 +86,27 @@ class DocsScopeResolverTest {
             projectRoot.toFile().deleteRecursively()
         }
     }
-}
 
+    @Test
+    fun `docs scope resolver treats nested docs config without docs_dir as docs scoped`() {
+        val projectRoot = Files.createTempDirectory("docs-scope-resolver-nested-docs-config")
+        try {
+            val docsRoot = Files.createDirectories(projectRoot.resolve("docs"))
+            val configPath = docsRoot.resolve("mkdocs.yml")
+            Files.writeString(configPath, "site_name: Demo\n")
+            val markdownPath = docsRoot.resolve("index.md")
+            Files.writeString(markdownPath, "# Home\n")
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "docs-scope-nested-docs-config")
+            val resolver = DocsScopeResolver()
+
+            val result = resolver.resolve(project, markdownPath.toString())
+
+            assertEquals(DocsScopeStatus.DOCS_SCOPED, result.status)
+            assertTrue(result.configPath?.endsWith("/docs/mkdocs.yml") == true || result.configPath?.endsWith("\\docs\\mkdocs.yml") == true)
+            assertTrue(result.docsDirPath?.endsWith("/docs") == true || result.docsDirPath?.endsWith("\\docs") == true)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+}

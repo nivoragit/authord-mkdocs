@@ -138,21 +138,24 @@ internal class DocsScopeResolver(
             )
         }
 
-        val docsDirRaw = readDocsDirValue(configPath) ?: "docs"
-        val docsDirCandidate = runCatching { Path.of(docsDirRaw) }.getOrNull()
-            ?: return ConfigScope(
-                configPath = configPath,
-                docsDirPath = null,
-                invalidReason = "Unable to parse docs_dir value",
-            )
-
-        val docsDirPath = if (docsDirCandidate.isAbsolute) docsDirCandidate else configPath.parent.resolve(docsDirCandidate)
-        val normalizedDocsDir = runCatching { docsDirPath.toAbsolutePath().normalize() }.getOrNull()
-            ?: return ConfigScope(
-                configPath = configPath,
-                docsDirPath = null,
-                invalidReason = "Unable to normalize docs_dir path",
-            )
+        val docsDirRaw = readDocsDirValue(configPath)
+        val normalizedDocsDir = if (docsDirRaw == null) {
+            resolveImplicitDocsDirPath(configPath)
+        } else {
+            val docsDirCandidate = runCatching { Path.of(docsDirRaw) }.getOrNull()
+                ?: return ConfigScope(
+                    configPath = configPath,
+                    docsDirPath = null,
+                    invalidReason = "Unable to parse docs_dir value",
+                )
+            val docsDirPath = if (docsDirCandidate.isAbsolute) docsDirCandidate else configPath.parent.resolve(docsDirCandidate)
+            runCatching { docsDirPath.toAbsolutePath().normalize() }.getOrNull()
+                ?: return ConfigScope(
+                    configPath = configPath,
+                    docsDirPath = null,
+                    invalidReason = "Unable to normalize docs_dir path",
+                )
+        }
 
         if (!normalizedDocsDir.startsWith(projectRoot)) {
             return ConfigScope(

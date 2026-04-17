@@ -46,6 +46,23 @@ class PreviewStartupFailureClassifierTest {
     }
 
     @Test
+    fun `classifies git revision plugin failures when repository is missing`() {
+        val failure = PreviewStartupFailureClassifier.classify(
+            """
+                WARNING -  [git-revision-date-localized-plugin] Unable to find a git directory and/or git is not installed. To ignore this error, set option 'fallback_to_build_date: true'
+                git.exc.InvalidGitRepositoryError: /tmp/docs
+                File "/venv/lib/python/site-packages/mkdocs_git_revision_date_localized_plugin/plugin.py", line 117, in on_config
+            """.trimIndent(),
+        )
+
+        assertEquals(PreviewStartupFailureCategory.GIT_REPOSITORY_REQUIRED, failure.category)
+        assertEquals(
+            "MkDocs plugin `git-revision-date-localized` requires the site to be in a Git repository.",
+            failure.reason,
+        )
+    }
+
+    @Test
     fun `classifies early process exit`() {
         val failure = PreviewStartupFailureClassifier.classify(
             "Authord process exited before readiness probe succeeded.",

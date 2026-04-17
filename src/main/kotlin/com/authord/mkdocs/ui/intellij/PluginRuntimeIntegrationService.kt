@@ -314,7 +314,7 @@ class PluginRuntimeIntegrationService(
             canBeCancelled = false,
             operation = { indicator ->
                 indicator.isIndeterminate = true
-                indicator.text = "Bootstrapping runtime environment..."
+                indicator.text = "Resolving MkDocs runtime..."
                 startPreview(trigger)
             },
             onSuccess = { result ->

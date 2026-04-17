@@ -151,8 +151,9 @@ class InstanceRegistryService(
     }
 
     private fun resolveDocsDirPath(configPath: Path): Path {
-        val docsDir = readDocsDirValue(configPath) ?: "docs"
-        return configPath.parent.resolve(docsDir).normalize()
+        val docsDir = readDocsDirValue(configPath) ?: return resolveImplicitDocsDirPath(configPath)
+        val docsDirPath = runCatching { Path.of(docsDir) }.getOrNull() ?: return resolveImplicitDocsDirPath(configPath)
+        return if (docsDirPath.isAbsolute) docsDirPath.normalize() else configPath.parent.resolve(docsDirPath).normalize()
     }
 
     private fun readDocsDirValue(configPath: Path): String? {

@@ -2,6 +2,7 @@ package com.authord.mkdocs.ui.intellij
 
 internal enum class PreviewStartupFailureCategory {
     MISSING_DEPENDENCY,
+    GIT_REPOSITORY_REQUIRED,
     CONFIG_PARSE_ERROR,
     PROCESS_EXITED_EARLY,
     READINESS_TIMEOUT,
@@ -21,6 +22,10 @@ internal object PreviewStartupFailureClassifier {
     private val moduleMissingRegex = Regex("""No module named ['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
     private val pluginMissingRegex = Regex(
         """(?:Config value ['"]plugins['"]:\s*)?(?:The\s+)?['"]([^'"]+)['"]\s+plugin\s+is\s+not\s+installed""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val gitRevisionPluginRegex = Regex(
+        """git(?:[_-]revision[_-]date[_-]localized)(?:[_-]plugin)?""",
         RegexOption.IGNORE_CASE,
     )
 
@@ -85,6 +90,20 @@ internal object PreviewStartupFailureClassifier {
                 reason = "MkDocs plugin `$normalizedPluginId` is declared in `mkdocs.yml` but is not installed in the preview runtime.",
                 nextStep = nextStep,
                 installPackage = inferredPackage,
+                primaryLine = primaryLine,
+            )
+        }
+
+        val referencesGitRevisionPlugin = gitRevisionPluginRegex.containsMatchIn(normalized) ||
+            normalized.contains("fallback_to_build_date", ignoreCase = true)
+        val indicatesMissingGitRepo = normalized.contains("InvalidGitRepositoryError", ignoreCase = true) ||
+            normalized.contains("Unable to find a git directory", ignoreCase = true) ||
+            normalized.contains("requires this project to be a git repository", ignoreCase = true)
+        if (referencesGitRevisionPlugin && indicatesMissingGitRepo) {
+            return PreviewStartupFailure(
+                category = PreviewStartupFailureCategory.GIT_REPOSITORY_REQUIRED,
+                reason = "MkDocs plugin `git-revision-date-localized` requires the site to be in a Git repository.",
+                nextStep = "Open a Git checkout, run `git init`, or set `fallback_to_build_date: true` for that plugin, then retry.",
                 primaryLine = primaryLine,
             )
         }

@@ -123,14 +123,19 @@ class PluginActivationServiceTest {
     }
 
     @Test
-    fun `fails when bootstrap fails`() {
-        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-bootstrap-fail-")
+    fun `prompts explicit bootstrap fallback when no runtime command is runnable`() {
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-no-runtime-")
         try {
+            var bootstrapCalls = 0
             val svc = service(
-                bootstrap = UvBootstrapService { command, _ ->
-                    if (command[1] == "venv") CommandResult(1, stderr = "boom") else CommandResult(0)
+                bootstrap = UvBootstrapService { _, _ ->
+                    bootstrapCalls += 1
+                    CommandResult(0)
                 },
-                processManager = MkdocsProcessManager(ProcessLauncher { _, _ -> ActivationHandle("p1", true) }),
+                processManager = MkdocsProcessManager(ProcessLauncher { command, _ ->
+                    val binary = command.firstOrNull().orEmpty()
+                    throw IllegalStateException("Cannot run program \"$binary\": error=2, No such file or directory")
+                }),
             )
 
             val result = svc.activate(
@@ -141,8 +146,51 @@ class PluginActivationServiceTest {
             )
 
             assertFalse(result.success)
-            assertEquals(ActivationFailureReason.BOOTSTRAP_FAILED, result.reason)
-            assertTrue(result.message.contains("boom"))
+            assertEquals(ActivationFailureReason.START_FAILED, result.reason)
+            assertTrue(result.message.contains("No runnable MkDocs environment detected"))
+            assertEquals(0, bootstrapCalls)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `falls back to uv run after mkdocs poetry and pipenv are unavailable`() {
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-uv-fallback-")
+        try {
+            val launcher = RecordingStartLauncher(
+                ActivationHandle("p1", alive = true, startupOutputText = "Serving at http://127.0.0.1:8000/"),
+            )
+            val processManager = MkdocsProcessManager(
+                ProcessLauncher { command, workingDir ->
+                    val binary = command.firstOrNull().orEmpty()
+                    val binaryName = Path.of(binary).fileName?.toString()?.lowercase().orEmpty()
+                    val unavailable = (binaryName == "mkdocs" || binaryName == "mkdocs.exe") ||
+                        (binaryName == "poetry" && command.getOrNull(1) == "run") ||
+                        (binaryName == "pipenv" && command.getOrNull(1) == "run")
+                    if (unavailable) {
+                        throw IllegalStateException("Cannot run program \"$binary\": error=2, No such file or directory")
+                    }
+                    launcher.launch(command, workingDir)
+                },
+            )
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = processManager,
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertTrue(result.success)
+            assertTrue(launcher.command.size >= 3)
+            assertTrue(launcher.command[0].endsWith("uv") || launcher.command[0].endsWith("uv.exe"))
+            assertTrue(launcher.command[1] == "run")
+            assertTrue(launcher.command[2] == "mkdocs")
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -327,6 +375,9 @@ class PluginActivationServiceTest {
                     nav: []
                 """.trimIndent() + "\n",
             )
+            val authordVenvMkdocs = projectRoot.resolve(".authord_venv").resolve("bin").resolve("mkdocs")
+            Files.createDirectories(authordVenvMkdocs.parent)
+            Files.writeString(authordVenvMkdocs, "#!/bin/sh\n")
             val launcher = RecordingStartLauncher(
                 ActivationHandle("p1", alive = true, startupOutputText = "Serving at http://127.0.0.1:8000/"),
             )
@@ -348,14 +399,10 @@ class PluginActivationServiceTest {
 
             assertTrue(result.success)
             assertEquals(projectRoot.toString(), launcher.workingDir)
-            val expectedRuntimePath = projectRoot.resolve(".mkdocs-plugin-venv").toString()
             assertTrue(
-                launcher.command.take(5) == listOf(
-                    "/tmp/custom-uv",
-                    "run",
-                    "--python",
-                    expectedRuntimePath,
-                    "mkdocs",
+                launcher.command.take(2) == listOf(
+                    authordVenvMkdocs.toString(),
+                    "serve",
                 ),
             )
             assertTrue("serve" in launcher.command)
@@ -369,7 +416,7 @@ class PluginActivationServiceTest {
             val fallbackThemePath = expectedFallbackThemePath(pluginEnvRoot, "project-1", projectRoot.toString())
             assertTrue(fallbackThemePath.toString() in launcher.command)
             assertTrue("--theme" !in launcher.command)
-            assertTrue("mkdocs" in launcher.command)
+            assertTrue(launcher.command.any { it.endsWith("mkdocs") || it.endsWith("mkdocs.exe") })
             assertTrue("theme.color_mode=auto" !in launcher.command)
             assertTrue("theme.user_color_mode_toggle=true" !in launcher.command)
             assertTrue("--livereload" in launcher.command)
@@ -669,6 +716,58 @@ class PluginActivationServiceTest {
             assertTrue(result.success)
             assertTrue("-f" in launcher.command)
             assertTrue(nestedConfig.toString() in launcher.command)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `prefers site local venv when mkdocs config is nested under project root`() {
+        val projectRoot = createTempDirectory(prefix = "plugin-activation-nested-site-venv-")
+        try {
+            val nestedSiteRoot = Files.createDirectories(projectRoot.resolve("docs"))
+            val nestedConfig = nestedSiteRoot.resolve("mkdocs.yml")
+            Files.writeString(
+                nestedConfig,
+                """
+                    site_name: Nested
+                    theme:
+                      name: material
+                """.trimIndent() + "\n",
+            )
+            Files.createDirectories(nestedSiteRoot.resolve("docs"))
+
+            val siteVenvMkdocs = nestedSiteRoot.resolve(".venv").resolve("bin").resolve("mkdocs")
+            Files.createDirectories(siteVenvMkdocs.parent)
+            Files.writeString(siteVenvMkdocs, "#!/bin/sh\n")
+
+            val projectRuntimeMkdocs = projectRoot.resolve(".authord_venv").resolve("bin").resolve("mkdocs")
+            Files.createDirectories(projectRuntimeMkdocs.parent)
+            Files.writeString(projectRuntimeMkdocs, "#!/bin/sh\n")
+
+            val launcher = RecordingStartLauncher(
+                ActivationHandle("p1", alive = true, startupOutputText = "Serving at http://127.0.0.1:8000/"),
+            )
+            val svc = service(
+                bootstrap = UvBootstrapService(
+                    commandRunner = { _, _ -> CommandResult(0) },
+                    uvExecutableProvider = StaticUvExecutableProvider("/tmp/custom-uv"),
+                ),
+                processManager = MkdocsProcessManager(launcher),
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertTrue(result.success)
+            assertEquals(siteVenvMkdocs.toString(), launcher.command.firstOrNull())
+            assertTrue("-f" in launcher.command)
+            assertTrue(nestedConfig.toString() in launcher.command)
+            assertTrue(projectRuntimeMkdocs.toString() !in launcher.command)
         } finally {
             projectRoot.toFile().deleteRecursively()
         }

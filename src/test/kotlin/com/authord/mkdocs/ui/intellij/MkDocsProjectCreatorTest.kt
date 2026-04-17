@@ -47,7 +47,7 @@ class MkDocsProjectCreatorTest {
             val result = creator.createProject(projectRoot.toString(), "demo-site")
 
             assertTrue(result.success)
-            val runtimePath = projectRoot.resolve(".mkdocs-plugin-venv").toString()
+            val runtimePath = projectRoot.resolve(".authord_venv").toString()
             assertEquals(
                 listOf(
                     listOf("/tmp/uv", "venv", runtimePath),

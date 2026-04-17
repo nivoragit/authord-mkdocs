@@ -7,6 +7,7 @@ import com.authord.mkdocs.ports.topic.TopicGatewayResult
 import com.authord.mkdocs.ports.topic.TopicInstanceRef
 import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
+import com.authord.mkdocs.ui.intellij.resolveImplicitDocsDirPath
 import org.yaml.snakeyaml.DumperOptions
 import org.yaml.snakeyaml.LoaderOptions
 import org.yaml.snakeyaml.Yaml
@@ -83,7 +84,9 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
                     rawYaml[normalizedKey] = value
                 }
             }
-            val docsDir = unwrapTaggedScalar(map["docs_dir"])?.toString()?.trim().orEmpty().ifBlank { "docs" }
+            val docsDir = unwrapTaggedScalar(map["docs_dir"])?.toString()?.trim().orEmpty().ifBlank {
+                normalizeExistingDocsDirPath(instance.docsDirPath, configPath)
+            }
             val siteName = unwrapTaggedScalar(map["site_name"])?.toString()?.trim()?.takeIf { it.isNotEmpty() }
             val navPresent = map.containsKey("nav")
             val nav = parseNav(map["nav"], "n")
@@ -114,7 +117,7 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
      */
     override fun writeConfig(instance: TopicInstanceRef, document: MkDocsConfigDocument): TopicGatewayResult<Unit> {
         val configPath = Paths.get(instance.configPath)
-        val serialized = when (val result = serializeDeterministically(document)) {
+        val serialized = when (val result = serializeDeterministically(document, configPath)) {
             is TopicGatewayResult.Success -> result.value
             is TopicGatewayResult.Failure -> return result
         }
@@ -162,6 +165,13 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
      * Produces canonical YAML text for equivalent logical config structures.
      */
     override fun serializeDeterministically(document: MkDocsConfigDocument): TopicGatewayResult<String> {
+        return serializeDeterministically(document, configPath = null)
+    }
+
+    private fun serializeDeterministically(
+        document: MkDocsConfigDocument,
+        configPath: Path?,
+    ): TopicGatewayResult<String> {
         return runCatching {
             // Use linked insertion order so equivalent logical content serializes with stable key
             // ordering across repeated save cycles.
@@ -173,7 +183,11 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
                 ?.takeIf { it.isNotEmpty() }
                 ?.let { root["site_name"] = it }
                 ?: root.remove("site_name")
-            root["docs_dir"] = document.docsDir.trim().ifBlank { "docs" }
+            if (shouldPreserveImplicitDocsDir(document, configPath)) {
+                root.remove("docs_dir")
+            } else {
+                root["docs_dir"] = document.docsDir.trim().ifBlank { "docs" }
+            }
             if (document.navPresent) {
                 root["nav"] = serializeNav(document.nav)
             } else {
@@ -264,6 +278,29 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
 
             else -> null
         }
+    }
+
+    private fun shouldPreserveImplicitDocsDir(document: MkDocsConfigDocument, configPath: Path?): Boolean {
+        if (configPath == null || document.rawYaml.containsKey("docs_dir")) {
+            return false
+        }
+        return resolveDocumentDocsDirPath(configPath, document.docsDir) == resolveImplicitDocsDirPath(configPath)
+    }
+
+    private fun resolveDocumentDocsDirPath(configPath: Path, rawDocsDir: String): Path {
+        val trimmed = rawDocsDir.trim()
+        if (trimmed.isBlank()) {
+            return resolveImplicitDocsDirPath(configPath)
+        }
+        val candidate = runCatching { Paths.get(trimmed) }.getOrNull() ?: return resolveImplicitDocsDirPath(configPath)
+        val absolute = if (candidate.isAbsolute) candidate else configPath.parent.resolve(candidate)
+        return absolute.toAbsolutePath().normalize()
+    }
+
+    private fun normalizeExistingDocsDirPath(rawDocsDirPath: String, configPath: Path): String {
+        val resolved = runCatching { Paths.get(rawDocsDirPath).toAbsolutePath().normalize() }.getOrNull()
+            ?: resolveImplicitDocsDirPath(configPath)
+        return resolved.toString().replace('\\', '/')
     }
 
     private fun parseStringList(raw: Any?): List<String> {

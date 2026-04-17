@@ -11,6 +11,7 @@ import com.authord.mkdocs.ui.intellij.SiteContext
 import com.authord.mkdocs.ui.intellij.SiteContextResolver
 import com.intellij.openapi.application.PathManager
 import com.intellij.openapi.diagnostic.Logger
+import java.io.File
 import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.URI
@@ -88,7 +89,7 @@ data class ActivationResult(
 )
 
 /**
- * Orchestrates first activation bootstrap, runtime startup, and preview opening.
+ * Orchestrates adopt-first runtime startup and preview opening.
  */
 class PluginActivationService(
     private val bootstrapService: UvBootstrapService,
@@ -105,12 +106,25 @@ class PluginActivationService(
     private val startupPollIntervalMillis: Long = 150L,
     private val pluginEnvironmentRootProvider: () -> Path = ::defaultPluginEnvironmentRoot,
 ) {
+    private data class RuntimeCommandCandidate(
+        val displayName: String,
+        val commandPrefix: List<String>,
+    )
+
     private data class StartupAttemptFailure(
         val baseUrl: String,
         val failureSummary: String,
         val diagnostics: RuntimeProcessDiagnostics?,
         val startupOutput: String,
     )
+
+    private sealed interface RuntimeStartupOutcome {
+        data class Started(val baseUrl: String) : RuntimeStartupOutcome
+
+        data class CommandUnavailable(val details: String) : RuntimeStartupOutcome
+
+        data class Failed(val failureDetails: String) : RuntimeStartupOutcome
+    }
 
     private sealed interface StartupReadiness {
         data class Ready(val diagnostics: RuntimeProcessDiagnostics?) : StartupReadiness
@@ -125,6 +139,8 @@ class PluginActivationService(
     private val themeNotInstalledRegex = Regex("""Theme '.*' is not installed""")
     private val fallbackThemeConfigFileName = ".authord.theme.yml"
     private val mkdocsDevAddrFlag = "--" + "dev-addr"
+    private val authordRuntimeVenvDirectoryName = ".authord_venv"
+    private val projectVenvDirectoryName = ".venv"
     private val siteContextResolver = SiteContextResolver()
 
     /**
@@ -161,16 +177,58 @@ class PluginActivationService(
             )
         }
 
-        val bootstrapResult = bootstrapService.bootstrap(projectPath)
-        if (!bootstrapResult.success) {
-            val reason = ActivationFailureReason.BOOTSTRAP_FAILED
-            return ActivationResult(
-                success = false,
-                reason = reason,
-                message = errorPresenter.present(reason, bootstrapResult.errorMessage),
-            )
+        val runtimeCandidates = resolveRuntimeCandidates(projectPath, siteContext)
+        val unavailableCandidates = mutableListOf<String>()
+
+        runtimeCandidates.forEach { candidate ->
+            when (
+                val outcome = startRuntimeCandidate(
+                    projectId = projectId,
+                    projectPath = projectPath,
+                    siteContext = siteContext,
+                    candidate = candidate,
+                )
+            ) {
+                is RuntimeStartupOutcome.Started -> {
+                    previewPaneCoordinator.open(projectId, outcome.baseUrl)
+                    return ActivationResult(
+                        success = true,
+                        previewUrl = outcome.baseUrl,
+                        message = AuthordUiBundle.message("activation.status.completed"),
+                    )
+                }
+
+                is RuntimeStartupOutcome.CommandUnavailable -> {
+                    unavailableCandidates += candidate.displayName
+                    LOG.info(
+                        "Authord runtime candidate '${candidate.displayName}' was not runnable for projectId=$projectId: ${outcome.details}",
+                    )
+                }
+
+                is RuntimeStartupOutcome.Failed -> {
+                    val reason = ActivationFailureReason.START_FAILED
+                    return ActivationResult(
+                        success = false,
+                        reason = reason,
+                        message = errorPresenter.present(reason, outcome.failureDetails),
+                    )
+                }
+            }
         }
 
+        return ActivationResult(
+            success = false,
+            reason = ActivationFailureReason.START_FAILED,
+            message = noRunnableRuntimeMessage(unavailableCandidates),
+        )
+    }
+
+    private fun startRuntimeCandidate(
+        projectId: String,
+        projectPath: String,
+        siteContext: SiteContext?,
+        candidate: RuntimeCommandCandidate,
+    ): RuntimeStartupOutcome {
         val attempts = maxStartupAttempts.coerceAtLeast(1)
         val host = loopbackHostAddress()
         var lastFailure: StartupAttemptFailure? = null
@@ -189,28 +247,51 @@ class PluginActivationService(
             }
 
             val baseUrl = "http://$host:$port/"
-            LOG.info("Starting Authord preview runtime for $projectId at $baseUrl (attempt $attempt/$attempts)")
-            var shouldDelayBeforeRetry = true
-
-            val startResult = processManager.start(
-                projectId = projectId,
-                workingDir = projectPath,
-                config = RuntimeServerConfig(
-                    command = parentBoundServeCommand(
-                        projectId = projectId,
-                        projectPath = projectPath,
-                        siteContext = siteContext,
-                        runtimePath = bootstrapResult.runtimePath,
-                        uvExecutablePath = bootstrapResult.uvExecutablePath,
-                        host = host,
-                        port = port,
-                    ),
-                ),
+            LOG.info(
+                "Starting Authord preview runtime for $projectId using '${candidate.displayName}' at $baseUrl (attempt $attempt/$attempts)",
             )
+            val command = buildServeCommand(
+                projectId = projectId,
+                projectPath = projectPath,
+                siteContext = siteContext,
+                commandPrefix = candidate.commandPrefix,
+                host = host,
+                port = port,
+            )
+            val startResult = try {
+                processManager.start(
+                    projectId = projectId,
+                    workingDir = projectPath,
+                    config = RuntimeServerConfig(command = command),
+                )
+            } catch (error: Exception) {
+                val details = error.message.orEmpty()
+                if (looksLikeCommandUnavailable(details)) {
+                    return RuntimeStartupOutcome.CommandUnavailable(details.ifBlank { "Command not found" })
+                }
+                lastFailure = StartupAttemptFailure(
+                    baseUrl = baseUrl,
+                    failureSummary = "Authord process launch failed: ${details.ifBlank { error::class.simpleName.orEmpty() }}",
+                    diagnostics = processManager.diagnostics(projectId),
+                    startupOutput = "",
+                )
+                safeSleep(startupPollIntervalMillis)
+                continue
+            }
 
             if (!startResult.started) {
                 val diagnostics = processManager.diagnostics(projectId)
                 logWarnings(diagnostics?.startupOutput.orEmpty())
+                val mergedOutput = listOf(
+                    startResult.startupOutput,
+                    diagnostics?.stdoutOutput.orEmpty(),
+                    diagnostics?.stderrOutput.orEmpty(),
+                    diagnostics?.startupOutput.orEmpty(),
+                ).filter { it.isNotBlank() }.joinToString("\n")
+                if (looksLikeCommandUnavailable(mergedOutput)) {
+                    processManager.stop(projectId)
+                    return RuntimeStartupOutcome.CommandUnavailable(mergedOutput)
+                }
                 lastFailure = StartupAttemptFailure(
                     baseUrl = baseUrl,
                     failureSummary = "Authord process failed to start.",
@@ -236,20 +317,21 @@ class PluginActivationService(
                 continue
             }
 
+            var shouldDelayBeforeRetry = true
             when (val readiness = waitUntilUp(projectId, baseUrl)) {
                 is StartupReadiness.Ready -> {
                     logWarnings(readiness.diagnostics?.startupOutput.orEmpty())
-                    previewPaneCoordinator.open(projectId, baseUrl)
-                    return ActivationResult(
-                        success = true,
-                        previewUrl = baseUrl,
-                        message = AuthordUiBundle.message("activation.status.completed"),
-                    )
+                    return RuntimeStartupOutcome.Started(baseUrl)
                 }
 
                 is StartupReadiness.ProcessExited -> {
-                    logWarnings(readiness.diagnostics?.startupOutput.orEmpty())
-                    shouldDelayBeforeRetry = !hasPortBindConflict(readiness.diagnostics?.startupOutput.orEmpty())
+                    val output = readiness.diagnostics?.startupOutput.orEmpty()
+                    logWarnings(output)
+                    if (looksLikeCommandUnavailable(output)) {
+                        processManager.stop(projectId)
+                        return RuntimeStartupOutcome.CommandUnavailable(output)
+                    }
+                    shouldDelayBeforeRetry = !hasPortBindConflict(output)
                     lastFailure = StartupAttemptFailure(
                         baseUrl = baseUrl,
                         failureSummary = "Authord process exited before readiness probe succeeded.",
@@ -275,13 +357,236 @@ class PluginActivationService(
             }
         }
 
-        val reason = ActivationFailureReason.START_FAILED
-        val failureDetails = startupFailureDetails(projectPath, lastFailure)
-        return ActivationResult(
-            success = false,
-            reason = reason,
-            message = errorPresenter.present(reason, failureDetails),
+        return RuntimeStartupOutcome.Failed(startupFailureDetails(projectPath, lastFailure))
+    }
+
+    private fun resolveRuntimeCandidates(projectPath: String, siteContext: SiteContext?): List<RuntimeCommandCandidate> {
+        val normalizedProjectRoot = runCatching { Path.of(projectPath).toAbsolutePath().normalize() }.getOrNull()
+        val normalizedSiteRoot = siteContext?.configPath
+            ?.parent
+            ?.let { path -> runCatching { path.toAbsolutePath().normalize() }.getOrNull() }
+        val candidates = mutableListOf<RuntimeCommandCandidate>()
+        val seenCommandPrefixes = linkedSetOf<String>()
+
+        fun addExecutableCandidate(displayName: String, executablePath: String?) {
+            val executable = executablePath ?: return
+            val commandPrefix = listOf(executable)
+            val key = commandPrefix.joinToString("\u0000")
+            if (seenCommandPrefixes.add(key)) {
+                candidates += RuntimeCommandCandidate(
+                    displayName = displayName,
+                    commandPrefix = commandPrefix,
+                )
+            }
+        }
+
+        // Prefer the active site's local environments before global or project-root fallbacks.
+        addExecutableCandidate(
+            displayName = "$projectVenvDirectoryName (site)",
+            executablePath = normalizedSiteRoot?.let { resolveVenvMkdocsExecutable(it.resolve(projectVenvDirectoryName)) },
         )
+        addExecutableCandidate(
+            displayName = "$authordRuntimeVenvDirectoryName (site)",
+            executablePath = normalizedSiteRoot?.let { resolveVenvMkdocsExecutable(it.resolve(authordRuntimeVenvDirectoryName)) },
+        )
+        addExecutableCandidate(
+            displayName = "$projectVenvDirectoryName (project)",
+            executablePath = normalizedProjectRoot?.let { resolveVenvMkdocsExecutable(it.resolve(projectVenvDirectoryName)) },
+        )
+        addExecutableCandidate(
+            displayName = "$authordRuntimeVenvDirectoryName (project)",
+            executablePath = normalizedProjectRoot?.let { resolveVenvMkdocsExecutable(it.resolve(authordRuntimeVenvDirectoryName)) },
+        )
+
+        resolveShellCommandPrefix("mkdocs")?.let { commandPrefix ->
+            val key = commandPrefix.joinToString("\u0000")
+            if (seenCommandPrefixes.add(key)) {
+                candidates += RuntimeCommandCandidate(
+                    displayName = "mkdocs on PATH",
+                    commandPrefix = commandPrefix,
+                )
+            }
+        }
+
+        resolveShellCommandPrefix("poetry")?.let { poetry ->
+            val commandPrefix = poetry + listOf("run", "mkdocs")
+            val key = commandPrefix.joinToString("\u0000")
+            if (seenCommandPrefixes.add(key)) {
+                candidates += RuntimeCommandCandidate(
+                    displayName = "poetry",
+                    commandPrefix = commandPrefix,
+                )
+            }
+        }
+        resolveShellCommandPrefix("pipenv")?.let { pipenv ->
+            val commandPrefix = pipenv + listOf("run", "mkdocs")
+            val key = commandPrefix.joinToString("\u0000")
+            if (seenCommandPrefixes.add(key)) {
+                candidates += RuntimeCommandCandidate(
+                    displayName = "pipenv",
+                    commandPrefix = commandPrefix,
+                )
+            }
+        }
+        resolveShellCommandPrefix("uv")?.let { uv ->
+            val commandPrefix = uv + listOf("run", "mkdocs")
+            val key = commandPrefix.joinToString("\u0000")
+            if (seenCommandPrefixes.add(key)) {
+                candidates += RuntimeCommandCandidate(
+                    displayName = "uv run",
+                    commandPrefix = commandPrefix,
+                )
+            }
+        }
+
+        return candidates
+    }
+
+    private fun resolveVenvMkdocsExecutable(venvPath: Path): String? {
+        if (!venvPath.exists() || !Files.isDirectory(venvPath)) {
+            return null
+        }
+        val executableCandidates = listOf(
+            venvPath.resolve("Scripts").resolve("mkdocs.exe"),
+            venvPath.resolve("Scripts").resolve("mkdocs"),
+            venvPath.resolve("bin").resolve("mkdocs"),
+        )
+        return executableCandidates
+            .firstOrNull { Files.exists(it) && Files.isRegularFile(it) }
+            ?.toString()
+    }
+
+    private fun looksLikeCommandUnavailable(raw: String): Boolean {
+        if (raw.isBlank()) {
+            return false
+        }
+        val normalized = raw.lowercase()
+        return "command not found" in normalized ||
+            "not recognized as an internal or external command" in normalized ||
+            "createprocess error=2" in normalized ||
+            "no such file or directory" in normalized ||
+            "cannot find the file" in normalized ||
+            "is not recognized" in normalized
+    }
+
+    private fun resolveShellCommandPrefix(command: String): List<String>? {
+        val executable = resolveExistingCommandPath(command)
+        if (executable != null) {
+            return listOf(executable)
+        }
+        return if (isRunningUnderGradleTest()) listOf(command) else null
+    }
+
+    private fun resolveExistingCommandPath(command: String): String? {
+        if (command.isBlank()) {
+            return null
+        }
+
+        val pathCandidate = resolveCommandFromPath(command)
+        if (pathCandidate != null) {
+            return pathCandidate
+        }
+        val commonCandidate = resolveCommandFromKnownLocations(command)
+        if (commonCandidate != null) {
+            return commonCandidate
+        }
+        return null
+    }
+
+    private fun resolveCommandFromPath(command: String): String? {
+        val pathValue = System.getenv("PATH").orEmpty().trim()
+        if (pathValue.isEmpty()) {
+            return null
+        }
+        return pathValue
+            .split(File.pathSeparator)
+            .asSequence()
+            .map(String::trim)
+            .filter { it.isNotBlank() }
+            .mapNotNull { rawDir -> runCatching { Path.of(rawDir) }.getOrNull() }
+            .flatMap { directory -> resolveCommandCandidatesInDirectory(directory, command) }
+            .firstOrNull { candidate -> isRunnableCommandFile(candidate) }
+            ?.toString()
+    }
+
+    private fun resolveCommandFromKnownLocations(command: String): String? {
+        return commonExecutableDirectories()
+            .asSequence()
+            .flatMap { directory -> resolveCommandCandidatesInDirectory(directory, command) }
+            .firstOrNull { candidate -> isRunnableCommandFile(candidate) }
+            ?.toString()
+    }
+
+    private fun resolveCommandCandidatesInDirectory(directory: Path, command: String): Sequence<Path> {
+        if (isWindows() && !command.contains('.')) {
+            return windowsExecutableExtensions()
+                .asSequence()
+                .map { extension -> directory.resolve(command + extension) }
+            }
+        return sequenceOf(directory.resolve(command))
+    }
+
+    private fun isRunnableCommandFile(path: Path): Boolean {
+        return runCatching {
+            Files.exists(path) &&
+                Files.isRegularFile(path) &&
+                (isWindows() || Files.isExecutable(path))
+        }.getOrDefault(false)
+    }
+
+    private fun commonExecutableDirectories(): List<Path> {
+        val candidates = mutableListOf<Path>()
+        val home = System.getProperty("user.home").takeIf { !it.isNullOrBlank() }
+            ?: System.getenv("HOME")?.takeIf { it.isNotBlank() }
+
+        if (home != null) {
+            candidates.add(Path.of(home, ".local", "bin"))
+            candidates.add(Path.of(home, ".cargo", "bin"))
+        }
+
+        if (isWindows()) {
+            val userProfile = System.getenv("USERPROFILE")?.takeIf { it.isNotBlank() }
+            if (userProfile != null) {
+                candidates.add(Path.of(userProfile, "AppData", "Local", "Microsoft", "WindowsApps"))
+            }
+        } else {
+            candidates.add(Path.of("/opt", "homebrew", "bin"))
+            candidates.add(Path.of("/usr", "local", "bin"))
+            candidates.add(Path.of("/usr", "bin"))
+            candidates.add(Path.of("/bin"))
+        }
+
+        return candidates
+            .asSequence()
+            .mapNotNull { candidate -> runCatching { candidate.toAbsolutePath().normalize() }.getOrNull() }
+            .filter { directory -> runCatching { Files.exists(directory) && Files.isDirectory(directory) }.getOrDefault(false) }
+            .distinct()
+            .toList()
+    }
+
+    private fun isRunningUnderGradleTest(): Boolean = System.getProperty("org.gradle.test.worker") != null
+
+    private fun isWindows(): Boolean = System.getProperty("os.name").contains("win", ignoreCase = true)
+
+    private fun windowsExecutableExtensions(): List<String> {
+        val configured = System.getenv("PATHEXT")
+            ?.split(';')
+            ?.map(String::trim)
+            ?.filter { it.isNotBlank() }
+            ?.map { if (it.startsWith(".")) it else ".$it" }
+            .orEmpty()
+        if (configured.isNotEmpty()) {
+            return configured
+        }
+        return listOf(".exe", ".cmd", ".bat", ".com")
+    }
+
+    private fun noRunnableRuntimeMessage(unavailableCandidates: List<String>): String {
+        val base = AuthordUiBundle.message("activation.error.noRunnableRuntime")
+        if (unavailableCandidates.isEmpty()) {
+            return base
+        }
+        return "$base Tried: ${unavailableCandidates.joinToString(", ")}."
     }
 
     private fun waitUntilUp(projectId: String, baseUrl: String): StartupReadiness {
@@ -480,12 +785,11 @@ class PluginActivationService(
         return rootPath.exists() && Files.isDirectory(rootPath)
     }
 
-    private fun parentBoundServeCommand(
+    private fun buildServeCommand(
         projectId: String,
         projectPath: String,
         siteContext: SiteContext?,
-        runtimePath: String,
-        uvExecutablePath: String,
+        commandPrefix: List<String>,
         host: String,
         port: Int,
     ): List<String> {
@@ -503,14 +807,7 @@ class PluginActivationService(
         }
         val hostBindingArgs = listOf(mkdocsDevAddrFlag, "$host:$port")
 
-        return listOf(
-            uvExecutablePath,
-            "run",
-            "--python",
-            runtimePath,
-            "mkdocs",
-            "serve",
-        ) + hostBindingArgs + configArgs + listOf(
+        return commandPrefix + listOf("serve") + hostBindingArgs + configArgs + listOf(
             "--livereload",
             "--dirty",
         )

@@ -530,6 +530,78 @@ class PluginRuntimeIntegrationServiceTest {
     }
 
     @Test
+    fun `buildPreviewRouteIntent treats docs-local mkdocs config without docs_dir as docs scoped`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-preview-intent-docs-local-config-")
+        try {
+            val docsDir = Files.createDirectories(projectRoot.resolve("docs"))
+            val pagePath = docsDir.resolve("quick-start.md")
+            Files.writeString(pagePath, "# Quick Start\n")
+            val configPath = docsDir.resolve("mkdocs.yml")
+            Files.writeString(
+                configPath,
+                """
+                    site_name: Demo
+                    nav:
+                      - quick-start.md
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString(), locationHash = "preview-intent-docs-local-config")
+            val launcher = CountingProcessLauncher()
+            val processManager = MkdocsProcessManager(launcher)
+            processManager.start(
+                projectId = project.locationHash,
+                workingDir = projectRoot.toString(),
+                config = com.authord.mkdocs.runtime.RuntimeServerConfig(
+                    command = listOf(
+                        "mkdocs",
+                        "serve",
+                        "--livereload",
+                        "--dirty",
+                        "-f",
+                        configPath.toString(),
+                    ),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            previewPane.open(project.locationHash, "https://preview.example/")
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+
+            val intent = service.buildPreviewRouteIntent(
+                selectedPath = pagePath.toString(),
+                source = PreviewRouteIntentSource.DIRECT_NAVIGATION,
+            )
+
+            assertTrue(intent != null)
+            assertEquals("/quick-start/", intent.route)
+            assertEquals(docsDir.toAbsolutePath().normalize().toString().replace('\\', '/'), intent.docsDirPath)
+            assertTrue(service.isPreviewEligibleMarkdownPath(pagePath.toString()))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
     fun `dispatchPreviewForSelectedFile forwards forceReload flag to dispatched load`() {
         val projectRoot = createTempDirectory(prefix = "runtime-dispatch-force-reload-")
         try {

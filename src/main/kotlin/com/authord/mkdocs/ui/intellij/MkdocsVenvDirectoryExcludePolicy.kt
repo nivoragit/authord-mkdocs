@@ -13,7 +13,7 @@ class MkdocsVenvDirectoryExcludePolicy : DirectoryIndexExcludePolicy {
         val excludedUrls = linkedSetOf<String>()
         ProjectManager.getInstance().openProjects.forEach { project ->
             val basePath = project.basePath ?: return@forEach
-            val venvPath = Path.of(basePath).resolve(".mkdocs-plugin-venv").toAbsolutePath().normalize()
+            val venvPath = Path.of(basePath).resolve(".authord_venv").toAbsolutePath().normalize()
             excludedUrls += VfsUtilCore.pathToUrl(venvPath.toString())
         }
         return excludedUrls.toTypedArray()
