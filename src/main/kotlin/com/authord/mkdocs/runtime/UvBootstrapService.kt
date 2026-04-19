@@ -92,6 +92,32 @@ open class UvBootstrapService(
      * @return bootstrap status, executed commands, and error details on failure.
      */
     open fun bootstrap(projectPath: String): BootstrapResult {
+        return bootstrapInternal(
+            projectPath = projectPath,
+            activeConfigPath = null,
+            forceDependencySync = false,
+        )
+    }
+
+    /**
+     * Ensures runtime exists and always re-syncs dependencies for the active MkDocs config.
+     *
+     * This bypasses hash-based short-circuiting so `mkdocs get-deps -f <active-config>`
+     * is executed for the currently active site context.
+     */
+    open fun bootstrapWithActiveConfig(projectPath: String, activeConfigPath: Path): BootstrapResult {
+        return bootstrapInternal(
+            projectPath = projectPath,
+            activeConfigPath = activeConfigPath,
+            forceDependencySync = true,
+        )
+    }
+
+    private fun bootstrapInternal(
+        projectPath: String,
+        activeConfigPath: Path?,
+        forceDependencySync: Boolean,
+    ): BootstrapResult {
         val projectKey = normalizeProjectPath(projectPath)
         val projectLock = lockFor(projectKey)
         synchronized(projectLock) {
@@ -109,11 +135,16 @@ open class UvBootstrapService(
                 )
             }
             val uvExecutable = uvResolution.executablePath
+            val effectiveConfigPath = resolveMkdocsConfigPath(projectPath, activeConfigPath)
 
             // Check cache: skip if config hasn't changed
-            val currentHash = computeConfigHash(projectPath)
+            val currentHash = computeConfigHash(projectPath, effectiveConfigPath)
             val cachedHash = bootstrappedProjectHashes[projectKey]
-            if (cachedHash != null && cachedHash == currentHash && runtimeDirectory.exists()) {
+            if (!forceDependencySync &&
+                cachedHash != null &&
+                cachedHash == currentHash &&
+                runtimeDirectory.exists()
+            ) {
                 return BootstrapResult(
                     success = true,
                     runtimePath = runtimePath,
@@ -125,6 +156,10 @@ open class UvBootstrapService(
 
             val executed = mutableListOf<List<String>>()
             var cacheEligible = true
+            if (effectiveConfigPath == null) {
+                // Without a readable mkdocs config, dependency resolution confidence is low.
+                cacheEligible = false
+            }
 
             // Step 1: Create venv if needed
             if (!runtimeDirectory.exists()) {
@@ -168,51 +203,60 @@ open class UvBootstrapService(
 
             // Step 3: Run `mkdocs get-deps` to discover all required packages
             val pythonPath = resolveVenvPython(runtimeDirectory)
-            val getDepsCommand = listOf(pythonPath, "-m", "mkdocs", "get-deps")
+            val getDepsCommand = buildList {
+                addAll(listOf(pythonPath, "-m", "mkdocs", "get-deps"))
+                if (effectiveConfigPath != null) {
+                    add("-f")
+                    add(effectiveConfigPath.toString())
+                }
+            }
             val getDepsResult = commandRunner.run(getDepsCommand, projectPath)
             executed += getDepsCommand
 
-            // Step 4: Install discovered dependencies (if any)
-            if (getDepsResult.exitCode == 0) {
-                val discoveredDeps = parseDependencySpecs(getDepsResult.stdout)
-                if (discoveredDeps.isNotEmpty()) {
-                    val depsInstallResult = installDependencyBatch(
-                        dependencies = discoveredDeps,
+            // Step 4: Install discovered dependencies (if any).
+            // Some mkdocs versions can emit valid dependency lines to stdout while returning non-zero
+            // due to plugin warnings; prefer using discovered output before failing hard.
+            val discoveredDeps = parseDependencySpecs(getDepsResult.stdout)
+            if (discoveredDeps.isNotEmpty()) {
+                val depsInstallResult = installDependencyBatch(
+                    dependencies = discoveredDeps,
+                    uvExecutable = uvExecutable,
+                    runtimePath = runtimePath,
+                    projectPath = projectPath,
+                    executed = executed,
+                    failureMessage = "Failed to install mkdocs dependencies",
+                )
+                if (depsInstallResult != null) {
+                    return depsInstallResult
+                }
+                if (getDepsResult.exitCode != 0) {
+                    cacheEligible = false
+                }
+            } else if (getDepsResult.exitCode == 0) {
+                val inspection = inspectDeclaredPlugins(projectPath, effectiveConfigPath)
+                if (inspection.parseError != null) {
+                    cacheEligible = false
+                }
+                if (inspection.declaredPluginIds.isNotEmpty()) {
+                    val fallbackPackages = inspection.declaredPluginIds
+                        .mapNotNull(MkDocsPluginDependencyResolver::packageForPlugin)
+                        .distinct()
+                    val fallbackInstallResult = installDependenciesBestEffort(
+                        dependencies = fallbackPackages,
                         uvExecutable = uvExecutable,
                         runtimePath = runtimePath,
                         projectPath = projectPath,
                         executed = executed,
-                        failureMessage = "Failed to install mkdocs dependencies",
                     )
-                    if (depsInstallResult != null) {
-                        return depsInstallResult
-                    }
-                } else {
-                    val inspection = inspectDeclaredPlugins(projectPath)
-                    if (inspection.parseError != null) {
+                    if (fallbackInstallResult.failedPackages.isNotEmpty()) {
                         cacheEligible = false
                     }
-                    if (inspection.declaredPluginIds.isNotEmpty()) {
-                        val fallbackPackages = inspection.declaredPluginIds
-                            .mapNotNull(MkDocsPluginDependencyResolver::packageForPlugin)
-                            .distinct()
-                        val fallbackInstallResult = installDependenciesBestEffort(
-                            dependencies = fallbackPackages,
-                            uvExecutable = uvExecutable,
-                            runtimePath = runtimePath,
-                            projectPath = projectPath,
-                            executed = executed,
-                        )
-                        if (fallbackInstallResult.failedPackages.isNotEmpty()) {
-                            cacheEligible = false
-                        }
-                        if (fallbackInstallResult.installedPackages.isEmpty()) {
-                            cacheEligible = false
-                        }
+                    if (fallbackInstallResult.installedPackages.isEmpty()) {
+                        cacheEligible = false
                     }
                 }
             } else {
-                val inspection = inspectDeclaredPlugins(projectPath)
+                val inspection = inspectDeclaredPlugins(projectPath, effectiveConfigPath)
                 if (inspection.parseError != null || inspection.declaredPluginIds.isNotEmpty()) {
                     return BootstrapResult(
                         success = false,
@@ -280,9 +324,9 @@ open class UvBootstrapService(
      * Computes a hash of the project's mkdocs config and requirements to
      * determine if a re-bootstrap is needed.
      */
-    private fun computeConfigHash(projectPath: String): String {
+    private fun computeConfigHash(projectPath: String, activeConfigPath: Path?): String {
         val digest = MessageDigest.getInstance("SHA-256")
-        val configPath = resolveMkdocsConfigPath(projectPath)
+        val configPath = resolveMkdocsConfigPath(projectPath, activeConfigPath)
         if (configPath != null && Files.isRegularFile(configPath)) {
             digest.update(Files.readAllBytes(configPath))
         }
@@ -293,7 +337,13 @@ open class UvBootstrapService(
         return digest.digest().joinToString("") { byte -> "%02x".format(byte) }
     }
 
-    private fun resolveMkdocsConfigPath(projectPath: String): Path? {
+    private fun resolveMkdocsConfigPath(projectPath: String, activeConfigPath: Path? = null): Path? {
+        activeConfigPath?.let { provided ->
+            val normalized = runCatching { provided.toAbsolutePath().normalize() }.getOrNull()
+            if (normalized != null && Files.isRegularFile(normalized)) {
+                return normalized
+            }
+        }
         val root = runCatching { Path.of(projectPath).toAbsolutePath().normalize() }.getOrNull() ?: return null
         return findMkdocsConfig(root)
     }
@@ -303,8 +353,8 @@ open class UvBootstrapService(
             .getOrDefault(projectPath)
     }
 
-    private fun inspectDeclaredPlugins(projectPath: String): DeclaredPluginsInspection {
-        val configPath = resolveMkdocsConfigPath(projectPath)
+    private fun inspectDeclaredPlugins(projectPath: String, activeConfigPath: Path?): DeclaredPluginsInspection {
+        val configPath = resolveMkdocsConfigPath(projectPath, activeConfigPath)
         if (configPath == null) {
             return DeclaredPluginsInspection(
                 configPath = null,

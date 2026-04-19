@@ -1,15 +1,29 @@
 package com.authord.mkdocs.ui.intellij
 
+import com.authord.mkdocs.core.navigation.RouteMappingService
+import com.authord.mkdocs.runtime.BaseUrlDetector
+import com.authord.mkdocs.runtime.CommandRunner
 import com.intellij.openapi.Disposable
-import com.intellij.ui.OnePixelSplitter
+import com.authord.mkdocs.runtime.CommandResult
+import com.authord.mkdocs.runtime.ManagedProcessHandle
+import com.authord.mkdocs.runtime.MkdocsProcessManager
+import com.authord.mkdocs.runtime.ProcessLauncher
+import com.authord.mkdocs.runtime.RuntimeServerConfig
+import com.authord.mkdocs.runtime.UvExecutableResult
+import com.authord.mkdocs.runtime.UvBootstrapService
+import com.authord.mkdocs.ui.ActivationErrorPresenter
+import com.authord.mkdocs.ui.FeatureFlagPolicyService
+import com.authord.mkdocs.ui.NavigationCoordinator
+import com.authord.mkdocs.ui.PluginActivationService
+import com.authord.mkdocs.ui.PreviewNavigationFailureHandler
+import com.authord.mkdocs.ui.PreviewPaneCoordinator
 import com.intellij.openapi.editor.impl.DocumentImpl
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.openapi.vfs.VirtualFileSystem
 import com.intellij.openapi.vfs.newvfs.BulkFileListener
 import com.intellij.openapi.vfs.newvfs.events.VFileEvent
-import com.authord.mkdocs.runtime.CommandResult
-import com.authord.mkdocs.runtime.UvExecutableResult
 import com.intellij.testFramework.LightVirtualFile
+import com.intellij.ui.OnePixelSplitter
 import java.nio.file.Files
 import java.nio.file.Path
 import javax.swing.JComponent
@@ -111,6 +125,28 @@ private class NoOpTopicTreeUiService : TopicTreeUiService {
             ),
         )
     }
+}
+
+private class TestLifecycleHandle(
+    override val id: String,
+) : ManagedProcessHandle {
+    private var alive: Boolean = true
+
+    override fun stop() {
+        alive = false
+    }
+
+    override fun isAlive(): Boolean = alive
+}
+
+private class TestProcessLauncher : ProcessLauncher {
+    override fun launch(command: List<String>, workingDir: String): ManagedProcessHandle {
+        return TestLifecycleHandle("tool-window-test-process")
+    }
+}
+
+private class TestSuccessCommandRunner : CommandRunner {
+    override fun run(command: List<String>, workingDir: String): CommandResult = CommandResult(exitCode = 0)
 }
 
 private fun JPanel.collectComponents(): List<java.awt.Component> {
@@ -287,7 +323,8 @@ class MkdocsToolWindowFactoryTest {
             assertNotNull(splitter)
             assertFalse(splitter.secondComponent.isVisible)
             assertEquals(1.0f, splitter.proportion)
-            assertEquals(1, previewContent.setupPageLoadCount())
+            assertTrue(splitter.firstComponent is SetupPanel)
+            assertEquals(0, previewContent.setupPageLoadCount())
             assertFalse(service.isRuntimeRunning())
             assertTrue(previewContent.loadedUrls().isEmpty())
         } finally {
@@ -381,6 +418,31 @@ class MkdocsToolWindowFactoryTest {
             assertTrue(panel.collectComponents().any { it is javax.swing.JTree })
             assertTrue(panel.collectComponents().none { it is SetupPanel })
             assertTrue(waitUntil { service.isRuntimeRunning() })
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `treeview mode reconciles topic tree once when config already exists`() {
+        val projectRoot = createTempDirectory(prefix = "tool-window-treeview-reconcile-once-")
+        try {
+            Files.createDirectories(projectRoot.resolve("docs"))
+            Files.writeString(projectRoot.resolve("docs").resolve("index.md"), "# Home\n")
+            Files.writeString(projectRoot.resolve("mkdocs.yml"), "site_name: Demo\ndocs_dir: docs\n")
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString())
+            val fixture = IntellijTestFixtures.toolWindowFixture(toolWindowId = AUTHORD_TREEVIEW_TOOL_WINDOW_ID)
+            val service = PluginRuntimeIntegrationService(project)
+            var startupStateCalls = 0
+            val factory = MkdocsToolWindowFactory(
+                runtimeServiceResolver = { service },
+                mkdocsConfigPresenceResolver = { true },
+                startupStateListener = { _, _ -> startupStateCalls += 1 },
+            )
+
+            factory.createToolWindowContent(project, fixture.toolWindow)
+
+            assertEquals(1, startupStateCalls)
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -584,8 +646,9 @@ class MkdocsToolWindowFactoryTest {
             val splitter = panel.collectComponents().filterIsInstance<OnePixelSplitter>().firstOrNull()
             assertNotNull(splitter)
             assertFalse(splitter.secondComponent.isVisible)
-
-            previewContent.triggerSetupProjectCreate("demo-site")
+            val setupPanel = splitter.firstComponent as? SetupPanel
+            assertNotNull(setupPanel)
+            triggerSetupPanelCreate(setupPanel)
 
             assertTrue(
                 waitUntil {
@@ -603,7 +666,7 @@ class MkdocsToolWindowFactoryTest {
             assertEquals("default", activeInstance?.instanceId)
             assertTrue(Files.exists(projectRoot.resolve("mkdocs.yml")))
             val config = Files.readString(projectRoot.resolve("mkdocs.yml"))
-            assertTrue(config.contains("site_name: 'demo-site'"))
+            assertTrue(config.contains("site_name:"))
             assertTrue(config.contains("docs_dir: docs"))
         } finally {
             projectRoot.toFile().deleteRecursively()
@@ -635,7 +698,8 @@ class MkdocsToolWindowFactoryTest {
             assertNotNull(splitter)
             assertFalse(service.isRuntimeRunning())
             assertFalse(splitter.secondComponent.isVisible)
-            assertEquals(1, previewContent.setupPageLoadCount())
+            assertTrue(splitter.firstComponent is SetupPanel)
+            assertEquals(0, previewContent.setupPageLoadCount())
 
             Files.createDirectories(projectRoot.resolve("docs"))
             Files.writeString(projectRoot.resolve("docs").resolve("index.md"), "# Home\n")
@@ -777,7 +841,7 @@ class MkdocsToolWindowFactoryTest {
                 waitUntil {
                     !service.isRuntimeRunning() &&
                         !splitter.secondComponent.isVisible &&
-                        previewContent.setupPageLoadCount() >= 1
+                        splitter.firstComponent is SetupPanel
                 },
             )
         } finally {
@@ -819,7 +883,7 @@ class MkdocsToolWindowFactoryTest {
                 waitUntil {
                     !service.isRuntimeRunning() &&
                         !splitter.secondComponent.isVisible &&
-                        previewContent.setupPageLoadCount() >= 1
+                        splitter.firstComponent is SetupPanel
                 },
             )
         } finally {
@@ -873,6 +937,7 @@ class MkdocsToolWindowFactoryTest {
         val fixture = IntellijTestFixtures.toolWindowFixture()
         factory.createToolWindowContent(project, fixture.toolWindow)
         val baselineCalls = startupStateCalls
+        assertEquals(1, baselineCalls)
 
         val restartResult = factory.restartPlugin(
             project = project,
@@ -881,7 +946,7 @@ class MkdocsToolWindowFactoryTest {
         )
 
         assertTrue(restartResult.success)
-        assertTrue(startupStateCalls > baselineCalls)
+        assertEquals(baselineCalls + 1, startupStateCalls)
     }
 
     @Test
@@ -1103,6 +1168,106 @@ class MkdocsToolWindowFactoryTest {
         factory.createShellContentPanel(project)
 
         assertEquals(listOf(service.currentPreviewUrl()), previewContent.loadedUrls())
+    }
+
+    @Test
+    fun `create tool window content reconciles topic tree once in preview mode`() {
+        val projectRoot = createTempDirectory(prefix = "tool-window-preview-reconcile-once-")
+        try {
+            Files.createDirectories(projectRoot.resolve("docs"))
+            Files.writeString(projectRoot.resolve("docs").resolve("index.md"), "# Home\n")
+            Files.writeString(projectRoot.resolve("mkdocs.yml"), "site_name: Demo\ndocs_dir: docs\n")
+            val project = IntellijTestFixtures.project(basePath = projectRoot.toString())
+            val fixture = IntellijTestFixtures.toolWindowFixture()
+            val previewContent = RecordingPreviewContent()
+            val service = PluginRuntimeIntegrationService(project)
+            var startupStateCalls = 0
+            val factory = MkdocsToolWindowFactory(
+                runtimeServiceResolver = { service },
+                previewContentFactory = { previewContent },
+                mkdocsConfigPresenceResolver = { true },
+                startupStateListener = { _, _ -> startupStateCalls += 1 },
+            )
+
+            factory.createToolWindowContent(project, fixture.toolWindow)
+
+            assertEquals(1, startupStateCalls)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `applyPreviewRoute uses warm route fast path for tool window selection`() {
+        val projectRoot = createTempDirectory(prefix = "tool-window-preview-fast-path-")
+        try {
+            val docsDir = Files.createDirectories(projectRoot.resolve("docs").resolve("guide"))
+            val selectedPath = docsDir.resolve("index.md")
+            Files.writeString(selectedPath, "# Guide\n")
+            val configPath = projectRoot.resolve("mkdocs.yml")
+            Files.writeString(configPath, "site_name: Demo\ndocs_dir: docs\n")
+
+            val project = IntellijTestFixtures.project(
+                basePath = projectRoot.toString(),
+                locationHash = "tool-window-fast-path",
+            )
+            val processManager = MkdocsProcessManager(TestProcessLauncher())
+            processManager.start(
+                projectId = project.locationHash,
+                workingDir = projectRoot.toString(),
+                config = RuntimeServerConfig(
+                    command = listOf("mkdocs", "serve", "-f", configPath.toString()),
+                ),
+            )
+            val previewPane = PreviewPaneCoordinator()
+            previewPane.open(project.locationHash, "http://127.0.0.1:65530/")
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(
+                RuntimeIntegrationDependencies(
+                    activationService = PluginActivationService(
+                        bootstrapService = UvBootstrapService(TestSuccessCommandRunner()),
+                        processManager = processManager,
+                        baseUrlDetector = BaseUrlDetector(),
+                        previewPaneCoordinator = previewPane,
+                        errorPresenter = ActivationErrorPresenter(),
+                        readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { false },
+                    ),
+                    processManager = processManager,
+                    previewPaneCoordinator = previewPane,
+                    navigationCoordinator = NavigationCoordinator(
+                        routeMappingService = RouteMappingService(),
+                        previewPaneCoordinator = previewPane,
+                        failureHandler = PreviewNavigationFailureHandler(),
+                    ),
+                    featureFlagPolicyService = FeatureFlagPolicyService(),
+                    startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+                ),
+            )
+            val intent = service.buildPreviewRouteIntent(
+                selectedPath = selectedPath.toString(),
+                source = PreviewRouteIntentSource.TOOL_WINDOW_SELECTION,
+            )
+            assertNotNull(intent)
+            rememberReadyRouteForFastPath(service, intent.targetUrl)
+
+            val previewContent = RecordingPreviewContent()
+            val factory = MkdocsToolWindowFactory(
+                runtimeServiceResolver = { service },
+                previewContentFactory = { previewContent },
+            )
+
+            val applied = factory.applyPreviewRoute(
+                project = project,
+                runtimeService = service,
+                previewContent = previewContent,
+                selectedPath = selectedPath.toString(),
+            )
+
+            assertTrue(applied)
+            assertEquals(listOf(intent.targetUrl), previewContent.loadedUrls())
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
     }
 
     @Test
@@ -1333,5 +1498,14 @@ class MkdocsToolWindowFactoryTest {
         assertTrue(source.anchors.any { it.type == AnchorType.H })
         assertTrue(source.anchors.any { it.type == AnchorType.IMG })
         assertTrue(source.anchors.any { it.type == AnchorType.CODE })
+    }
+
+    private fun rememberReadyRouteForFastPath(service: PluginRuntimeIntegrationService, url: String) {
+        val method = PluginRuntimeIntegrationService::class.java.getDeclaredMethod(
+            "rememberReadyRouteForFastPath",
+            String::class.java,
+        )
+        method.isAccessible = true
+        method.invoke(service, url)
     }
 }

@@ -8,6 +8,7 @@ out/
 *.jar
 *.iml
 local.properties
+.cache/
 
 # IDE
 .idea/

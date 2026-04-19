@@ -2,6 +2,7 @@ package com.authord.mkdocs.ui.intellij
 
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
 class PreviewStartupFailureClassifierTest {
     @Test
@@ -34,6 +35,34 @@ class PreviewStartupFailureClassifierTest {
 
         assertEquals(PreviewStartupFailureCategory.MISSING_DEPENDENCY, failure.category)
         assertEquals("mkdocs-awesome-pages", failure.installPackage)
+    }
+
+    @Test
+    fun `classifies unrecognized theme as missing dependency`() {
+        val failure = PreviewStartupFailureClassifier.classify(
+            "Config value 'theme': Unrecognized theme name: 'material'",
+        )
+
+        assertEquals(PreviewStartupFailureCategory.MISSING_DEPENDENCY, failure.category)
+        assertEquals("mkdocs-material", failure.installPackage)
+        assertTrue(failure.reason.contains("theme `material`"))
+    }
+
+    @Test
+    fun `captures suggested command from raw startup message`() {
+        val failure = PreviewStartupFailureClassifier.classify(
+            """
+                MkDocs theme `material` is configured but not installed in the preview runtime.
+                Suggested command: /tmp/site/.authord_venv/bin/python -m pip install mkdocs-material
+                After install, retry Start Authord Preview (IDE restart not required).
+            """.trimIndent(),
+        )
+
+        assertEquals(PreviewStartupFailureCategory.MISSING_DEPENDENCY, failure.category)
+        assertEquals(
+            "/tmp/site/.authord_venv/bin/python -m pip install mkdocs-material",
+            failure.suggestedCommand,
+        )
     }
 
     @Test

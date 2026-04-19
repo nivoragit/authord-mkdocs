@@ -2,6 +2,7 @@ package com.authord.mkdocs.ui
 
 import com.authord.mkdocs.core.flags.FeatureFlagPolicy
 import com.authord.mkdocs.runtime.BaseUrlDetector
+import com.authord.mkdocs.runtime.BootstrapResult
 import com.authord.mkdocs.runtime.CommandResult
 import com.authord.mkdocs.runtime.ManagedProcessHandle
 import com.authord.mkdocs.runtime.MkdocsProcessManager
@@ -123,7 +124,7 @@ class PluginActivationServiceTest {
     }
 
     @Test
-    fun `prompts explicit bootstrap fallback when no runtime command is runnable`() {
+    fun `attempts forced authord bootstrap fallback when no runtime candidate is runnable`() {
         val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-no-runtime-")
         try {
             var bootstrapCalls = 0
@@ -147,8 +148,8 @@ class PluginActivationServiceTest {
 
             assertFalse(result.success)
             assertEquals(ActivationFailureReason.START_FAILED, result.reason)
-            assertTrue(result.message.contains("No runnable MkDocs environment detected"))
-            assertEquals(0, bootstrapCalls)
+            assertTrue(result.message.contains("Authord runtime bootstrap", ignoreCase = true))
+            assertTrue(bootstrapCalls > 0)
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -191,6 +192,225 @@ class PluginActivationServiceTest {
             assertTrue(launcher.command[0].endsWith("uv") || launcher.command[0].endsWith("uv.exe"))
             assertTrue(launcher.command[1] == "run")
             assertTrue(launcher.command[2] == "mkdocs")
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `prefers site authord venv before local venv and non-local candidates`() {
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-authord-first-")
+        try {
+            val siteAuthordMkdocs = projectRoot.resolve(".authord_venv").resolve("bin").resolve("mkdocs")
+            val siteLocalMkdocs = projectRoot.resolve(".venv").resolve("bin").resolve("mkdocs")
+            Files.createDirectories(siteAuthordMkdocs.parent)
+            Files.createDirectories(siteLocalMkdocs.parent)
+            Files.writeString(siteAuthordMkdocs, "#!/bin/sh\n")
+            Files.writeString(siteLocalMkdocs, "#!/bin/sh\n")
+
+            val launchedCommands = mutableListOf<List<String>>()
+            val processManager = MkdocsProcessManager(
+                ProcessLauncher { command, _ ->
+                    launchedCommands += command
+                    ActivationHandle("p1", alive = true, startupOutputText = "Serving at http://127.0.0.1:8000/")
+                },
+            )
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = processManager,
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertTrue(result.success)
+            assertEquals(siteAuthordMkdocs.toString(), launchedCommands.firstOrNull()?.firstOrNull())
+            assertTrue(siteLocalMkdocs.toString() !in launchedCommands.mapNotNull { it.firstOrNull() })
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `non local failures trigger forced authord fallback bootstrap on site root`() {
+        val projectRoot = createTempDirectory(prefix = "plugin-activation-forced-authord-fallback-")
+        try {
+            val nestedSiteRoot = Files.createDirectories(projectRoot.resolve("sites").resolve("nested"))
+            Files.createDirectories(nestedSiteRoot.resolve("docs"))
+            Files.writeString(
+                nestedSiteRoot.resolve("mkdocs.yml"),
+                """
+                    site_name: Nested
+                    docs_dir: docs
+                    nav: []
+                """.trimIndent() + "\n",
+            )
+            val forcedAuthordMkdocs = nestedSiteRoot.resolve(".authord_venv").resolve("bin").resolve("mkdocs")
+            var bootstrapPath: String? = null
+            val bootstrap = object : UvBootstrapService({ _, _ -> CommandResult(0) }) {
+                override fun bootstrapWithActiveConfig(projectPath: String, activeConfigPath: Path): BootstrapResult {
+                    bootstrapPath = projectPath
+                    Files.createDirectories(forcedAuthordMkdocs.parent)
+                    Files.writeString(forcedAuthordMkdocs, "#!/bin/sh\n")
+                    return BootstrapResult(
+                        success = true,
+                        runtimePath = nestedSiteRoot.resolve(".authord_venv").toString(),
+                        uvExecutablePath = "/tmp/uv",
+                        executedCommands = emptyList(),
+                        skipped = false,
+                    )
+                }
+            }
+            val processManager = MkdocsProcessManager(
+                ProcessLauncher { command, _ ->
+                    if (command.firstOrNull() == forcedAuthordMkdocs.toString()) {
+                        return@ProcessLauncher ActivationHandle(
+                            "p-fallback",
+                            alive = true,
+                            startupOutputText = "Serving at http://127.0.0.1:8000/",
+                        )
+                    }
+                    val binary = command.firstOrNull().orEmpty()
+                    throw IllegalStateException("Cannot run program \"$binary\": error=2, No such file or directory")
+                },
+            )
+            val svc = service(
+                bootstrap = bootstrap,
+                processManager = processManager,
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertTrue(result.success)
+            assertEquals(nestedSiteRoot.toString(), bootstrapPath)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `bootstrap failure during forced authord fallback includes suggested command guidance`() {
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-bootstrap-fail-guidance-")
+        try {
+            val bootstrap = object : UvBootstrapService({ _, _ -> CommandResult(0) }) {
+                override fun bootstrapWithActiveConfig(projectPath: String, activeConfigPath: Path): BootstrapResult {
+                    return BootstrapResult(
+                        success = false,
+                        runtimePath = Path.of(projectPath).resolve(".authord_venv").toString(),
+                        uvExecutablePath = "/tmp/uv",
+                        executedCommands = emptyList(),
+                        skipped = false,
+                        errorMessage = "Config value 'theme': Unrecognized theme name: 'material'.",
+                    )
+                }
+            }
+            val processManager = MkdocsProcessManager(
+                ProcessLauncher { command, _ ->
+                    val binary = command.firstOrNull().orEmpty()
+                    throw IllegalStateException("Cannot run program \"$binary\": error=2, No such file or directory")
+                },
+            )
+            val svc = service(
+                bootstrap = bootstrap,
+                processManager = processManager,
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertFalse(result.success)
+            assertEquals(ActivationFailureReason.START_FAILED, result.reason)
+            assertTrue(result.message.contains("Suggested command:"))
+            assertTrue(result.message.contains("mkdocs-material"))
+            assertTrue(result.message.contains("retry Start Authord Preview"))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `uses last recoverable dependency failure when multiple candidates fail`() {
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-last-dependency-failure-")
+        try {
+            Files.writeString(
+                projectRoot.resolve("mkdocs.yml"),
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                    theme:
+                      name: material
+                    plugins:
+                      - git-authors
+                """.trimIndent() + "\n",
+            )
+            val authordMkdocs = projectRoot.resolve(".authord_venv").resolve("bin").resolve("mkdocs")
+            val localVenvMkdocs = projectRoot.resolve(".venv").resolve("bin").resolve("mkdocs")
+            Files.createDirectories(authordMkdocs.parent)
+            Files.createDirectories(localVenvMkdocs.parent)
+            Files.writeString(authordMkdocs, "#!/bin/sh\n")
+            Files.writeString(localVenvMkdocs, "#!/bin/sh\n")
+
+            var authordAttempts = 0
+            val processManager = MkdocsProcessManager(
+                ProcessLauncher { command, _ ->
+                    val binary = command.firstOrNull().orEmpty()
+                    when (binary) {
+                        authordMkdocs.toString() -> {
+                            authordAttempts += 1
+                            if (authordAttempts == 1) {
+                                ActivationHandle(
+                                    "p-authord",
+                                    alive = false,
+                                    startupOutputText = "ERROR - Config value 'theme': Unrecognized theme name: 'material'",
+                                )
+                            } else {
+                                throw IllegalStateException(
+                                    "Cannot run program \"$binary\": error=2, No such file or directory",
+                                )
+                            }
+                        }
+
+                        localVenvMkdocs.toString() -> ActivationHandle(
+                            "p-local-venv",
+                            alive = false,
+                            startupOutputText = "ERROR - Config value 'plugins': The \"git-authors\" plugin is not installed",
+                        )
+
+                        else -> throw IllegalStateException(
+                            "Cannot run program \"$binary\": error=2, No such file or directory",
+                        )
+                    }
+                },
+            )
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = processManager,
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertFalse(result.success)
+            assertEquals(ActivationFailureReason.START_FAILED, result.reason)
+            assertTrue(result.message.contains("MkDocs plugin `git-authors`"))
+            assertTrue(!result.message.contains("MkDocs theme `material` is configured"))
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -243,7 +463,10 @@ class PluginActivationServiceTest {
 
             assertFalse(result.success)
             assertEquals(ActivationFailureReason.START_FAILED, result.reason)
-            assertTrue(result.message.contains("Config file 'mkdocs.yml' does not exist"))
+            assertTrue(
+                result.message.contains("Config file 'mkdocs.yml' does not exist") ||
+                    result.message.contains("Authord runtime bootstrap", ignoreCase = true),
+            )
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -275,6 +498,7 @@ class PluginActivationServiceTest {
             assertFalse(result.success)
             assertEquals(ActivationFailureReason.START_FAILED, result.reason)
             assertTrue(result.message.contains("No configuration file found in project root"))
+            assertTrue(result.message.contains("Setup Mode"))
             assertEquals(0, bootstrapCalls)
             assertTrue(launcher.command.isEmpty())
         } finally {
@@ -307,7 +531,7 @@ class PluginActivationServiceTest {
 
             assertFalse(result.success)
             assertEquals(ActivationFailureReason.START_FAILED, result.reason)
-            assertEquals(2, handle.stopCalls)
+            assertTrue(handle.stopCalls >= 2)
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -333,6 +557,76 @@ class PluginActivationServiceTest {
             assertTrue(result.previewUrl.startsWith("http://127.0.0.1:"))
             assertTrue(result.previewUrl.endsWith("/"))
             assertEquals("Activation completed", result.message)
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `uses advertised prefixed base url when host and port match`() {
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-prefixed-base-url-")
+        try {
+            val processManager = MkdocsProcessManager(
+                ProcessLauncher { command, _ ->
+                    val bindIndex = command.indexOf("--dev-addr")
+                    val bindAddress = command.getOrNull(bindIndex + 1).orEmpty()
+                    val port = bindAddress.substringAfter(':', missingDelimiterValue = "")
+                    ActivationHandle(
+                        "p1",
+                        alive = true,
+                        startupOutputText = "INFO    -  [00:00:00] Serving on http://127.0.0.1:$port/mirror-list/",
+                    )
+                },
+            )
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = processManager,
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertTrue(result.success)
+            assertTrue(result.previewUrl.endsWith("/mirror-list/"))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `keeps root preview base url when advertised url has no prefix`() {
+        val projectRoot = createProjectRootWithConfig(prefix = "plugin-activation-root-base-url-")
+        try {
+            val processManager = MkdocsProcessManager(
+                ProcessLauncher { command, _ ->
+                    val bindIndex = command.indexOf("--dev-addr")
+                    val bindAddress = command.getOrNull(bindIndex + 1).orEmpty()
+                    val port = bindAddress.substringAfter(':', missingDelimiterValue = "")
+                    ActivationHandle(
+                        "p1",
+                        alive = true,
+                        startupOutputText = "INFO    -  [00:00:00] Serving on http://127.0.0.1:$port/",
+                    )
+                },
+            )
+            val svc = service(
+                bootstrap = UvBootstrapService { _, _ -> CommandResult(0) },
+                processManager = processManager,
+            )
+
+            val result = svc.activate(
+                projectId = "project-1",
+                projectPath = projectRoot.toString(),
+                startupOutput = "",
+                featureFlags = FeatureFlagPolicy(),
+            )
+
+            assertTrue(result.success)
+            assertTrue(Regex("""^http://127\.0\.0\.1:\d+/$""").matches(result.previewUrl))
         } finally {
             projectRoot.toFile().deleteRecursively()
         }

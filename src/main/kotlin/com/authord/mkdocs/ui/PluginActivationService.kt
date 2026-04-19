@@ -106,9 +106,17 @@ class PluginActivationService(
     private val startupPollIntervalMillis: Long = 150L,
     private val pluginEnvironmentRootProvider: () -> Path = ::defaultPluginEnvironmentRoot,
 ) {
+    private enum class RuntimeCandidateKind {
+        AUTHORD_VENV,
+        LOCAL_VENV,
+        NON_LOCAL,
+    }
+
     private data class RuntimeCommandCandidate(
         val displayName: String,
         val commandPrefix: List<String>,
+        val kind: RuntimeCandidateKind,
+        val siteRoot: Path? = null,
     )
 
     private data class StartupAttemptFailure(
@@ -118,10 +126,25 @@ class PluginActivationService(
         val startupOutput: String,
     )
 
+    private data class DependencyInstallGuidance(
+        val reason: String,
+        val installPackage: String,
+        val suggestedCommand: String,
+        val confidenceScore: Int,
+        val heuristicPackage: Boolean = false,
+    )
+
     private sealed interface RuntimeStartupOutcome {
         data class Started(val baseUrl: String) : RuntimeStartupOutcome
 
         data class CommandUnavailable(val details: String) : RuntimeStartupOutcome
+
+        data class RecoverableDependencyFailure(
+            val failureDetails: String,
+            val installPackage: String,
+            val suggestedCommand: String,
+            val confidenceScore: Int,
+        ) : RuntimeStartupOutcome
 
         data class Failed(val failureDetails: String) : RuntimeStartupOutcome
     }
@@ -136,7 +159,18 @@ class PluginActivationService(
 
     private val siteNameKeyRegex = Regex("""^\s*site_name\s*:""")
     private val themeKeyRegex = Regex("""^(?:theme|["']theme["'])\s*:""")
-    private val themeNotInstalledRegex = Regex("""Theme '.*' is not installed""")
+    private val themeNotInstalledRegex = Regex("""Theme ['"]([^'"]+)['"] is not installed""", RegexOption.IGNORE_CASE)
+    private val themeUnrecognizedRegex = Regex("""Unrecogni[sz]ed theme name:\s*['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
+    private val moduleMissingRegex = Regex("""No module named ['"]([^'"]+)['"]""", RegexOption.IGNORE_CASE)
+    private val pluginMissingRegex = Regex(
+        """(?:Config value ['"]plugins['"]:\s*)?(?:The\s+)?['"]([^'"]+)['"]\s+plugin\s+is\s+not\s+installed""",
+        RegexOption.IGNORE_CASE,
+    )
+    private val knownModulePackageMap = mapOf(
+        "material" to "mkdocs-material",
+        "pymdownx" to "pymdown-extensions",
+    )
+    private val builtInThemeIds = setOf("mkdocs", "readthedocs")
     private val fallbackThemeConfigFileName = ".authord.theme.yml"
     private val mkdocsDevAddrFlag = "--" + "dev-addr"
     private val authordRuntimeVenvDirectoryName = ".authord_venv"
@@ -169,7 +203,7 @@ class PluginActivationService(
         val siteContext = resolveSiteContext(projectPath)
         if (isMaterializedProjectRoot(projectPath) && siteContext == null) {
             val reason = ActivationFailureReason.START_FAILED
-            val details = AuthordUiBundle.message("activation.error.configNotFound", projectPath)
+            val details = buildSetupGuidanceForMissingConfig(projectPath)
             return ActivationResult(
                 success = false,
                 reason = reason,
@@ -179,6 +213,9 @@ class PluginActivationService(
 
         val runtimeCandidates = resolveRuntimeCandidates(projectPath, siteContext)
         val unavailableCandidates = mutableListOf<String>()
+        val startupFailures = mutableListOf<String>()
+        val dependencyFailures = mutableListOf<RuntimeStartupOutcome.RecoverableDependencyFailure>()
+        var sawNonLocalCandidateFailure = false
 
         runtimeCandidates.forEach { candidate ->
             when (
@@ -200,20 +237,84 @@ class PluginActivationService(
 
                 is RuntimeStartupOutcome.CommandUnavailable -> {
                     unavailableCandidates += candidate.displayName
+                    if (candidate.kind == RuntimeCandidateKind.NON_LOCAL) {
+                        sawNonLocalCandidateFailure = true
+                    }
                     LOG.info(
                         "Authord runtime candidate '${candidate.displayName}' was not runnable for projectId=$projectId: ${outcome.details}",
                     )
                 }
 
+                is RuntimeStartupOutcome.RecoverableDependencyFailure -> {
+                    dependencyFailures += outcome
+                    if (candidate.kind == RuntimeCandidateKind.NON_LOCAL) {
+                        sawNonLocalCandidateFailure = true
+                    }
+                    LOG.info(
+                        "Authord runtime candidate '${candidate.displayName}' failed with recoverable dependency issue for projectId=$projectId",
+                    )
+                }
+
                 is RuntimeStartupOutcome.Failed -> {
-                    val reason = ActivationFailureReason.START_FAILED
-                    return ActivationResult(
-                        success = false,
-                        reason = reason,
-                        message = errorPresenter.present(reason, outcome.failureDetails),
+                    startupFailures += outcome.failureDetails
+                    if (candidate.kind == RuntimeCandidateKind.NON_LOCAL) {
+                        sawNonLocalCandidateFailure = true
+                    }
+                    LOG.info(
+                        "Authord runtime candidate '${candidate.displayName}' failed during startup for projectId=$projectId",
                     )
                 }
             }
+        }
+
+        if (siteContext != null && sawNonLocalCandidateFailure) {
+            when (
+                val forcedOutcome = runForcedAuthordFallback(
+                    projectId = projectId,
+                    projectPath = projectPath,
+                    siteContext = siteContext,
+                )
+            ) {
+                is RuntimeStartupOutcome.Started -> {
+                    previewPaneCoordinator.open(projectId, forcedOutcome.baseUrl)
+                    return ActivationResult(
+                        success = true,
+                        previewUrl = forcedOutcome.baseUrl,
+                        message = AuthordUiBundle.message("activation.status.completed"),
+                    )
+                }
+
+                is RuntimeStartupOutcome.CommandUnavailable -> {
+                    unavailableCandidates += "$authordRuntimeVenvDirectoryName (forced fallback)"
+                }
+
+                is RuntimeStartupOutcome.RecoverableDependencyFailure -> {
+                    dependencyFailures += forcedOutcome
+                }
+
+                is RuntimeStartupOutcome.Failed -> {
+                    startupFailures += forcedOutcome.failureDetails
+                }
+            }
+        }
+
+        if (dependencyFailures.isNotEmpty()) {
+            val reason = ActivationFailureReason.START_FAILED
+            val latest = dependencyFailures.last()
+            return ActivationResult(
+                success = false,
+                reason = reason,
+                message = errorPresenter.present(reason, latest.failureDetails),
+            )
+        }
+
+        if (startupFailures.isNotEmpty()) {
+            val reason = ActivationFailureReason.START_FAILED
+            return ActivationResult(
+                success = false,
+                reason = reason,
+                message = errorPresenter.present(reason, startupFailures.last()),
+            )
         }
 
         return ActivationResult(
@@ -228,7 +329,13 @@ class PluginActivationService(
         projectPath: String,
         siteContext: SiteContext?,
         candidate: RuntimeCommandCandidate,
+        syncAuthordDependencies: Boolean = true,
     ): RuntimeStartupOutcome {
+        if (syncAuthordDependencies) {
+            syncAuthordRuntimeDependencies(siteContext, candidate)?.let { syncFailure ->
+                return syncFailure
+            }
+        }
         val attempts = maxStartupAttempts.coerceAtLeast(1)
         val host = loopbackHostAddress()
         var lastFailure: StartupAttemptFailure? = null
@@ -292,6 +399,10 @@ class PluginActivationService(
                     processManager.stop(projectId)
                     return RuntimeStartupOutcome.CommandUnavailable(mergedOutput)
                 }
+                detectRecoverableDependencyFailure(mergedOutput, candidate)?.let { dependencyFailure ->
+                    processManager.stop(projectId)
+                    return dependencyFailure
+                }
                 lastFailure = StartupAttemptFailure(
                     baseUrl = baseUrl,
                     failureSummary = "Authord process failed to start.",
@@ -321,15 +432,28 @@ class PluginActivationService(
             when (val readiness = waitUntilUp(projectId, baseUrl)) {
                 is StartupReadiness.Ready -> {
                     logWarnings(readiness.diagnostics?.startupOutput.orEmpty())
-                    return RuntimeStartupOutcome.Started(baseUrl)
+                    val canonicalBaseUrl = resolveCanonicalPreviewBaseUrl(
+                        expectedBaseUrl = baseUrl,
+                        diagnostics = readiness.diagnostics,
+                    )
+                    if (canonicalBaseUrl != normalizeBaseUrl(baseUrl)) {
+                        LOG.info(
+                            "Authord runtime canonicalized preview base URL from '$baseUrl' to '$canonicalBaseUrl' for projectId=$projectId",
+                        )
+                    }
+                    return RuntimeStartupOutcome.Started(canonicalBaseUrl)
                 }
 
                 is StartupReadiness.ProcessExited -> {
-                    val output = readiness.diagnostics?.startupOutput.orEmpty()
+                    val output = mergeStartupOutput(readiness.diagnostics, startResult.startupOutput)
                     logWarnings(output)
                     if (looksLikeCommandUnavailable(output)) {
                         processManager.stop(projectId)
                         return RuntimeStartupOutcome.CommandUnavailable(output)
+                    }
+                    detectRecoverableDependencyFailure(output, candidate)?.let { dependencyFailure ->
+                        processManager.stop(projectId)
+                        return dependencyFailure
                     }
                     shouldDelayBeforeRetry = !hasPortBindConflict(output)
                     lastFailure = StartupAttemptFailure(
@@ -360,6 +484,341 @@ class PluginActivationService(
         return RuntimeStartupOutcome.Failed(startupFailureDetails(projectPath, lastFailure))
     }
 
+    private fun runForcedAuthordFallback(
+        projectId: String,
+        projectPath: String,
+        siteContext: SiteContext,
+    ): RuntimeStartupOutcome {
+        val siteRoot = runCatching { siteContext.configPath.parent.toAbsolutePath().normalize() }.getOrNull()
+            ?: return RuntimeStartupOutcome.Failed("Unable to resolve site root for forced Authord runtime fallback.")
+        val runtimeRoot = siteRoot.resolve(authordRuntimeVenvDirectoryName)
+        val fallbackCandidate = RuntimeCommandCandidate(
+            displayName = "$authordRuntimeVenvDirectoryName (forced fallback)",
+            commandPrefix = listOf(preferredAuthordMkdocsExecutable(runtimeRoot)),
+            kind = RuntimeCandidateKind.AUTHORD_VENV,
+            siteRoot = siteRoot,
+        )
+        val bootstrap = bootstrapService.bootstrapWithActiveConfig(
+            projectPath = siteRoot.toString(),
+            activeConfigPath = siteContext.configPath,
+        )
+        if (!bootstrap.success) {
+            val bootstrapError = bootstrap.errorMessage.trim().ifBlank { "Unknown bootstrap failure." }
+            detectRecoverableDependencyFailure(bootstrapError, fallbackCandidate)?.let { failure ->
+                return appendDependencyFailureDetails(
+                    failure,
+                    "Authord runtime bootstrap failed at '$runtimeRoot'.",
+                )
+            }
+            return RuntimeStartupOutcome.Failed(
+                buildString {
+                    append("Authord runtime bootstrap failed at '$runtimeRoot'. ")
+                    append(bootstrapError)
+                },
+            )
+        }
+
+        val mkdocsExecutable = resolveVenvMkdocsExecutable(runtimeRoot)
+            ?: return RuntimeStartupOutcome.Failed(
+                "Authord runtime bootstrap completed but no runnable mkdocs executable was found at '$runtimeRoot'.",
+            )
+
+        val forcedCandidate = fallbackCandidate.copy(commandPrefix = listOf(mkdocsExecutable))
+        return startRuntimeCandidate(
+            projectId = projectId,
+            projectPath = projectPath,
+            siteContext = siteContext,
+            candidate = forcedCandidate,
+            syncAuthordDependencies = false,
+        )
+    }
+
+    private fun syncAuthordRuntimeDependencies(
+        siteContext: SiteContext?,
+        candidate: RuntimeCommandCandidate,
+    ): RuntimeStartupOutcome? {
+        if (candidate.kind != RuntimeCandidateKind.AUTHORD_VENV) {
+            return null
+        }
+        val activeConfigPath = siteContext?.configPath ?: return null
+        val siteRoot = candidate.siteRoot
+            ?: runCatching { activeConfigPath.parent.toAbsolutePath().normalize() }.getOrNull()
+            ?: return RuntimeStartupOutcome.Failed("Unable to resolve site root for Authord runtime dependency sync.")
+        val runtimeRoot = siteRoot.resolve(authordRuntimeVenvDirectoryName)
+        val bootstrap = bootstrapService.bootstrapWithActiveConfig(
+            projectPath = siteRoot.toString(),
+            activeConfigPath = activeConfigPath,
+        )
+        if (bootstrap.success) {
+            return null
+        }
+        val bootstrapError = bootstrap.errorMessage.trim().ifBlank { "Unknown bootstrap failure." }
+        detectRecoverableDependencyFailure(bootstrapError, candidate)?.let { failure ->
+            return appendDependencyFailureDetails(
+                failure,
+                "Authord runtime dependency sync failed at '$runtimeRoot'.",
+            )
+        }
+        return RuntimeStartupOutcome.Failed(
+            buildString {
+                append("Authord runtime dependency sync failed at '$runtimeRoot'. ")
+                append(bootstrapError)
+            },
+        )
+    }
+
+    private fun preferredAuthordMkdocsExecutable(runtimeRoot: Path): String {
+        return resolveVenvMkdocsExecutable(runtimeRoot)
+            ?: if (isWindows()) {
+                runtimeRoot.resolve("Scripts").resolve("mkdocs.exe").toString()
+            } else {
+                runtimeRoot.resolve("bin").resolve("mkdocs").toString()
+            }
+    }
+
+    private fun detectRecoverableDependencyFailure(
+        startupOutput: String,
+        candidate: RuntimeCommandCandidate,
+    ): RuntimeStartupOutcome.RecoverableDependencyFailure? {
+        if (startupOutput.isBlank()) {
+            return null
+        }
+        val guidance = resolveDependencyInstallGuidance(startupOutput, candidate) ?: return null
+        val details = buildString {
+            append(guidance.reason)
+            append("\nSuggested command: ")
+            append(guidance.suggestedCommand)
+            append("\nAfter install, retry Start Authord Preview (IDE restart not required).")
+            if (guidance.heuristicPackage) {
+                append("\nPackage suggestion is heuristic; adjust package name if needed for your environment.")
+            }
+        }
+        return RuntimeStartupOutcome.RecoverableDependencyFailure(
+            failureDetails = details,
+            installPackage = guidance.installPackage,
+            suggestedCommand = guidance.suggestedCommand,
+            confidenceScore = guidance.confidenceScore,
+        )
+    }
+
+    private fun appendDependencyFailureDetails(
+        failure: RuntimeStartupOutcome.RecoverableDependencyFailure,
+        extraDetails: String,
+    ): RuntimeStartupOutcome.RecoverableDependencyFailure {
+        val appended = extraDetails.trim()
+        if (appended.isBlank()) {
+            return failure
+        }
+        return failure.copy(
+            failureDetails = buildString {
+                append(failure.failureDetails.trim())
+                append("\n")
+                append(appended)
+            },
+        )
+    }
+
+    private fun resolveDependencyInstallGuidance(
+        startupOutput: String,
+        candidate: RuntimeCommandCandidate,
+    ): DependencyInstallGuidance? {
+        val normalized = startupOutput.trim()
+        if (normalized.isBlank()) {
+            return null
+        }
+
+        val unrecognizedTheme = themeUnrecognizedRegex.find(normalized)?.groupValues?.getOrNull(1)?.trim()
+        if (!unrecognizedTheme.isNullOrBlank()) {
+            val packageResult = resolveThemePackage(unrecognizedTheme) ?: return null
+            return DependencyInstallGuidance(
+                reason = "MkDocs theme `$unrecognizedTheme` is configured but not installed in the preview runtime.",
+                installPackage = packageResult.first,
+                suggestedCommand = buildSuggestedInstallCommand(
+                    candidate = candidate,
+                    installPackage = packageResult.first,
+                ),
+                confidenceScore = packageResult.second,
+                heuristicPackage = packageResult.third,
+            )
+        }
+
+        val missingTheme = themeNotInstalledRegex.find(normalized)?.groupValues?.getOrNull(1)?.trim()
+        if (!missingTheme.isNullOrBlank()) {
+            val packageResult = resolveThemePackage(missingTheme) ?: return null
+            return DependencyInstallGuidance(
+                reason = "MkDocs theme `$missingTheme` is configured but not installed in the preview runtime.",
+                installPackage = packageResult.first,
+                suggestedCommand = buildSuggestedInstallCommand(
+                    candidate = candidate,
+                    installPackage = packageResult.first,
+                ),
+                confidenceScore = packageResult.second,
+                heuristicPackage = packageResult.third,
+            )
+        }
+
+        val pluginMatch = pluginMissingRegex.find(normalized)?.groupValues?.getOrNull(1)?.trim()
+        if (!pluginMatch.isNullOrBlank()) {
+            val normalizedPluginId = pluginMatch.lowercase().replace('_', '-')
+            val inferredPackage = if (normalizedPluginId.startsWith("mkdocs-")) {
+                normalizedPluginId
+            } else {
+                "mkdocs-$normalizedPluginId"
+            }
+            return DependencyInstallGuidance(
+                reason = "MkDocs plugin `$normalizedPluginId` is declared in `mkdocs.yml` but is not installed in the preview runtime.",
+                installPackage = inferredPackage,
+                suggestedCommand = buildSuggestedInstallCommand(
+                    candidate = candidate,
+                    installPackage = inferredPackage,
+                ),
+                confidenceScore = 85,
+                heuristicPackage = !normalizedPluginId.startsWith("mkdocs-"),
+            )
+        }
+
+        val missingModule = moduleMissingRegex.find(normalized)?.groupValues?.getOrNull(1)?.trim()
+        if (!missingModule.isNullOrBlank()) {
+            val inferredPackage = inferPackageForModule(missingModule) ?: return null
+            val moduleRoot = missingModule.substringBefore('.')
+            val heuristic = moduleRoot !in knownModulePackageMap
+            return DependencyInstallGuidance(
+                reason = "Missing Python dependency module: $missingModule.",
+                installPackage = inferredPackage,
+                suggestedCommand = buildSuggestedInstallCommand(
+                    candidate = candidate,
+                    installPackage = inferredPackage,
+                ),
+                confidenceScore = if (heuristic) 70 else 92,
+                heuristicPackage = heuristic,
+            )
+        }
+
+        return null
+    }
+
+    private fun resolveThemePackage(themeId: String): Triple<String, Int, Boolean>? {
+        val normalizedTheme = themeId.trim().lowercase().replace('_', '-')
+        if (normalizedTheme.isBlank() || normalizedTheme in builtInThemeIds) {
+            return null
+        }
+        if (normalizedTheme == "material") {
+            return Triple("mkdocs-material", 98, false)
+        }
+        val inferred = if (normalizedTheme.startsWith("mkdocs-")) normalizedTheme else "mkdocs-$normalizedTheme"
+        return Triple(inferred, 78, !normalizedTheme.startsWith("mkdocs-"))
+    }
+
+    private fun inferPackageForModule(moduleName: String): String? {
+        val normalized = moduleName.trim()
+        if (normalized.isBlank()) {
+            return null
+        }
+        val root = normalized.substringBefore('.').lowercase()
+        knownModulePackageMap[root]?.let { return it }
+        if (root.startsWith("mkdocs_")) {
+            return "mkdocs-${root.removePrefix("mkdocs_").replace('_', '-')}"
+        }
+        if (root.startsWith("mkdocs-")) {
+            return root
+        }
+        return root.replace('_', '-')
+    }
+
+    private fun buildSuggestedInstallCommand(
+        candidate: RuntimeCommandCandidate,
+        installPackage: String,
+    ): String {
+        val prefix = buildInstallCommandPrefix(candidate)
+        return (prefix + installPackage).joinToString(" ")
+    }
+
+    private fun buildInstallCommandPrefix(candidate: RuntimeCommandCandidate): List<String> {
+        if (candidate.kind == RuntimeCandidateKind.AUTHORD_VENV) {
+            resolveAuthordVenvPython(candidate.siteRoot)?.let { python ->
+                return listOf(python, "-m", "pip", "install")
+            }
+        }
+
+        val commandPrefix = candidate.commandPrefix
+        if (commandPrefix.isEmpty()) {
+            return listOf("python", "-m", "pip", "install")
+        }
+
+        if (commandPrefix.size >= 3 &&
+            commandPrefix[1].equals("run", ignoreCase = true) &&
+            commandPrefix[2].equals("mkdocs", ignoreCase = true)
+        ) {
+            val executable = commandPrefix.first()
+            val executableName = runCatching { Path.of(executable).fileName?.toString().orEmpty().lowercase() }
+                .getOrDefault(executable.lowercase())
+            return when {
+                executableName.startsWith("poetry") -> listOf(executable, "run", "pip", "install")
+                executableName.startsWith("pipenv") -> listOf(executable, "run", "pip", "install")
+                executableName.startsWith("uv") -> listOf(executable, "pip", "install")
+                else -> listOf("python", "-m", "pip", "install")
+            }
+        }
+
+        val executable = commandPrefix.first()
+        val executableName = runCatching { Path.of(executable).fileName?.toString().orEmpty().lowercase() }
+            .getOrDefault(executable.lowercase())
+        if (executableName == "mkdocs" || executableName == "mkdocs.exe") {
+            resolveVenvPythonForMkdocsExecutable(executable)?.let { pythonExecutable ->
+                return listOf(pythonExecutable, "-m", "pip", "install")
+            }
+        }
+
+        return listOf("python", "-m", "pip", "install")
+    }
+
+    private fun resolveAuthordVenvPython(siteRoot: Path?): String? {
+        val root = siteRoot ?: return null
+        val runtimeRoot = root.resolve(authordRuntimeVenvDirectoryName)
+        val scriptPython = runtimeRoot.resolve("Scripts").resolve("python.exe")
+        if (Files.exists(scriptPython) && Files.isRegularFile(scriptPython)) {
+            return scriptPython.toString()
+        }
+        val binPython = runtimeRoot.resolve("bin").resolve("python")
+        if (Files.exists(binPython) && Files.isRegularFile(binPython)) {
+            return binPython.toString()
+        }
+        return if (isWindows()) scriptPython.toString() else binPython.toString()
+    }
+
+    private fun resolveVenvPythonForMkdocsExecutable(mkdocsExecutable: String): String? {
+        val executablePath = runCatching { Path.of(mkdocsExecutable).toAbsolutePath().normalize() }.getOrNull() ?: return null
+        val parent = executablePath.parent ?: return null
+        val folder = parent.fileName?.toString()?.lowercase().orEmpty()
+        if (folder != "bin" && folder != "scripts") {
+            return null
+        }
+        val runtimeRoot = parent.parent ?: return null
+        val scriptPython = runtimeRoot.resolve("Scripts").resolve("python.exe")
+        if (Files.exists(scriptPython) && Files.isRegularFile(scriptPython)) {
+            return scriptPython.toString()
+        }
+        val binPython = runtimeRoot.resolve("bin").resolve("python")
+        if (Files.exists(binPython) && Files.isRegularFile(binPython)) {
+            return binPython.toString()
+        }
+        return null
+    }
+
+    private fun mergeStartupOutput(
+        diagnostics: RuntimeProcessDiagnostics?,
+        startupOutput: String,
+    ): String {
+        return listOfNotNull(
+            diagnostics?.stdoutOutput,
+            diagnostics?.stderrOutput,
+            diagnostics?.startupOutput,
+            startupOutput,
+        )
+            .filter { it.isNotBlank() }
+            .joinToString("\n")
+    }
+
     private fun resolveRuntimeCandidates(projectPath: String, siteContext: SiteContext?): List<RuntimeCommandCandidate> {
         val normalizedProjectRoot = runCatching { Path.of(projectPath).toAbsolutePath().normalize() }.getOrNull()
         val normalizedSiteRoot = siteContext?.configPath
@@ -368,7 +827,12 @@ class PluginActivationService(
         val candidates = mutableListOf<RuntimeCommandCandidate>()
         val seenCommandPrefixes = linkedSetOf<String>()
 
-        fun addExecutableCandidate(displayName: String, executablePath: String?) {
+        fun addExecutableCandidate(
+            displayName: String,
+            executablePath: String?,
+            kind: RuntimeCandidateKind,
+            siteRoot: Path? = null,
+        ) {
             val executable = executablePath ?: return
             val commandPrefix = listOf(executable)
             val key = commandPrefix.joinToString("\u0000")
@@ -376,26 +840,33 @@ class PluginActivationService(
                 candidates += RuntimeCommandCandidate(
                     displayName = displayName,
                     commandPrefix = commandPrefix,
+                    kind = kind,
+                    siteRoot = siteRoot,
                 )
             }
         }
 
-        // Prefer the active site's local environments before global or project-root fallbacks.
-        addExecutableCandidate(
-            displayName = "$projectVenvDirectoryName (site)",
-            executablePath = normalizedSiteRoot?.let { resolveVenvMkdocsExecutable(it.resolve(projectVenvDirectoryName)) },
-        )
+        // Candidate order:
+        // 1) site-level .authord_venv
+        // 2) local .venv candidates
+        // 3) non-local runtimes
         addExecutableCandidate(
             displayName = "$authordRuntimeVenvDirectoryName (site)",
             executablePath = normalizedSiteRoot?.let { resolveVenvMkdocsExecutable(it.resolve(authordRuntimeVenvDirectoryName)) },
+            kind = RuntimeCandidateKind.AUTHORD_VENV,
+            siteRoot = normalizedSiteRoot,
+        )
+        addExecutableCandidate(
+            displayName = "$projectVenvDirectoryName (site)",
+            executablePath = normalizedSiteRoot?.let { resolveVenvMkdocsExecutable(it.resolve(projectVenvDirectoryName)) },
+            kind = RuntimeCandidateKind.LOCAL_VENV,
+            siteRoot = normalizedSiteRoot,
         )
         addExecutableCandidate(
             displayName = "$projectVenvDirectoryName (project)",
             executablePath = normalizedProjectRoot?.let { resolveVenvMkdocsExecutable(it.resolve(projectVenvDirectoryName)) },
-        )
-        addExecutableCandidate(
-            displayName = "$authordRuntimeVenvDirectoryName (project)",
-            executablePath = normalizedProjectRoot?.let { resolveVenvMkdocsExecutable(it.resolve(authordRuntimeVenvDirectoryName)) },
+            kind = RuntimeCandidateKind.LOCAL_VENV,
+            siteRoot = normalizedProjectRoot,
         )
 
         resolveShellCommandPrefix("mkdocs")?.let { commandPrefix ->
@@ -404,6 +875,7 @@ class PluginActivationService(
                 candidates += RuntimeCommandCandidate(
                     displayName = "mkdocs on PATH",
                     commandPrefix = commandPrefix,
+                    kind = RuntimeCandidateKind.NON_LOCAL,
                 )
             }
         }
@@ -415,6 +887,7 @@ class PluginActivationService(
                 candidates += RuntimeCommandCandidate(
                     displayName = "poetry",
                     commandPrefix = commandPrefix,
+                    kind = RuntimeCandidateKind.NON_LOCAL,
                 )
             }
         }
@@ -425,6 +898,7 @@ class PluginActivationService(
                 candidates += RuntimeCommandCandidate(
                     displayName = "pipenv",
                     commandPrefix = commandPrefix,
+                    kind = RuntimeCandidateKind.NON_LOCAL,
                 )
             }
         }
@@ -435,6 +909,7 @@ class PluginActivationService(
                 candidates += RuntimeCommandCandidate(
                     displayName = "uv run",
                     commandPrefix = commandPrefix,
+                    kind = RuntimeCandidateKind.NON_LOCAL,
                 )
             }
         }
@@ -589,6 +1064,14 @@ class PluginActivationService(
         return "$base Tried: ${unavailableCandidates.joinToString(", ")}."
     }
 
+    private fun buildSetupGuidanceForMissingConfig(projectPath: String): String {
+        val configError = AuthordUiBundle.message("activation.error.configNotFound", projectPath)
+        return buildString {
+            append(configError)
+            append(" Open the Authord Tool Window and use Setup Mode to create the project configuration.")
+        }
+    }
+
     private fun waitUntilUp(projectId: String, baseUrl: String): StartupReadiness {
         val pollInterval = startupPollIntervalMillis.coerceIn(100L, 250L)
         val timeout = startupProbeTimeoutMillis.coerceAtLeast(1_000L)
@@ -646,6 +1129,76 @@ class PluginActivationService(
             diagnostics.startupOutput,
         ).joinToString("\n")
         return baseUrlDetector.detectBaseUrl(mergedOutput)
+    }
+
+    private fun resolveCanonicalPreviewBaseUrl(
+        expectedBaseUrl: String,
+        diagnostics: RuntimeProcessDiagnostics?,
+    ): String {
+        val normalizedExpectedBaseUrl = normalizeBaseUrl(expectedBaseUrl)
+        val advertisedBaseUrl = detectAdvertisedBaseUrl(diagnostics) ?: return normalizedExpectedBaseUrl
+        val normalizedAdvertisedBaseUrl = normalizeBaseUrl(advertisedBaseUrl)
+        if (normalizedAdvertisedBaseUrl == normalizedExpectedBaseUrl) {
+            return normalizedExpectedBaseUrl
+        }
+        if (!isTrustedAdvertisedBaseUrl(
+                expectedBaseUrl = normalizedExpectedBaseUrl,
+                advertisedBaseUrl = normalizedAdvertisedBaseUrl,
+            )
+        ) {
+            return normalizedExpectedBaseUrl
+        }
+        val advertisedPath = runCatching { URI.create(normalizedAdvertisedBaseUrl).path.orEmpty() }
+            .getOrElse { return normalizedExpectedBaseUrl }
+        return if (advertisedPath.isBlank() || advertisedPath == "/") {
+            normalizedExpectedBaseUrl
+        } else {
+            normalizedAdvertisedBaseUrl
+        }
+    }
+
+    private fun isTrustedAdvertisedBaseUrl(
+        expectedBaseUrl: String,
+        advertisedBaseUrl: String,
+    ): Boolean {
+        val expectedUri = runCatching { URI.create(expectedBaseUrl) }.getOrNull() ?: return false
+        val advertisedUri = runCatching { URI.create(advertisedBaseUrl) }.getOrNull() ?: return false
+        if (!expectedUri.scheme.equals(advertisedUri.scheme, ignoreCase = true)) {
+            return false
+        }
+        val expectedPort = effectivePort(expectedUri)
+        val advertisedPort = effectivePort(advertisedUri)
+        if (expectedPort <= 0 || expectedPort != advertisedPort) {
+            return false
+        }
+        val expectedHost = expectedUri.host?.trim().orEmpty()
+        val advertisedHost = advertisedUri.host?.trim().orEmpty()
+        if (expectedHost.isBlank() || advertisedHost.isBlank()) {
+            return false
+        }
+        return isLoopbackHost(expectedHost) && isLoopbackHost(advertisedHost)
+    }
+
+    private fun effectivePort(uri: URI): Int {
+        val explicit = uri.port
+        if (explicit > 0) {
+            return explicit
+        }
+        return when (uri.scheme?.lowercase()) {
+            "http" -> 80
+            "https" -> 443
+            else -> -1
+        }
+    }
+
+    private fun isLoopbackHost(host: String): Boolean {
+        return when (host.lowercase()) {
+            "localhost" -> true
+            else -> runCatching {
+                val resolved = InetAddress.getByName(host)
+                resolved.isLoopbackAddress || resolved.isAnyLocalAddress
+            }.getOrDefault(false)
+        }
     }
 
     private fun hasPortBindConflict(output: String): Boolean {

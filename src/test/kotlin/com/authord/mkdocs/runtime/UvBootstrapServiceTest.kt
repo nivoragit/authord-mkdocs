@@ -279,14 +279,52 @@ class UvBootstrapServiceTest {
 
             val result = service.bootstrap(projectRoot.toString())
             val runtimePath = projectRoot.resolve(".authord_venv").toString()
+            val nestedConfigPath = docsRoot.resolve("mkdocs.yml").toString()
 
             assertTrue(result.success)
             assertFalse(result.skipped)
             assertTrue(commands[2].contains("get-deps"))
+            assertTrue(commands[2].contains("-f"))
+            assertTrue(commands[2].contains(nestedConfigPath))
             assertEquals(
                 listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs-search"),
                 commands[3],
             )
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `bootstrapWithActiveConfig always re-syncs dependencies and uses active config path`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-active-config-sync-")
+        try {
+            val activeConfig = projectRoot.resolve("sites").resolve("docs").createDirectories().resolve("mkdocs.yml")
+            activeConfig.writeText("site_name: Active\nplugins:\n  - git-authors\n")
+            projectRoot.resolve(".authord_venv").createDirectories()
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                if (command.contains("get-deps")) {
+                    CommandResult(exitCode = 0, stdout = "")
+                } else {
+                    CommandResult(exitCode = 0)
+                }
+            }
+
+            val first = service.bootstrapWithActiveConfig(projectRoot.toString(), activeConfig)
+            val second = service.bootstrapWithActiveConfig(projectRoot.toString(), activeConfig)
+
+            assertTrue(first.success)
+            assertFalse(first.skipped)
+            assertTrue(second.success)
+            assertFalse(second.skipped)
+
+            val getDepsCommands = commands.filter { it.contains("get-deps") }
+            assertEquals(2, getDepsCommands.size)
+            assertTrue(getDepsCommands.all { it.contains("-f") })
+            assertTrue(getDepsCommands.all { it.contains(activeConfig.toString()) })
         } finally {
             projectRoot.toFile().deleteRecursively()
         }
@@ -328,6 +366,47 @@ class UvBootstrapServiceTest {
             assertTrue(result.success)
             assertEquals(
                 listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs-glightbox"),
+                commands[3],
+            )
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `installs dependencies when get-deps returns specs even with non-zero exit`() {
+        val projectRoot = createTempDirectory(prefix = "uv-bootstrap-get-deps-nonzero-with-output-")
+        try {
+            projectRoot.resolve("mkdocs.yml").writeText(
+                """
+                site_name: Demo
+                plugins:
+                  - git-authors
+                """.trimIndent() + "\n",
+            )
+
+            val commands = mutableListOf<List<String>>()
+            val service = UvBootstrapService { command, _ ->
+                commands += command
+                if (command.contains("get-deps")) {
+                    CommandResult(
+                        exitCode = 1,
+                        stdout = "mkdocs-git-authors-plugin\n",
+                        stderr = "WARNING - Plugin 'privacy' is not provided by any registered project",
+                    )
+                } else {
+                    CommandResult(exitCode = 0)
+                }
+            }
+
+            val result = service.bootstrap(projectRoot.toString())
+            val runtimePath = projectRoot.resolve(".authord_venv").toString()
+
+            assertTrue(result.success)
+            assertFalse(result.skipped)
+            assertTrue(commands[2].contains("get-deps"))
+            assertEquals(
+                listOf("uv", "pip", "install", "--python", runtimePath, "mkdocs-git-authors-plugin"),
                 commands[3],
             )
         } finally {

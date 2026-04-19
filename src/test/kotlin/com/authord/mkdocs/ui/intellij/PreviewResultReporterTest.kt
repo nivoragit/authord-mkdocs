@@ -69,6 +69,24 @@ class PreviewResultReporterTest {
     }
 
     @Test
+    fun `deduplicates suggested command in formatted failure output`() {
+        val result = ActivationResult(
+            success = false,
+            reason = ActivationFailureReason.START_FAILED,
+            message = """
+                MkDocs theme `material` is configured but not installed in the preview runtime.
+                Suggested command: /tmp/site/.authord_venv/bin/python -m pip install mkdocs-material
+                After install, retry Start Authord Preview (IDE restart not required).
+            """.trimIndent(),
+        )
+
+        val formatted = formatPreviewResultMessage(result)
+
+        assertTrue(formatted.contains("Suggested command: /tmp/site/.authord_venv/bin/python -m pip install mkdocs-material"))
+        assertEquals(1, Regex("Suggested command:").findAll(formatted).count())
+    }
+
+    @Test
     fun `formats fallback failure message when activation message is blank`() {
         val result = ActivationResult(
             success = false,

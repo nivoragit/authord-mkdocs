@@ -336,10 +336,6 @@ class MkdocsToolWindowFactory(
         panel.revalidate()
         panel.repaint()
         topicTreePanel.reconcileFromDisk()
-        runStartupReconciliation(project)?.let { startupState ->
-            topicTreePanel.render(startupState)
-            startupStateListener(project, startupState)
-        }
     }
 
     private fun enterTreeviewSetupMode(
@@ -637,10 +633,6 @@ class MkdocsToolWindowFactory(
     private fun refreshTopicTreeAfterRestart(project: Project) {
         val topicTreePanel = topicTreePanelsByProject[project.locationHash] ?: return
         topicTreePanel.reconcileFromDisk()
-        runStartupReconciliation(project)?.let { startupState ->
-            topicTreePanel.render(startupState)
-            startupStateListener(project, startupState)
-        }
     }
 
     internal fun createSetShellLayoutModeAction(
@@ -869,10 +861,6 @@ class MkdocsToolWindowFactory(
         }
 
         topicTreePanel.reconcileFromDisk()
-        runStartupReconciliation(project)?.let { startupState ->
-            topicTreePanel.render(startupState)
-            startupStateListener(project, startupState)
-        }
 
         if (!shouldAutoStartPreviewRuntime(project)) {
             if (runtimeService.isRuntimeRunning() && shouldLoadLivePreview(project)) {
@@ -946,15 +934,12 @@ class MkdocsToolWindowFactory(
         onProjectCreate: (String) -> Unit,
     ) {
         splitter?.let { setShellLayoutMode(projectKey(project), it, ShellLayoutMode.PREVIEW) }
-        if (splitter != null && previewContent.prefersSetupPanel()) {
+        if (splitter != null) {
             splitter.firstComponent = SetupPanel(
                 onProjectCreate = onProjectCreate,
                 suggestedProjectName = resolveDefaultSetupProjectName(project),
             )
             return
-        }
-        if (splitter != null) {
-            splitter.firstComponent = previewContent.component
         }
         previewContent.loadSetupPage(onProjectCreate)
     }
@@ -1148,7 +1133,7 @@ class MkdocsToolWindowFactory(
     private fun runOnUiThread(task: () -> Unit) {
         val app = ApplicationManager.getApplication()
         if (app != null) {
-            app.invokeLater(task, ModalityState.any())
+            app.invokeLater(task, ModalityState.defaultModalityState())
             return
         }
         task()
@@ -1498,7 +1483,7 @@ class MkdocsToolWindowFactory(
         val applied = runtimeService.dispatchPreviewForSelectedFileWithRetry(
             selectedPath = selectedPath,
             source = PreviewRouteIntentSource.TOOL_WINDOW_SELECTION,
-            forceReload = true,
+            forceReload = false,
             loadUrl = { url, forceReload ->
                 if (shouldLoadLivePreview(project)) {
                     val browserService = previewBrowserServiceResolver(project)

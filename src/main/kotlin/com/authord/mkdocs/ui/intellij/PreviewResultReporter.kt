@@ -60,11 +60,19 @@ internal fun formatPreviewResultMessage(result: ActivationResult): String {
         val failure = PreviewStartupFailureClassifier.classify(
             result.message.ifBlank { "Preview start failed." },
         )
-        val exactErrorExcerpt = extractExactErrorExcerpt(result.message)
+        val exactErrorExcerpt = dedupeExactErrorExcerpt(
+            excerpt = extractExactErrorExcerpt(result.message),
+            failure = failure,
+        )
         return buildString {
             append("Authord preview failed to start. ")
             append("Reason: ")
             append(failure.reason)
+            failure.suggestedCommand?.takeIf { it.isNotBlank() }?.let { command ->
+                append(" ")
+                append("Suggested command: ")
+                append(command)
+            }
             append(" ")
             append("Next step: ")
             append(failure.nextStep)
@@ -85,4 +93,30 @@ internal fun formatPreviewResultMessage(result: ActivationResult): String {
     } else {
         "Authord preview started: $resolvedUrl"
     }
+}
+
+private fun dedupeExactErrorExcerpt(
+    excerpt: String,
+    failure: PreviewStartupFailure,
+): String {
+    if (excerpt.isBlank()) {
+        return ""
+    }
+    val normalizedReason = failure.reason.trim().lowercase()
+    val normalizedStep = failure.nextStep.trim().lowercase()
+    val normalizedSuggested = failure.suggestedCommand?.trim()?.lowercase()
+    return excerpt
+        .lineSequence()
+        .map { it.trimEnd() }
+        .filter { it.isNotBlank() }
+        .filterNot { line ->
+            val normalizedLine = line.trim().lowercase()
+            normalizedLine == normalizedReason ||
+                normalizedLine == normalizedStep ||
+                normalizedLine.startsWith("suggested command:") ||
+                normalizedLine.startsWith("after install, retry start authord preview") ||
+                (!normalizedSuggested.isNullOrBlank() && normalizedLine == normalizedSuggested)
+        }
+        .distinct()
+        .joinToString("\n")
 }

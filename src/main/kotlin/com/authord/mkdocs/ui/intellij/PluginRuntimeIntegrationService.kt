@@ -48,7 +48,7 @@ private const val DEFAULT_PREVIEW_DISPATCH_RETRY_ATTEMPTS: Int = 2
 private const val DEFAULT_PREVIEW_DISPATCH_RETRY_DELAY_MS: Long = 1_200L
 private const val TOPIC_MUTATION_VERIFICATION_HOLD_DELAY_MS: Long = 150L
 private const val MAX_DOCS_ROUTE_SCAN_DEPTH: Int = 20
-private const val TOC_ROUTE_READY_CACHE_TTL_MS: Long = 10_000L
+private const val TOC_ROUTE_READY_CACHE_TTL_MS: Long = 60_000L
 private const val MAX_READY_ROUTE_CACHE_ENTRIES: Int = 256
 
 /**

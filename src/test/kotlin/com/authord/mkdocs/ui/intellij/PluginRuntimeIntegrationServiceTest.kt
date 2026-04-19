@@ -29,6 +29,7 @@ import kotlin.test.assertTrue
 
 private class LifecycleHandle(
     override val id: String,
+    private val startupOutputText: String = "",
 ) : ManagedProcessHandle {
     private var alive: Boolean = true
 
@@ -37,6 +38,10 @@ private class LifecycleHandle(
     }
 
     override fun isAlive(): Boolean = alive
+
+    override fun startupOutput(): String = startupOutputText
+
+    override fun stdoutOutput(): String = startupOutputText
 }
 
 private class CountingProcessLauncher : ProcessLauncher {
@@ -524,6 +529,77 @@ class PluginRuntimeIntegrationServiceTest {
             assertTrue(service.currentPreviewUrl()?.endsWith("/guide/") == true)
             assertTrue(service.isPreviewEligibleMarkdownPath(guidePath.toString()))
             assertFalse(service.isPreviewEligibleMarkdownPath(projectRoot.resolve("README.md").toString()))
+        } finally {
+            projectRoot.toFile().deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `startPreview canonicalizes prefixed base url for route intent target urls`() {
+        val projectRoot = createTempDirectory(prefix = "runtime-preview-intent-prefixed-base-")
+        try {
+            val docsDir = Files.createDirectories(projectRoot.resolve("docs").resolve("guides"))
+            val guidePath = docsDir.resolve("index.md")
+            Files.writeString(guidePath, "# Guide\n")
+            Files.writeString(
+                projectRoot.resolve("mkdocs.yml"),
+                """
+                    site_name: Demo
+                    docs_dir: docs
+                """.trimIndent() + "\n",
+            )
+
+            val project = IntellijTestFixtures.project(
+                basePath = projectRoot.toString(),
+                locationHash = "preview-intent-prefixed-base",
+            )
+            val processManager = MkdocsProcessManager(
+                ProcessLauncher { command, _ ->
+                    val bindIndex = command.indexOf("--dev-addr")
+                    val bindAddress = command.getOrNull(bindIndex + 1).orEmpty()
+                    val port = bindAddress.substringAfter(':', missingDelimiterValue = "")
+                    LifecycleHandle(
+                        id = "prefixed-base",
+                        startupOutputText = "INFO    -  [00:00:00] Serving on http://127.0.0.1:$port/mirror-list/",
+                    )
+                },
+            )
+            val previewPane = PreviewPaneCoordinator()
+            val dependencies = RuntimeIntegrationDependencies(
+                activationService = PluginActivationService(
+                    bootstrapService = UvBootstrapService(SuccessCommandRunner()),
+                    processManager = processManager,
+                    baseUrlDetector = BaseUrlDetector(),
+                    previewPaneCoordinator = previewPane,
+                    errorPresenter = ActivationErrorPresenter(),
+                    readinessProbe = com.authord.mkdocs.ui.HttpReadinessProbe { true },
+                ),
+                processManager = processManager,
+                previewPaneCoordinator = previewPane,
+                navigationCoordinator = NavigationCoordinator(
+                    routeMappingService = RouteMappingService(),
+                    previewPaneCoordinator = previewPane,
+                    failureHandler = PreviewNavigationFailureHandler(),
+                ),
+                featureFlagPolicyService = FeatureFlagPolicyService(),
+                startupOutputProvider = StartupOutputProvider { _, _ -> "" },
+            )
+            val service = PluginRuntimeIntegrationService(project)
+            service.overrideDependenciesForTesting(dependencies)
+
+            val startResult = service.startPreview()
+            assertTrue(startResult.success)
+            assertTrue(startResult.previewUrl.endsWith("/mirror-list/"))
+
+            val intent = service.buildPreviewRouteIntent(
+                selectedPath = guidePath.toString(),
+                source = PreviewRouteIntentSource.DIRECT_NAVIGATION,
+            )
+
+            assertTrue(intent != null)
+            assertEquals("/guides/", intent.route)
+            assertTrue(intent.targetUrl.endsWith("/mirror-list/guides/"))
+            assertTrue(service.currentPreviewUrl()?.endsWith("/mirror-list/guides/") == true)
         } finally {
             projectRoot.toFile().deleteRecursively()
         }

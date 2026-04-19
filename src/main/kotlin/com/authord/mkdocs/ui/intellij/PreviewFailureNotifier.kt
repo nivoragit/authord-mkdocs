@@ -78,6 +78,11 @@ private fun emitFailureNotification(project: Project, payload: PreviewFailureNot
         append("Authord preview failed to start.\n")
         append("Reason: ")
         append(failure.reason)
+        failure.suggestedCommand?.takeIf { it.isNotBlank() }?.let { command ->
+            append("\n")
+            append("Suggested command: ")
+            append(command)
+        }
         append("\n")
         append("Next step: ")
         append(failure.nextStep)
@@ -113,10 +118,12 @@ private fun emitFailureNotification(project: Project, payload: PreviewFailureNot
         )
     }
 
-    if (failure.installPackage != null) {
+    if (failure.suggestedCommand != null || failure.installPackage != null) {
         notification.addAction(
             NotificationAction.createSimple("Install Missing Dependency…") {
-                val command = "uv pip install ${failure.installPackage}"
+                val command = failure.suggestedCommand
+                    ?.takeIf { it.isNotBlank() }
+                    ?: "python -m pip install ${failure.installPackage}"
                 presentAuthordNotification(
                     project,
                     "Install suggestion: $command",
