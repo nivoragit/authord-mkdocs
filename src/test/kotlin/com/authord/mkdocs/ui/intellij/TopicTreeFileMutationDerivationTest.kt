@@ -2,6 +2,8 @@ package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.TopicTreePort
 import com.authord.mkdocs.ports.topic.AddChildTopicNodeCommand
+import com.authord.mkdocs.ports.topic.AddFolderInitialChildInput
+import com.authord.mkdocs.ports.topic.AddFolderTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
 import com.authord.mkdocs.ports.topic.DocsFileGateway
 import com.authord.mkdocs.ports.topic.MkDocsConfigDocument
@@ -110,6 +112,126 @@ class TopicTreeFileMutationDerivationTest {
         val written = configGateway.writes.last()
         val guideNode = written.nav.single { it.nodeId == "guides" }
         assertTrue(guideNode.children.any { it.nodeId == "install" && it.path == "guides/install-guide.md" })
+    }
+
+    @Test
+    fun `add folder in nav mode persists empty folder without file operations`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(nodeId = "home", title = "Home", path = "index.md"),
+                    TopicNavNode(nodeId = "quickstart", title = "Quickstart", path = "sections/quickstart-guide.md"),
+                ),
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-add-folder-empty",
+                    instance = instance,
+                    command = AddFolderTopicNodeCommand(
+                        commandId = "cmd-add-folder-empty",
+                        treeId = "default",
+                        parentNodeId = "root",
+                        nodeId = "cookbook",
+                        title = "Cookbook",
+                        orderIndex = 2,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertTrue(docsGateway.calls.isEmpty())
+        val folder = configGateway.writes.last().nav.single { it.nodeId == "cookbook" }
+        assertEquals(null, folder.path)
+        assertTrue(folder.children.isEmpty())
+    }
+
+    @Test
+    fun `add folder with initial child derives child path under inferred root base directory`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(nodeId = "home", title = "Home", path = "index.md"),
+                    TopicNavNode(nodeId = "concepts", title = "Concepts", path = "sections/concepts.md"),
+                    TopicNavNode(nodeId = "tutorial", title = "Tutorial", path = "sections/tutorial.md"),
+                ),
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-add-folder-initial-child",
+                    instance = instance,
+                    command = AddFolderTopicNodeCommand(
+                        commandId = "cmd-add-folder-initial-child",
+                        treeId = "default",
+                        parentNodeId = "root",
+                        nodeId = "cookbook",
+                        title = "Cookbook",
+                        orderIndex = 3,
+                        initialChild = AddFolderInitialChildInput(
+                            childNodeId = "recipe-dsl",
+                            childTitle = "Recipe DSL",
+                            childSourcePath = null,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertEquals(listOf("create:sections/cookbook/recipe-dsl.md"), docsGateway.calls)
+        val folder = configGateway.writes.last().nav.single { it.nodeId == "cookbook" }
+        assertEquals("sections/cookbook/recipe-dsl.md", folder.children.single().path)
+    }
+
+    @Test
+    fun `add child under empty folder defaults markdown path into folder directory`() {
+        val configGateway = MutableConfigGatewayForDerivation(
+            MkDocsConfigDocument(
+                docsDir = "docs",
+                nav = listOf(
+                    TopicNavNode(nodeId = "home", title = "Home", path = "index.md"),
+                    TopicNavNode(nodeId = "quickstart", title = "Quickstart", path = "sections/quickstart-guide.md"),
+                    TopicNavNode(nodeId = "cookbook", title = "Cookbook", children = emptyList()),
+                ),
+            ),
+        )
+        val docsGateway = RecordingDocsGatewayForDerivation()
+        val orchestrator = orchestrator(configGateway, docsGateway)
+
+        val outcome = requireSuccess(
+            orchestrator.apply(
+                TopicSyncTransaction(
+                    transactionId = "tx-child-under-empty-folder",
+                    instance = instance,
+                    command = AddChildTopicNodeCommand(
+                        commandId = "cmd-child-under-empty-folder",
+                        treeId = "default",
+                        targetNodeId = "cookbook",
+                        childNodeId = "monitoring",
+                        childTitle = "Monitoring",
+                        childOrderIndex = 0,
+                        childSourcePath = null,
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(outcome.applied)
+        assertEquals(listOf("create:sections/cookbook/monitoring.md"), docsGateway.calls)
+        val folder = configGateway.writes.last().nav.single { it.nodeId == "cookbook" }
+        assertEquals("sections/cookbook/monitoring.md", folder.children.single().path)
     }
 
     @Test

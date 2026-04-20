@@ -35,9 +35,12 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
         val value: Any?,
     )
 
+    private object EmptyFlowList
+
     private class TaggedYamlRepresenter(options: DumperOptions) : Representer(options) {
         init {
             representers[TaggedYamlValue::class.java] = RepresentTaggedYamlValue()
+            representers[EmptyFlowList::class.java] = RepresentEmptyFlowList()
         }
 
         private inner class RepresentTaggedYamlValue : Represent {
@@ -49,6 +52,12 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
                     is Iterable<*> -> representSequence(tag, value, DumperOptions.FlowStyle.BLOCK)
                     else -> representScalar(tag, value?.toString() ?: "")
                 }
+            }
+        }
+
+        private inner class RepresentEmptyFlowList : Represent {
+            override fun representData(data: Any?): Node {
+                return representSequence(Tag.SEQ, emptyList<Any>(), DumperOptions.FlowStyle.FLOW)
             }
         }
     }
@@ -208,7 +217,7 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
                 defaultScalarStyle = DumperOptions.ScalarStyle.PLAIN
                 lineBreak = DumperOptions.LineBreak.UNIX
                 indent = 2
-                isPrettyFlow = true
+                isPrettyFlow = false
                 width = 160
             }
 
@@ -314,9 +323,10 @@ class MkDocsYamlGateway : MkDocsConfigGateway {
         // Preserve nav order from the domain model; deterministic ordering comes from caller state.
         return nodes.map { node ->
             val value: Any = when {
-                node.externalUrl != null -> node.externalUrl!!
+                node.externalUrl != null -> node.externalUrl
                 node.children.isNotEmpty() -> serializeNav(node.children)
-                else -> normalizePath(node.path.orEmpty())
+                node.path != null -> normalizePath(node.path)
+                else -> EmptyFlowList
             }
             linkedMapOf(node.title to value)
         }

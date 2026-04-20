@@ -3,6 +3,7 @@ package com.authord.mkdocs.ui.intellij
 import com.authord.mkdocs.ports.topic.DefaultTopicSyncError
 import com.authord.mkdocs.ports.topic.InstanceRegistryPort
 import com.authord.mkdocs.ports.topic.AddChildTopicNodeCommand
+import com.authord.mkdocs.ports.topic.AddFolderTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RenameTopicNodeCommand
@@ -25,6 +26,7 @@ class TopicTreeWorkspacePanelUiContractTest {
 
         listOf(
             "New Topic",
+            "New Folder",
             "Expand All",
             "Collapse All",
             "Synchronize TOC and Editor",
@@ -38,7 +40,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         val panel = panelWithDefaults()
 
         assertEquals(
-            listOf("New Topic", "Expand All", "Collapse All", "Synchronize TOC and Editor"),
+            listOf("New Topic", "New Folder", "Expand All", "Collapse All", "Synchronize TOC and Editor"),
             panel.headerActionTooltipsForTest(),
         )
     }
@@ -47,7 +49,7 @@ class TopicTreeWorkspacePanelUiContractTest {
     fun `menu structure matches contract order`() {
         val panel = panelWithDefaults()
         assertEquals(
-            listOf("New Child Topic", "Edit Title", "Remove TOC Element"),
+            listOf("New Child Topic", "New Child Folder", "Edit Title", "Remove TOC Element"),
             panel.tocContextMenuLabelsForTest(),
         )
     }
@@ -59,17 +61,20 @@ class TopicTreeWorkspacePanelUiContractTest {
 
         val tocWithoutSelection = panel.tocContextActionStatesForTest()
         assertFalse(tocWithoutSelection.getValue("Child"))
+        assertFalse(tocWithoutSelection.getValue("ChildFolder"))
         assertFalse(tocWithoutSelection.getValue("Delete"))
 
         assertTrue(panel.selectTreeNodeForTest("n1"))
         val tocWithSelection = panel.tocContextActionStatesForTest()
         assertTrue(tocWithSelection.getValue("Child"))
+        assertTrue(tocWithSelection.getValue("ChildFolder"))
         assertTrue(tocWithSelection.getValue("Delete"))
 
         val headerVisibility = panel.headerActionVisibilityForTest()
         assertTrue(headerVisibility.getValue("Expand All"))
         assertTrue(headerVisibility.getValue("Collapse All"))
         assertTrue(headerVisibility.getValue("New Topic"))
+        assertTrue(headerVisibility.getValue("New Folder"))
         assertTrue(headerVisibility.getValue("Synchronize TOC and Editor"))
     }
 
@@ -229,6 +234,87 @@ class TopicTreeWorkspacePanelUiContractTest {
     }
 
     @Test
+    fun `new root folder action dispatches folder command in nav mode`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Cookbook"))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+        )
+        panel.render(sampleState())
+
+        val triggered = panel.triggerHeaderActionForTest("New Folder")
+
+        assertTrue(triggered)
+        val command = uiService.dispatched.filterIsInstance<AddFolderTopicNodeCommand>().last()
+        assertEquals("Cookbook", command.title)
+        assertEquals("root", command.parentNodeId)
+        assertEquals(null, command.initialChild)
+    }
+
+    @Test
+    fun `new child folder action dispatches folder command`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Advanced"))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+        )
+        panel.render(sampleState())
+        assertTrue(panel.selectTreeNodeForTest("n2"))
+
+        val triggered = panel.triggerTocContextActionForTest("New Child Folder")
+
+        assertTrue(triggered)
+        val command = uiService.dispatched.filterIsInstance<AddFolderTopicNodeCommand>().last()
+        assertEquals("Advanced", command.title)
+        assertEquals("n2", command.parentNodeId)
+        assertEquals(null, command.initialChild)
+    }
+
+    @Test
+    fun `no-nav folder flow cancels when first-child prompt is rejected`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Cookbook"))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+            reconcileStateProvider = { sampleNoNavSectionsState() },
+            noNavFolderInitialChildPrompt = { _, _ -> false },
+        )
+        panel.render(sampleNoNavSectionsState())
+
+        val triggered = panel.triggerHeaderActionForTest("New Folder")
+
+        assertTrue(triggered)
+        assertTrue(uiService.dispatched.filterIsInstance<AddFolderTopicNodeCommand>().isEmpty())
+        assertEquals("Folder creation cancelled", panel.statusTextForTest())
+    }
+
+    @Test
+    fun `no-nav folder flow includes initial child with inferred sections base path`() {
+        val uiService = RecordingUiService()
+        val prompts = ArrayDeque(listOf("Cookbook", "Recipe DSL", ""))
+        val panel = panelWithDefaults(
+            uiService = uiService,
+            promptInputProvider = { _, _, _ -> prompts.removeFirstOrNull() },
+            reconcileStateProvider = { sampleNoNavSectionsState() },
+            noNavFolderInitialChildPrompt = { _, _ -> true },
+        )
+        panel.render(sampleNoNavSectionsState())
+
+        val triggered = panel.triggerHeaderActionForTest("New Folder")
+
+        assertTrue(triggered)
+        val command = uiService.dispatched.filterIsInstance<AddFolderTopicNodeCommand>().last()
+        assertEquals("Cookbook", command.title)
+        assertEquals("root", command.parentNodeId)
+        val initial = command.initialChild
+        assertEquals("Recipe DSL", initial?.childTitle)
+        assertEquals("sections/cookbook/recipe-dsl.md", initial?.childSourcePath)
+    }
+
+    @Test
     fun `duplicate markdown path suggests incremented filename and uses it on confirm`() {
         val uiService = RecordingUiService()
         val prompts = ArrayDeque(listOf("Index", ""))
@@ -361,6 +447,7 @@ class TopicTreeWorkspacePanelUiContractTest {
         promptInputProvider: (title: String, message: String, initial: String?) -> String? = { _, _, _ -> null },
         duplicatePathPrompt: (requestedPath: String, suggestedPath: String) -> Boolean = { _, _ -> true },
         removeTopicConfirmationPrompt: (title: String, message: String) -> Boolean = { _, _ -> true },
+        noNavFolderInitialChildPrompt: (title: String, message: String) -> Boolean = { _, _ -> true },
         reconcileStateProvider: () -> StartupTreeState? = { sampleState() },
     ): TopicTreeWorkspacePanel {
         val registry = RecordingInstanceRegistryPort(
@@ -398,6 +485,7 @@ class TopicTreeWorkspacePanelUiContractTest {
             promptInputProvider = promptInputProvider,
             duplicatePathPrompt = duplicatePathPrompt,
             removeTopicConfirmationPrompt = removeTopicConfirmationPrompt,
+            noNavFolderInitialChildPrompt = noNavFolderInitialChildPrompt,
         )
     }
 
@@ -688,6 +776,38 @@ class TopicTreeWorkspacePanelUiContractTest {
                 ),
             ),
             navOrderedPaths = listOf("guides/a.md", "guides/b.md", "guides/index.md"),
+            unlinkedPaths = emptyList(),
+            validationIssues = emptyList(),
+            destructiveChangesApplied = false,
+            instanceId = "default",
+        )
+    }
+
+    private fun sampleNoNavSectionsState(): StartupTreeState {
+        return StartupTreeState(
+            source = StartupTreeSource.FALLBACK,
+            nodes = listOf(
+                com.authord.mkdocs.ports.topic.TopicNavNode(
+                    nodeId = "page:index.md",
+                    title = "Home",
+                    path = "index.md",
+                ),
+                com.authord.mkdocs.ports.topic.TopicNavNode(
+                    nodeId = "page:sections/quickstart-guide.md",
+                    title = "Quickstart Guide",
+                    path = "sections/quickstart-guide.md",
+                ),
+                com.authord.mkdocs.ports.topic.TopicNavNode(
+                    nodeId = "page:sections/concepts.md",
+                    title = "Concepts",
+                    path = "sections/concepts.md",
+                ),
+            ),
+            navOrderedPaths = listOf(
+                "index.md",
+                "sections/quickstart-guide.md",
+                "sections/concepts.md",
+            ),
             unlinkedPaths = emptyList(),
             validationIssues = emptyList(),
             destructiveChangesApplied = false,

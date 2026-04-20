@@ -1,6 +1,7 @@
 package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
+import com.authord.mkdocs.ports.topic.AddFolderInitialChildInput
 import com.authord.mkdocs.ports.topic.TopicFileOperation
 import com.authord.mkdocs.ports.topic.TopicNavNode
 import com.authord.mkdocs.ports.topic.TopicSyncErrorCode
@@ -170,6 +171,16 @@ internal class TopicTreeWorkspacePanel(
                 Messages.getWarningIcon(),
             ) == Messages.OK
         },
+    private val noNavFolderInitialChildPrompt: (title: String, message: String) -> Boolean =
+        { title, message ->
+            Messages.showYesNoDialog(
+                message,
+                title,
+                uiMessage("topicTree.prompt.addFolderNoNav.requireChild.ok"),
+                uiMessage("topicTree.prompt.addFolderNoNav.requireChild.cancel"),
+                Messages.getQuestionIcon(),
+            ) == Messages.YES
+        },
     private val runtimeServiceResolver: (com.intellij.openapi.project.Project) -> PluginRuntimeIntegrationService = {
         PluginCompositionRoot().runtimeIntegration(it)
     },
@@ -221,6 +232,7 @@ internal class TopicTreeWorkspacePanel(
     private val tocHeaderActionTooltips = mutableListOf<String>()
     private val tocHeaderActionHandlers = linkedMapOf<String, () -> Unit>()
     private lateinit var tocNewChildMenuItem: JMenuItem
+    private lateinit var tocNewChildFolderMenuItem: JMenuItem
     private lateinit var tocEditTitleMenuItem: JMenuItem
     private lateinit var tocRemoveMenuItem: JMenuItem
     private val tocContextMenu = JPopupMenu()
@@ -360,6 +372,11 @@ internal class TopicTreeWorkspacePanel(
                 perform = ::addRootTopic,
             ),
             TocHeaderAction(
+                tooltip = uiMessage("topicTree.tooltip.newFolder"),
+                icon = AllIcons.Nodes.Folder,
+                perform = ::addRootFolder,
+            ),
+            TocHeaderAction(
                 tooltip = uiMessage("topicTree.tooltip.expandAll"),
                 icon = AllIcons.Actions.Expandall,
                 perform = ::expandAllTopics,
@@ -495,6 +512,8 @@ internal class TopicTreeWorkspacePanel(
         tocContextMenu.removeAll()
         tocNewChildMenuItem = JMenuItem(uiMessage("topicTree.menu.newChildTopic")).apply { addActionListener { addChildTopic() } }
         tocContextMenu.add(tocNewChildMenuItem)
+        tocNewChildFolderMenuItem = JMenuItem(uiMessage("topicTree.menu.newChildFolder")).apply { addActionListener { addChildFolder() } }
+        tocContextMenu.add(tocNewChildFolderMenuItem)
         tocEditTitleMenuItem = JMenuItem(uiMessage("topicTree.menu.editTitle")).apply { addActionListener { renameTopic() } }
         tocContextMenu.add(tocEditTitleMenuItem)
         tocRemoveMenuItem = JMenuItem(uiMessage("topicTree.menu.removeTocElement")).apply { addActionListener { removeTopic() } }
@@ -565,6 +584,10 @@ internal class TopicTreeWorkspacePanel(
 
     private fun addRootTopic() {
         addTopic(parentOverride = root)
+    }
+
+    private fun addRootFolder() {
+        addFolder(parentOverride = root)
     }
 
     fun reconcileFromDisk() {
@@ -651,6 +674,89 @@ internal class TopicTreeWorkspacePanel(
                 preferredNodeId = nodeId,
                 preferredPath = sourcePath,
                 preferredParentNodeId = target.nodeId,
+                mutationFileOperations = it.appliedFileOperations,
+            )
+        }
+    }
+
+    private fun addChildFolder() {
+        val targetNode = selectedNavNode()
+        if (targetNode == null) {
+            publishStatus(uiMessage("topicTree.status.selectTopicForChildFolder"))
+            return
+        }
+        addFolder(parentOverride = targetNode)
+    }
+
+    private fun addFolder(parentOverride: DefaultMutableTreeNode? = null) {
+        val parentNode = parentOverride ?: selectedNavNode() ?: root
+        val parent = parentNode.userObject as? TopicTreeNodeView ?: TopicTreeNodeView.root()
+        val folderTitle = prompt(
+            uiMessage("topicTree.prompt.addFolder.title"),
+            uiMessage("topicTree.prompt.addFolder.folderTitle"),
+        ) ?: return
+        val controllers = controllersOrNull() ?: return
+        val folderNodeId = "ui-node-${UUID.randomUUID()}"
+        val orderIndex = if (parent.nodeId == ROOT_NODE_ID) {
+            parentNode.childCount
+        } else {
+            toActualChildOrderIndex(parent.nodeId, parentNode.childCount)
+        }
+
+        val initialChild = if (navPresentFromParsedConfigState) {
+            null
+        } else {
+            val includeFirstChild = noNavFolderInitialChildPrompt(
+                uiMessage("topicTree.prompt.addFolderNoNav.requireChild.title"),
+                uiMessage("topicTree.prompt.addFolderNoNav.requireChild.message"),
+            )
+            if (!includeFirstChild) {
+                publishStatus(uiMessage("topicTree.status.folderCreateCancelled"))
+                return
+            }
+
+            val childTitle = prompt(
+                uiMessage("topicTree.prompt.addFolderFirstChild.title"),
+                uiMessage("topicTree.prompt.addFolderFirstChild.topicTitle"),
+            ) ?: return
+            val suggestedChildPath = suggestedFolderChildPath(
+                parentNode = parentNode,
+                folderTitle = folderTitle,
+                childTitle = childTitle,
+            )
+            val requestedSourcePath = promptOptional(
+                title = uiMessage("topicTree.prompt.addFolderFirstChild.title"),
+                message = uiMessage("topicTree.prompt.addTopic.relativePathOptional"),
+                initial = suggestedChildPath,
+            )?.let(::normalizeMarkdownPathWithExtension) ?: suggestedChildPath
+            val childSourcePath = resolveSourcePathWithDuplicatePrompt(requestedSourcePath) ?: return
+            AddFolderInitialChildInput(
+                childNodeId = "ui-node-${UUID.randomUUID()}",
+                childTitle = childTitle,
+                childSourcePath = childSourcePath,
+            )
+        }
+
+        val result = controllers.actionController.addFolder(
+            treeId = activeTreeId(),
+            parentNodeId = parent.nodeId,
+            title = folderTitle,
+            orderIndex = orderIndex,
+            nodeId = folderNodeId,
+            initialChild = initialChild,
+        )
+        val preferredPath = initialChild?.childSourcePath.orEmpty()
+        val preferredNodeId = initialChild?.childNodeId ?: folderNodeId
+        handleDispatchResult(
+            dispatch = result,
+            successMessage = uiMessage("topicTree.status.createdFolder", folderTitle),
+            publishSuccessStatus = false,
+        ) {
+            reconcileAfterMutation(
+                preferredNodeId = preferredNodeId,
+                preferredPath = preferredPath,
+                preferredParentNodeId = folderNodeId,
+                openPreferredPathFallback = initialChild != null,
                 mutationFileOperations = it.appliedFileOperations,
             )
         }
@@ -780,6 +886,7 @@ internal class TopicTreeWorkspacePanel(
         val hasMutableTocSelection = selectedMutableNode() != null
 
         tocNewChildMenuItem.isEnabled = hasNavSelection
+        tocNewChildFolderMenuItem.isEnabled = hasNavSelection
         tocEditTitleMenuItem.isEnabled = hasMutableTocSelection
         tocRemoveMenuItem.isEnabled = hasMutableTocSelection
     }
@@ -1247,6 +1354,21 @@ internal class TopicTreeWorkspacePanel(
         return joinPath(parentDirectory, "${slugifyTitle(title)}.md")
     }
 
+    private fun suggestedFolderChildPath(
+        parentNode: DefaultMutableTreeNode,
+        folderTitle: String,
+        childTitle: String,
+    ): String {
+        val parentDirectory = resolveDirectoryForParent(parentNode)
+        val baseDirectory = if (parentDirectory.isBlank()) {
+            inferredRootBaseDirectory()
+        } else {
+            parentDirectory
+        }
+        val folderDirectory = joinPath(baseDirectory, slugifyTitle(folderTitle))
+        return joinPath(folderDirectory, "${slugifyTitle(childTitle)}.md")
+    }
+
     private fun resolveDirectoryForParent(parentNode: DefaultMutableTreeNode): String {
         val parentView = parentNode.userObject as? TopicTreeNodeView ?: return ""
         if (parentView.nodeId == ROOT_NODE_ID) {
@@ -1265,8 +1387,18 @@ internal class TopicTreeWorkspacePanel(
             return childPath.substringBeforeLast('/', "")
         }
 
-        val ancestorNode = parentNode.parent as? DefaultMutableTreeNode ?: return ""
-        return resolveDirectoryForParent(ancestorNode)
+        val ancestorDirectory = (parentNode.parent as? DefaultMutableTreeNode)
+            ?.let(::resolveDirectoryForParent)
+            .orEmpty()
+        if (parentView.externalUrl == null) {
+            val baseDirectory = if (ancestorDirectory.isBlank()) {
+                inferredRootBaseDirectory()
+            } else {
+                ancestorDirectory
+            }
+            return joinPath(baseDirectory, slugifyTitle(parentView.title))
+        }
+        return ancestorDirectory
     }
 
     private fun sectionDirectoryFromNodeId(nodeId: String): String? {
@@ -1275,6 +1407,33 @@ internal class TopicTreeWorkspacePanel(
             return null
         }
         return normalizeOptionalPath(nodeId.removePrefix(prefix))
+    }
+
+    private fun inferredRootBaseDirectory(): String {
+        val counts = linkedMapOf<String, Int>()
+        collectStatePaths(currentState?.nodes.orEmpty()).forEach { path ->
+            val normalized = normalizeOptionalPath(path) ?: return@forEach
+            val firstSegment = normalized.substringBefore('/', "")
+            if (firstSegment.isBlank() || !normalized.contains('/')) {
+                return@forEach
+            }
+            counts[firstSegment] = (counts[firstSegment] ?: 0) + 1
+        }
+        return counts.entries
+            .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+            .firstOrNull()
+            ?.key
+            .orEmpty()
+    }
+
+    private fun collectStatePaths(nodes: List<TopicNavNode>): Set<String> {
+        val paths = linkedSetOf<String>()
+        fun visit(node: TopicNavNode) {
+            normalizeOptionalPath(node.path)?.let(paths::add)
+            node.children.forEach(::visit)
+        }
+        nodes.forEach(::visit)
+        return paths
     }
 
     private fun deriveNoNavDirectoryFromPagePath(pagePath: String): String {
@@ -1505,6 +1664,7 @@ internal class TopicTreeWorkspacePanel(
         refreshActionEnablement()
         return mapOf(
             "Child" to tocNewChildMenuItem.isEnabled,
+            "ChildFolder" to tocNewChildFolderMenuItem.isEnabled,
             "Delete" to tocRemoveMenuItem.isEnabled,
         )
     }
@@ -1514,6 +1674,7 @@ internal class TopicTreeWorkspacePanel(
             "Expand All" to (tocHeaderActionsPanel.isShowing || tocHeaderActionsPanel.isVisible),
             "Collapse All" to (tocHeaderActionsPanel.isShowing || tocHeaderActionsPanel.isVisible),
             "New Topic" to (tocHeaderActionsPanel.isShowing || tocHeaderActionsPanel.isVisible),
+            "New Folder" to (tocHeaderActionsPanel.isShowing || tocHeaderActionsPanel.isVisible),
             "Synchronize TOC and Editor" to (tocHeaderActionsPanel.isShowing || tocHeaderActionsPanel.isVisible),
         )
     }

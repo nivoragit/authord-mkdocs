@@ -3,6 +3,8 @@ package com.authord.mkdocs.ports
 import com.authord.mkdocs.ports.topic.AddChildTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddExistingFileTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddExternalLinkTopicNodeCommand
+import com.authord.mkdocs.ports.topic.AddFolderInitialChildInput
+import com.authord.mkdocs.ports.topic.AddFolderTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
 import com.authord.mkdocs.ports.topic.DefaultTopicSyncError
 import com.authord.mkdocs.ports.topic.MkDocsConfigDocument
@@ -230,6 +232,28 @@ class ExtensionPortsCoverageRemediationTest {
         assertEquals("docs/existing.md", addExisting.relativePath)
         assertEquals(2, addExisting.orderIndex)
         assertEquals(TopicTreeCommandType.ADD_EXISTING_FILE, addExisting.commandType)
+
+        val addFolder = AddFolderTopicNodeCommand(
+            commandId = "cmd-folder",
+            treeId = "tree-1",
+            parentNodeId = "root",
+            nodeId = "folder-node",
+            title = "Cookbook",
+            orderIndex = 4,
+            initialChild = AddFolderInitialChildInput(
+                childNodeId = "folder-child",
+                childTitle = "Recipe DSL",
+                childSourcePath = "sections/cookbook/recipe-dsl.md",
+            ),
+        )
+        assertEquals("root", addFolder.parentNodeId)
+        assertEquals("folder-node", addFolder.nodeId)
+        assertEquals("Cookbook", addFolder.title)
+        assertEquals(4, addFolder.orderIndex)
+        assertEquals("folder-child", addFolder.initialChild?.childNodeId)
+        assertEquals("Recipe DSL", addFolder.initialChild?.childTitle)
+        assertEquals("sections/cookbook/recipe-dsl.md", addFolder.initialChild?.childSourcePath)
+        assertEquals(TopicTreeCommandType.ADD_FOLDER, addFolder.commandType)
 
         val addExternal = AddExternalLinkTopicNodeCommand(
             commandId = "cmd-external",

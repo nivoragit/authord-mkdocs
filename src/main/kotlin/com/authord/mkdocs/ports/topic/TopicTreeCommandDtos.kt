@@ -6,6 +6,7 @@ package com.authord.mkdocs.ports.topic
 enum class TopicTreeCommandType {
     ADD,
     ADD_CHILD,
+    ADD_FOLDER,
     ADD_EXISTING_FILE,
     ADD_EXTERNAL_LINK,
     MOVE,
@@ -60,6 +61,30 @@ data class AddChildTopicNodeCommand(
     val childSourcePath: String? = null,
 ) : TopicTreeCommand {
     override val commandType: TopicTreeCommandType = TopicTreeCommandType.ADD_CHILD
+}
+
+/**
+ * Optional first-child payload used when creating a folder node.
+ */
+data class AddFolderInitialChildInput(
+    val childNodeId: String,
+    val childTitle: String,
+    val childSourcePath: String? = null,
+)
+
+/**
+ * Adds a folder/section node that has no direct markdown link.
+ */
+data class AddFolderTopicNodeCommand(
+    override val commandId: String,
+    override val treeId: String,
+    val parentNodeId: String,
+    val nodeId: String,
+    val title: String,
+    val orderIndex: Int,
+    val initialChild: AddFolderInitialChildInput? = null,
+) : TopicTreeCommand {
+    override val commandType: TopicTreeCommandType = TopicTreeCommandType.ADD_FOLDER
 }
 
 /**

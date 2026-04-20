@@ -1,6 +1,8 @@
 package com.authord.mkdocs.ports
 
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
+import com.authord.mkdocs.ports.topic.AddFolderInitialChildInput
+import com.authord.mkdocs.ports.topic.AddFolderTopicNodeCommand
 import com.authord.mkdocs.ports.topic.MoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RenameTopicNodeCommand
@@ -19,6 +21,19 @@ class TopicTreeCommandDtosCoverageTest {
     @Test
     fun `command dtos expose expected fields and command types`() {
         val add = AddTopicNodeCommand("c1", "t1", "root", "n1", "Title", 0)
+        val addFolder = AddFolderTopicNodeCommand(
+            commandId = "c-folder",
+            treeId = "t1",
+            parentNodeId = "root",
+            nodeId = "folder-1",
+            title = "Cookbook",
+            orderIndex = 1,
+            initialChild = AddFolderInitialChildInput(
+                childNodeId = "folder-1-child",
+                childTitle = "Overview",
+                childSourcePath = "sections/cookbook/overview.md",
+            ),
+        )
         val move = MoveTopicNodeCommand("c2", "t1", "n1", "root", 1)
         val remove = RemoveTopicNodeCommand("c3", "t1", "n1")
         val rename = RenameTopicNodeCommand("c4", "t1", "n1", "Renamed")
@@ -33,6 +48,15 @@ class TopicTreeCommandDtosCoverageTest {
         assertEquals("n1", add.nodeId)
         assertEquals("Title", add.title)
         assertEquals(0, add.orderIndex)
+
+        assertEquals(TopicTreeCommandType.ADD_FOLDER, addFolder.commandType)
+        assertEquals("root", addFolder.parentNodeId)
+        assertEquals("folder-1", addFolder.nodeId)
+        assertEquals("Cookbook", addFolder.title)
+        assertEquals(1, addFolder.orderIndex)
+        assertEquals("folder-1-child", addFolder.initialChild?.childNodeId)
+        assertEquals("Overview", addFolder.initialChild?.childTitle)
+        assertEquals("sections/cookbook/overview.md", addFolder.initialChild?.childSourcePath)
 
         assertEquals(TopicTreeCommandType.MOVE, move.commandType)
         assertEquals("c2", move.commandId)

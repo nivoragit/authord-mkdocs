@@ -1,6 +1,8 @@
 package com.authord.mkdocs.core.topic
 
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
+import com.authord.mkdocs.ports.topic.AddFolderInitialChildInput
+import com.authord.mkdocs.ports.topic.AddFolderTopicNodeCommand
 import com.authord.mkdocs.ports.topic.MoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RenameTopicNodeCommand
@@ -12,6 +14,81 @@ import kotlin.test.assertEquals
 import kotlin.test.assertTrue
 
 class TopicTreeAggregateMutationTest {
+    @Test
+    fun `add folder creates section under root`() {
+        val aggregate = TopicTreeAggregate("tree-mutation")
+
+        val result = aggregate.apply(
+            AddFolderTopicNodeCommand(
+                commandId = "folder-root",
+                treeId = "tree-mutation",
+                parentNodeId = "root",
+                nodeId = "cookbook",
+                title = "Cookbook",
+                orderIndex = 0,
+            ),
+        )
+
+        assertEquals(TopicTreeCommandStatus.SUCCESS, result.status)
+        val folder = aggregate.snapshot().first { it.nodeId == "cookbook" }
+        assertEquals("root", folder.parentNodeId)
+        assertEquals(TopicNodeKind.SECTION, folder.kind)
+        assertEquals(null, folder.sourcePath)
+    }
+
+    @Test
+    fun `add folder under page parent converts parent and preserves page child`() {
+        val aggregate = TopicTreeAggregate("tree-mutation")
+        aggregate.apply(AddTopicNodeCommand("add-1", "tree-mutation", "root", "guide", "Guide", 0))
+
+        val result = aggregate.apply(
+            AddFolderTopicNodeCommand(
+                commandId = "folder-under-page",
+                treeId = "tree-mutation",
+                parentNodeId = "guide",
+                nodeId = "guide-cookbook",
+                title = "Cookbook",
+                orderIndex = 1,
+            ),
+        )
+
+        assertEquals(TopicTreeCommandStatus.SUCCESS, result.status)
+        val snapshot = aggregate.snapshot().associateBy { it.nodeId }
+        assertEquals(TopicNodeKind.SECTION, snapshot.getValue("guide").kind)
+        assertEquals(TopicNodeKind.PAGE, snapshot.getValue("guide__page").kind)
+        assertEquals("Guide", snapshot.getValue("guide__page").title)
+        assertEquals(TopicNodeKind.SECTION, snapshot.getValue("guide-cookbook").kind)
+        assertEquals("guide", snapshot.getValue("guide-cookbook").parentNodeId)
+    }
+
+    @Test
+    fun `add folder supports optional initial child`() {
+        val aggregate = TopicTreeAggregate("tree-mutation")
+
+        val result = aggregate.apply(
+            AddFolderTopicNodeCommand(
+                commandId = "folder-initial-child",
+                treeId = "tree-mutation",
+                parentNodeId = "root",
+                nodeId = "reference",
+                title = "Reference",
+                orderIndex = 0,
+                initialChild = AddFolderInitialChildInput(
+                    childNodeId = "reference-main",
+                    childTitle = "Main Abstractions",
+                    childSourcePath = "sections/reference/main-abstractions.md",
+                ),
+            ),
+        )
+
+        assertEquals(TopicTreeCommandStatus.SUCCESS, result.status)
+        val snapshot = aggregate.snapshot().associateBy { it.nodeId }
+        assertEquals(TopicNodeKind.SECTION, snapshot.getValue("reference").kind)
+        assertEquals(TopicNodeKind.PAGE, snapshot.getValue("reference-main").kind)
+        assertEquals("reference", snapshot.getValue("reference-main").parentNodeId)
+        assertEquals("sections/reference/main-abstractions.md", snapshot.getValue("reference-main").sourcePath)
+    }
+
     @Test
     fun `add enforces unique node ids and valid parent`() {
         val aggregate = TopicTreeAggregate("tree-mutation")

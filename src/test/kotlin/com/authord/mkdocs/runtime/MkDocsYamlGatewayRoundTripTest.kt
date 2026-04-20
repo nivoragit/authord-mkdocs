@@ -96,6 +96,27 @@ class MkDocsYamlGatewayRoundTripTest {
     }
 
     @Test
+    fun `serialize empty folder nodes as yaml empty list`() {
+        val gateway = MkDocsYamlGateway()
+        val serialized = requireSuccess(
+            gateway.serializeDeterministically(
+                MkDocsConfigDocument(
+                    docsDir = "docs",
+                    nav = listOf(
+                        TopicNavNode(
+                            nodeId = "cookbook",
+                            title = "Cookbook",
+                            children = emptyList(),
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(serialized.contains("- Cookbook: []"), serialized)
+    }
+
+    @Test
     fun `load and serialize without nav preserves no-nav mode`() {
         val projectRoot = Files.createTempDirectory("mkdocs-no-nav")
         val configPath = projectRoot.resolve("mkdocs.yml")
@@ -189,7 +210,7 @@ class MkDocsYamlGatewayRoundTripTest {
 
         assertEquals(firstWrite, secondWrite)
         assertTrue(firstWrite.contains("site_name: DemoSite"))
-        assertTrue(firstWrite.contains("docs_dir: docs"))
+        assertTrue(!firstWrite.contains("docs_dir:"), firstWrite)
         assertTrue(firstWrite.contains("- Home: index.md"))
         assertTrue(firstWrite.contains("not_in_nav:"))
     }

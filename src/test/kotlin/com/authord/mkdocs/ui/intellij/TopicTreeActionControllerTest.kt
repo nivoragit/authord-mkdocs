@@ -1,6 +1,8 @@
 package com.authord.mkdocs.ui.intellij
 
 import com.authord.mkdocs.ports.topic.AddExistingFileTopicNodeCommand
+import com.authord.mkdocs.ports.topic.AddFolderInitialChildInput
+import com.authord.mkdocs.ports.topic.AddFolderTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
 import com.authord.mkdocs.ports.topic.DefaultTopicSyncError
 import com.authord.mkdocs.ports.topic.TopicGatewayResult
@@ -59,6 +61,39 @@ class TopicTreeActionControllerTest {
         val command = uiService.dispatched.single() as AddExistingFileTopicNodeCommand
         assertEquals("legacy/index.md", command.relativePath)
         assertEquals("node-2", command.nodeId)
+    }
+
+    @Test
+    fun `add folder dispatches folder command with normalized initial child path`() {
+        val uiService = RecordingTopicTreeUiService()
+        val controller = TopicTreeActionController(
+            uiService = uiService,
+            commandIdFactory = { "cmd-folder" },
+            nodeIdFactory = { "node-folder-default" },
+        )
+
+        controller.addFolder(
+            treeId = "tree-1",
+            parentNodeId = "root",
+            title = "Cookbook",
+            orderIndex = 3,
+            nodeId = "folder-node",
+            initialChild = AddFolderInitialChildInput(
+                childNodeId = "child-node",
+                childTitle = "Recipe DSL",
+                childSourcePath = "\\sections\\cookbook\\recipe-dsl.md",
+            ),
+        )
+
+        val command = uiService.dispatched.single() as AddFolderTopicNodeCommand
+        assertEquals("cmd-folder", command.commandId)
+        assertEquals("folder-node", command.nodeId)
+        assertEquals("Cookbook", command.title)
+        assertEquals("root", command.parentNodeId)
+        assertEquals(3, command.orderIndex)
+        assertEquals("child-node", command.initialChild?.childNodeId)
+        assertEquals("Recipe DSL", command.initialChild?.childTitle)
+        assertEquals("sections/cookbook/recipe-dsl.md", command.initialChild?.childSourcePath)
     }
 
     @Test

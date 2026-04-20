@@ -4,6 +4,8 @@ import com.authord.mkdocs.core.topic.PathPolicy
 import com.authord.mkdocs.ports.topic.AddChildTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddExistingFileTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddExternalLinkTopicNodeCommand
+import com.authord.mkdocs.ports.topic.AddFolderInitialChildInput
+import com.authord.mkdocs.ports.topic.AddFolderTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RemoveTopicNodeCommand
 import com.authord.mkdocs.ports.topic.RenameTopicNodeCommand
@@ -124,6 +126,36 @@ class TopicTreeActionController(
                 title = title,
                 externalUrl = externalUrl.trim(),
                 orderIndex = orderIndex,
+            ),
+        )
+    }
+
+    /**
+     * Adds a folder/section node without a direct markdown path.
+     */
+    fun addFolder(
+        treeId: String,
+        parentNodeId: String,
+        title: String,
+        orderIndex: Int,
+        nodeId: String = nodeIdFactory(),
+        initialChild: AddFolderInitialChildInput? = null,
+    ): TopicMutationDispatchResult {
+        val normalizedInitialChild = initialChild?.copy(
+            childSourcePath = initialChild.childSourcePath
+                ?.takeIf { it.isNotBlank() }
+                ?.let(::normalizeRelativeMarkdownPath),
+        )
+        return dispatch(
+            operationLabel = "Add folder",
+            command = AddFolderTopicNodeCommand(
+                commandId = commandIdFactory(),
+                treeId = treeId,
+                parentNodeId = parentNodeId,
+                nodeId = nodeId,
+                title = title,
+                orderIndex = orderIndex,
+                initialChild = normalizedInitialChild,
             ),
         )
     }

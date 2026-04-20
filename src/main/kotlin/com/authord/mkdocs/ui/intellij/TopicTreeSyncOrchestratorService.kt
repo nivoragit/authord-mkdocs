@@ -4,6 +4,8 @@ import com.authord.mkdocs.ports.TopicTreePort
 import com.authord.mkdocs.ports.topic.AddChildTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddExistingFileTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddExternalLinkTopicNodeCommand
+import com.authord.mkdocs.ports.topic.AddFolderInitialChildInput
+import com.authord.mkdocs.ports.topic.AddFolderTopicNodeCommand
 import com.authord.mkdocs.ports.topic.AddTopicNodeCommand
 import com.authord.mkdocs.ports.topic.DefaultTopicSyncError
 import com.authord.mkdocs.ports.topic.DocsFileGateway
@@ -326,6 +328,7 @@ class TopicTreeSyncOrchestratorService(
             is ValidateTopicTreeCommand -> successMutation(document)
             is AddTopicNodeCommand -> addTopicToConfig(document, command)
             is AddChildTopicNodeCommand -> addChildToConfig(document, command)
+            is AddFolderTopicNodeCommand -> addFolderToConfig(document, command)
             is AddExistingFileTopicNodeCommand -> addExistingFileToConfig(document, command)
             is AddExternalLinkTopicNodeCommand -> addExternalLinkToConfig(document, command)
             is RenameTopicNodeCommand -> renameNodeInConfig(document, command)
@@ -352,6 +355,69 @@ class TopicTreeSyncOrchestratorService(
         return when (updated) {
             is TopicGatewayResult.Success -> successMutation(updated.value, derivedOps)
             is TopicGatewayResult.Failure -> updated
+        }
+    }
+
+    private fun addFolderToConfig(
+        document: MkDocsConfigDocument,
+        command: AddFolderTopicNodeCommand,
+    ): TopicGatewayResult<ConfigMutationResult> {
+        if (command.title.isBlank() || command.orderIndex < 0) {
+            return configFailure("Folder title/order is invalid")
+        }
+
+        if (command.parentNodeId != ROOT_NODE_ID) {
+            val parent = resolveNodeContext(document.nav, command.parentNodeId)?.node
+                ?: return configFailure("Cannot locate parent node '${command.parentNodeId}' in config nav")
+            if (parent.externalUrl != null) {
+                return configFailure("Cannot add folder under external link '${parent.nodeId}'")
+            }
+        }
+
+        val parentPreparation = when (
+            val prepared = prepareParentForChildInsert(
+                document = document,
+                parentNodeId = command.parentNodeId,
+                requestedOrderIndex = command.orderIndex,
+            )
+        ) {
+            is TopicGatewayResult.Success -> prepared.value
+            is TopicGatewayResult.Failure -> return prepared
+        }
+
+        val folderNode = TopicNavNode(
+            nodeId = command.nodeId,
+            title = command.title,
+            path = null,
+            externalUrl = null,
+            children = emptyList(),
+        )
+        val folderInserted = when (
+            val inserted = insertNode(
+                document = parentPreparation.document,
+                parentNodeId = command.parentNodeId,
+                node = folderNode,
+                orderIndex = parentPreparation.orderIndex,
+            )
+        ) {
+            is TopicGatewayResult.Success -> inserted.value
+            is TopicGatewayResult.Failure -> return inserted
+        }
+
+        val initialChild = command.initialChild
+        if (initialChild == null) {
+            return successMutation(folderInserted, parentPreparation.fileOperations)
+        }
+
+        val childMutation = addInitialFolderChildToConfig(folderInserted, command.nodeId, initialChild)
+        return when (childMutation) {
+            is TopicGatewayResult.Success -> {
+                successMutation(
+                    document = childMutation.value.document,
+                    fileOperations = parentPreparation.fileOperations + childMutation.value.fileOperations,
+                )
+            }
+            is TopicGatewayResult.Failure -> childMutation
         }
     }
 
@@ -453,6 +519,32 @@ class TopicTreeSyncOrchestratorService(
             }
 
             is TopicGatewayResult.Failure -> replaced
+        }
+    }
+
+    private fun addInitialFolderChildToConfig(
+        document: MkDocsConfigDocument,
+        folderNodeId: String,
+        initialChild: AddFolderInitialChildInput,
+    ): TopicGatewayResult<ConfigMutationResult> {
+        if (initialChild.childTitle.isBlank()) {
+            return configFailure("Folder initial child title is invalid")
+        }
+        val resolvedPath = normalizePath(initialChild.childSourcePath)
+            ?: derivePathForNewNode(document, folderNodeId, initialChild.childTitle)
+        val newChild = TopicNavNode(
+            nodeId = initialChild.childNodeId,
+            title = initialChild.childTitle,
+            path = resolvedPath,
+        )
+        return when (val updated = insertNode(document, folderNodeId, newChild, 0)) {
+            is TopicGatewayResult.Success -> {
+                successMutation(
+                    document = updated.value,
+                    fileOperations = listOf(TopicFileOperation(TopicFileOperationKind.CREATE, resolvedPath)),
+                )
+            }
+            is TopicGatewayResult.Failure -> updated
         }
     }
 
@@ -1022,12 +1114,25 @@ class TopicTreeSyncOrchestratorService(
             return childPath.substringBeforeLast('/', "")
         }
 
-        val ancestorId = parent.parentNodeId ?: return ""
-        return resolveDirectoryForParent(
-            nodes = nodes,
-            parentNodeId = ancestorId,
-            noNavFolderHierarchy = noNavFolderHierarchy,
-        )
+        val ancestorDirectory = parent.parentNodeId
+            ?.let { ancestorId ->
+                resolveDirectoryForParent(
+                    nodes = nodes,
+                    parentNodeId = ancestorId,
+                    noNavFolderHierarchy = noNavFolderHierarchy,
+                )
+            }
+            .orEmpty()
+
+        if (noNavFolderHierarchy && parent.node.externalUrl == null) {
+            val folderSegment = slugifyTitle(parent.node.title)
+            if (folderSegment.isNotBlank()) {
+                val rootBase = if (ancestorDirectory.isBlank()) inferRootBaseDirectory(nodes) else ancestorDirectory
+                return joinPath(rootBase, folderSegment)
+            }
+        }
+
+        return ancestorDirectory
     }
 
     private fun sectionDirectoryFromNodeId(nodeId: String): String? {
@@ -1066,6 +1171,23 @@ class TopicTreeSyncOrchestratorService(
             }
         }
         return null
+    }
+
+    private fun inferRootBaseDirectory(nodes: List<TopicNavNode>): String {
+        val counts = linkedMapOf<String, Int>()
+        collectAllPaths(nodes).forEach { rawPath ->
+            val normalized = normalizePath(rawPath) ?: return@forEach
+            val firstSegment = normalized.substringBefore('/', "")
+            if (firstSegment.isBlank() || !normalized.contains('/')) {
+                return@forEach
+            }
+            counts[firstSegment] = (counts[firstSegment] ?: 0) + 1
+        }
+        return counts.entries
+            .sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key })
+            .firstOrNull()
+            ?.key
+            .orEmpty()
     }
 
     private fun collectAllPaths(nodes: List<TopicNavNode>): Set<String> {

@@ -56,6 +56,7 @@ class PluginCompositionRoot {
         val registry = InMemoryCommandRegistry()
         val commandTypes = listOf(
             TopicTreeCommandType.ADD,
+            TopicTreeCommandType.ADD_FOLDER,
             TopicTreeCommandType.MOVE,
             TopicTreeCommandType.REMOVE,
             TopicTreeCommandType.RENAME,
